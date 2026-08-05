@@ -1,0 +1,12 @@
+# Secrets - never commit real API keys (see litellm/.env.example for the template)
+.env
+litellm/.env
+
+# Runtime output
+*.log
+
+# Local scratch
+scratch*/
+
+# Local-only Claude Code permission cache
+.claude/settings.local.json

@@ -1,0 +1,29 @@
+model_list:
+  # Local model served by LM Studio. Swap the identifier here after `lms load --identifier <name>`.
+  - model_name: lm-studio-local
+    litellm_params:
+      model: openai/local-llama31
+      api_base: http://localhost:1234/v1
+      api_key: none
+
+  # Two entries share one model_name so the router rotates between the API keys
+  # and cools down whichever one hits its rate limit.
+  - model_name: gemini-flash
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: os.environ/GEMINI_KEY_A
+  - model_name: gemini-flash
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: os.environ/GEMINI_KEY_B
+
+router_settings:
+  routing_strategy: simple-shuffle
+  allowed_fails: 1
+  cooldown_time: 60
+
+litellm_settings:
+  num_retries: 2
+  request_timeout: 120
+  fallbacks:
+    - lm-studio-local: ["gemini-flash"]
