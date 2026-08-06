@@ -147,6 +147,14 @@ Session-level utilisation is recorded too, but presented as observation rather t
 proof: the same window is shared with every other project, and no counterfactual was
 ever run.
 
+The first run against an unfamiliar real project corrected it a second time. Two
+delegations exited 0 and produced 75 lines that all had to be thrown away — one with a
+syntax error, one a `def test_placeholder(): assert True` stub — and both were counted
+as work saved. `ruti delegate` now parses any Python a delegate wrote and fails the run
+if it does not compile, and `ruti report` counts only successful runs while saying
+plainly that "successful" means the process exited cleanly and the code parses, which
+is a good deal weaker than the work being usable.
+
 ## Choosing a local model
 
 Two hard requirements, and neither correlates with how good the model is at code:

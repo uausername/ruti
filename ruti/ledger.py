@@ -104,7 +104,15 @@ def summarise(events: list[dict[str, Any]]) -> dict[str, Any]:
     log_bytes = sum(e.get("log_bytes", 0) for e in delegations)
     summary_bytes = sum(e.get("summary_bytes", 0) for e in delegations)
     avoided = max(0, log_bytes - summary_bytes)
-    lines_written = sum(e.get("lines_written", 0) for e in delegations)
+
+    # Only successful runs count as work offloaded. A delegate that exits cleanly and
+    # writes something unusable has cost the manager the work twice over, and counting
+    # its lines as a saving inverts the sign of the measurement. Found on a real
+    # project: two runs exited 0, produced 75 lines between them, and every one of
+    # those lines had to be thrown away and written by hand.
+    succeeded = [e for e in delegations if e.get("ok")]
+    lines_written = sum(e.get("lines_written", 0) for e in succeeded)
+    discarded_lines = sum(e.get("lines_written", 0) for e in delegations if not e.get("ok"))
 
     by_tier: dict[str, dict[str, Any]] = {}
     for entry in delegations:
@@ -146,6 +154,7 @@ def summarise(events: list[dict[str, Any]]) -> dict[str, Any]:
         "work_offloaded": {
             "lines_written": lines_written,
             "approx_tokens": lines_written * TOKENS_PER_LINE,
+            "discarded_lines": discarded_lines,
         },
         "transcript_contained": {
             "bytes": avoided,

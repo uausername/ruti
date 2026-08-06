@@ -40,10 +40,11 @@ class Outcome:
     error: str = ""
     substituted: bool = False
     lines_written: int = 0
+    broken_files: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        return self.exit_code == 0 and not self.error
+        return self.exit_code == 0 and not self.error and not self.broken_files
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -55,6 +56,7 @@ class Outcome:
             "duration_s": round(self.duration_s, 1),
             "files_changed": self.files_changed,
             "lines_written": self.lines_written,
+            **({"broken_files": self.broken_files} if self.broken_files else {}),
             "diff_stat": self.diff_stat,
             "log": self.log_path,
             **({"error": self.error} if self.error else {}),
@@ -172,12 +174,57 @@ def run(
     head_after = _git(["rev-parse", "HEAD"], directory)
     if head_before and head_after and head_before != head_after:
         outcome.diff_stat = _git(["diff", "--stat", f"{head_before}..{head_after}"], directory)
-    else:
-        outcome.diff_stat = _git(["diff", "--stat"], directory)
+    elif outcome.files_changed:
+        # Scoped to the delegate's own paths. An unscoped `git diff --stat` reports
+        # every modification in the working tree, so a caller who had uncommitted work
+        # of their own would see it attributed to the delegate -- which is worse than
+        # showing nothing, because it looks like the delegate edited files it was told
+        # not to touch.
+        outcome.diff_stat = _git(["diff", "--stat", "--", *outcome.files_changed], directory)
 
+    outcome.broken_files = _unparsable_python(outcome.files_changed, directory)
     outcome.lines_written = _count_written_lines(outcome.files_changed, directory)
     _record(outcome, log_path)
     return outcome
+
+
+def _iter_written_files(paths: list[str], directory: Path):
+    for entry in paths:
+        target = directory / entry.strip().strip('"')
+        try:
+            candidates = (
+                [p for p in target.rglob("*") if p.is_file()] if target.is_dir() else [target]
+            )
+        except OSError:
+            continue
+        for path in candidates:
+            yield path
+
+
+def _unparsable_python(paths: list[str], directory: Path) -> list[str]:
+    """Python files the delegate wrote that do not parse.
+
+    A delegate can exit 0 having produced a file that cannot even be imported, and
+    then nothing downstream notices: `opencode` reports success, the summary says OK,
+    and the manager moves on. Found this way on a real project -- a test file whose
+    string literal was left unterminated was reported as a clean run.
+
+    Parsing is the cheapest possible check and needs no model, so it belongs here
+    rather than in a verifier subagent. It says nothing about whether the code is
+    *correct* -- only that it is not obviously broken, which is a different and much
+    weaker claim, and the reason a verifier still has a job.
+    """
+    broken = []
+    for path in _iter_written_files(paths, directory):
+        if path.suffix != ".py":
+            continue
+        try:
+            compile(path.read_text(encoding="utf-8", errors="replace"), str(path), "exec")
+        except SyntaxError as exc:
+            broken.append(f"{path.relative_to(directory)}:{exc.lineno}: {exc.msg}")
+        except (OSError, ValueError):
+            continue
+    return broken
 
 
 def _count_written_lines(paths: list[str], directory: Path) -> int:
@@ -194,15 +241,10 @@ def _count_written_lines(paths: list[str], directory: Path) -> int:
     counts and the caller's index is never touched.
     """
     total = 0
-    for entry in paths:
-        target = directory / entry.strip().strip('"')
+    for path in _iter_written_files(paths, directory):
         try:
-            candidates = (
-                [p for p in target.rglob("*") if p.is_file()] if target.is_dir() else [target]
-            )
-            for path in candidates:
-                if path.is_file() and path.stat().st_size < 1_000_000:
-                    total += len(path.read_text(encoding="utf-8", errors="ignore").splitlines())
+            if path.stat().st_size < 1_000_000:
+                total += len(path.read_text(encoding="utf-8", errors="ignore").splitlines())
         except OSError:
             continue
     return total

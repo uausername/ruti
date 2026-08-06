@@ -317,6 +317,12 @@ def report(days: float | None, as_json: bool) -> None:
            f"[muted](~{w['approx_tokens']:,} tokens at {ledger.TOKENS_PER_LINE}/line)[/muted]")
     ui.say("  [muted]had the manager written these, every line would have passed through "
            "its context as tool input[/muted]")
+    if w.get("discarded_lines"):
+        ui.say(f"  [warn]{w['discarded_lines']:,} further lines came from runs that failed "
+               f"and are not counted[/warn]")
+    ui.say("  [muted]an upper bound: a run counts as successful when the process exited "
+           "cleanly and any Python it wrote parses, which is weaker than the work being "
+           "usable[/muted]")
 
     ui.heading("Delegate transcript kept in logs")
     ui.say(f"  emitted {t['delegate_output_bytes'] / 1024:.0f} KB, "
@@ -479,6 +485,10 @@ def delegate(model: str, task: str | None, task_file: str | None, directory: str
                f"({outcome.error or f'exit {outcome.exit_code}'}) after {outcome.duration_s:.0f}s")
     if outcome.files_changed:
         ui.say("  changed: " + ", ".join(outcome.files_changed))
+    if outcome.broken_files:
+        ui.warn("  the delegate exited cleanly but left Python that does not parse:")
+        for entry in outcome.broken_files:
+            ui.say(f"    [bad]{ui.literal(entry)}[/bad]")
     if outcome.diff_stat:
         for line in outcome.diff_stat.splitlines():
             ui.say(f"  [muted]{ui.literal(line)}[/muted]")
