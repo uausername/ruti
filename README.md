@@ -54,6 +54,7 @@ Claude Code  (subscription, OAuth, untouched)
      ├── ruti delegate   → runs opencode, returns a summary instead of a transcript
      ├── ruti model use  → loads/evicts local models, sized to actually fit the GPU
      ├── ruti provider   → adds API providers, testing the key before writing anything
+     ├── ruti report     → whether any of this is actually paying for itself
      └── ruti doctor     → finds the failures that are otherwise silent
                     │
                     ▼
@@ -121,6 +122,30 @@ ruti install --apply
 # 7. Check
 ruti doctor
 ```
+
+## Does it actually save anything?
+
+`ruti report` answers that from a ledger it keeps as it goes, rather than asking you to
+take the premise on faith.
+
+```
+Work the manager did not have to type
+  88 lines written by delegates  (~1,056 tokens at 12/line)
+
+Delegate transcript kept in logs
+  emitted 2 KB, summarised to 2 KB, 0 KB never read
+```
+
+Building this measurement immediately corrected the design. The original claim was that
+the saving came from containing `opencode`'s verbose output — measurement showed that
+output is terse (five files created produced 559 bytes of stdout), so containing it is
+worth very little. The saving that *is* real is the generated code never passing
+through the manager's context on its way to disk. The report leads with that number
+because it's the one that holds up.
+
+Session-level utilisation is recorded too, but presented as observation rather than
+proof: the same window is shared with every other project, and no counterfactual was
+ever run.
 
 ## Choosing a local model
 

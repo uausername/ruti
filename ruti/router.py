@@ -295,6 +295,18 @@ def rank(task: Task, snapshot: quota.Quota | None = None) -> dict[str, Any]:
     )
     rejected = [c for c in candidates if not c.eligible]
 
+    # Recorded so the report can later say whether the ranking was actually followed.
+    # A router whose advice is routinely ignored is worth knowing about.
+    from . import ledger
+
+    ledger.record(
+        "route",
+        kind=task.kind, files=task.files, loc=task.loc,
+        band=snapshot.band,
+        recommended=eligible[0].name if eligible else None,
+        eligible=len(eligible),
+    )
+
     return {
         "quota": {
             "band": snapshot.band,

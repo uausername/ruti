@@ -15,6 +15,7 @@ names the model that really answered. So we ask, before sending the work.
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +39,7 @@ class Outcome:
     tail: str = ""
     error: str = ""
     substituted: bool = False
+    lines_written: int = 0
 
     @property
     def ok(self) -> bool:
@@ -52,6 +54,7 @@ class Outcome:
             "exit_code": self.exit_code,
             "duration_s": round(self.duration_s, 1),
             "files_changed": self.files_changed,
+            "lines_written": self.lines_written,
             "diff_stat": self.diff_stat,
             "log": self.log_path,
             **({"error": self.error} if self.error else {}),
@@ -66,7 +69,6 @@ def who_answers(model: str, timeout: float = 30.0) -> str | None:
     request still succeeds, so nothing downstream notices -- including the manager,
     which will happily keep routing "local, private" work to a remote provider.
     """
-    import json
     import urllib.error
     import urllib.request
 
@@ -173,4 +175,58 @@ def run(
     else:
         outcome.diff_stat = _git(["diff", "--stat"], directory)
 
+    outcome.lines_written = _count_written_lines(outcome.files_changed, directory)
+    _record(outcome, log_path)
     return outcome
+
+
+def _count_written_lines(paths: list[str], directory: Path) -> int:
+    """Lines the delegate produced -- the work the manager did not have to emit itself.
+
+    This is the honest measure of what delegation saves, and it is not the one the
+    design originally assumed. `opencode`'s own output turned out to be terse: five
+    files created produced barely half a kilobyte of stdout, so "containing the
+    transcript" saves very little. What it genuinely avoids is the generated code
+    passing through the manager's context on the way to disk, which for a tool-using
+    model is the bulk of what it would have spent.
+
+    Counted from the files themselves rather than from git, so an untracked new file
+    counts and the caller's index is never touched.
+    """
+    total = 0
+    for entry in paths:
+        target = directory / entry.strip().strip('"')
+        try:
+            candidates = (
+                [p for p in target.rglob("*") if p.is_file()] if target.is_dir() else [target]
+            )
+            for path in candidates:
+                if path.is_file() and path.stat().st_size < 1_000_000:
+                    total += len(path.read_text(encoding="utf-8", errors="ignore").splitlines())
+        except OSError:
+            continue
+    return total
+
+
+def _record(outcome: Outcome, log_path: Path) -> None:
+    """File what this run produced and what the manager was spared."""
+    from . import ledger
+
+    try:
+        log_bytes = log_path.stat().st_size if log_path.exists() else 0
+    except OSError:
+        log_bytes = 0
+
+    alias = outcome.model_requested.split("/")[-1]
+    ledger.record(
+        "delegation",
+        model=outcome.model_requested,
+        tier="local" if alias.startswith("local-") else "remote",
+        ok=outcome.ok,
+        substituted=outcome.substituted,
+        duration_s=round(outcome.duration_s, 1),
+        files_changed=len(outcome.files_changed),
+        lines_written=outcome.lines_written,
+        log_bytes=log_bytes,
+        summary_bytes=len(json.dumps(outcome.summary())),
+    )

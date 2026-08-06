@@ -18,6 +18,7 @@ configured backend, so a stopped LM Studio makes it hang rather than answer.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -127,6 +128,67 @@ def local_entry(identifier: str) -> dict[str, Any]:
             "api_key": "none",
         },
     }
+
+
+def sync_opencode(names: list[str], *, live: bool = True) -> list[Path]:
+    """Rewrite OpenCode's model map so every routable alias is selectable.
+
+    Without this a provider can be registered, served by the proxy, and still fail
+    under `opencode` with an opaque server error -- because OpenCode only offers models
+    its own config declares. Both the repo copy and the installed one are written; a
+    drift between them is what made this fail quietly the first time.
+    """
+    from .config import REPO_ROOT
+
+    targets = [REPO_ROOT / "opencode" / "opencode.json"]
+    if live:
+        targets.append(Path.home() / ".config" / "opencode" / "opencode.json")
+
+    written = []
+    for path in targets:
+        try:
+            config = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except (json.JSONDecodeError, OSError):
+            continue
+        config.setdefault("$schema", "https://opencode.ai/config.json")
+        providers = config.setdefault("provider", {})
+        router = providers.setdefault("ruti-router", {
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "ruti LiteLLM router",
+            "options": {"baseURL": f"{PROXY_BASE}/v1", "apiKey": "not-used-locally"},
+        })
+        router["models"] = {name: {"name": _pretty(name)} for name in sorted(names)}
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        written.append(path)
+    return written
+
+
+def _pretty(alias: str) -> str:
+    if alias.startswith("local-"):
+        return f"{alias.removeprefix('local-').replace('-', ' ').title()} (local)"
+    return alias.replace("-", " ").title()
+
+
+def routable_aliases() -> list[str]:
+    """Every model name the proxy can route to, from the proxy if it is up."""
+    served = served_models()
+    if served:
+        return served
+
+    # Proxy down: fall back to what the configuration declares.
+    names: list[str] = []
+    for path in (LITELLM_CONFIG, *INCLUDES):
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        for entry in data.get("model_list") or []:
+            name = entry.get("model_name")
+            if name and name not in names:
+                names.append(name)
+    return names
 
 
 def liveliness(timeout: float = 5.0) -> bool:

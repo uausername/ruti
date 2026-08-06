@@ -73,6 +73,7 @@ def desired_settings(current: dict[str, Any]) -> dict[str, Any]:
     for event, module, timeout in (
         ("UserPromptSubmit", "ruti.hooks.user_prompt_submit", 10),
         ("SessionStart", "ruti.hooks.session_start", 25),
+        ("SessionEnd", "ruti.hooks.session_end", 10),
     ):
         others = [
             entry for entry in hooks.get(event, [])

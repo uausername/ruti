@@ -45,9 +45,28 @@ def build_report() -> tuple[str, str] | None:
     return user_message, model_context
 
 
+def _mark_start() -> None:
+    """Record where the window stood when this session began."""
+    from ruti import ledger, quota
+
+    snapshot = quota.load()
+    ledger.record(
+        "session_start",
+        five_hour=snapshot.five_hour.used_percentage if snapshot.five_hour else None,
+        seven_day=snapshot.seven_day.used_percentage if snapshot.seven_day else None,
+        band=snapshot.band,
+        freshness=snapshot.freshness,
+    )
+
+
 def main() -> int:
     try:
         sys.stdin.read()
+    except Exception:
+        pass
+
+    try:
+        _mark_start()
     except Exception:
         pass
 

@@ -8,7 +8,7 @@ from . import delegate as delegate_mod
 from . import doctor as doctor_mod
 from . import install as install_mod
 from . import providers as providers_mod
-from . import lmstudio, litellm_cfg, planner, router, tls, ui, vram
+from . import ledger, lmstudio, litellm_cfg, planner, router, tls, ui, vram
 from .config import ensure_dirs, file_lock, load_dotenv
 
 
@@ -172,11 +172,16 @@ def models_sync(as_json: bool) -> None:
 
     litellm_cfg.write_generated(entries)
     wired = litellm_cfg.wire_include()
+    # OpenCode only offers models its own config declares, so a model that is served by
+    # the proxy but missing here fails under `opencode` with an opaque server error.
+    written = litellm_cfg.sync_opencode(litellm_cfg.routable_aliases())
 
     if as_json:
-        ui.emit_json({"models": names, "include_added": wired})
+        ui.emit_json({"models": names, "include_added": wired,
+                      "opencode_updated": [str(p) for p in written]})
         return
     ui.ok(f"wrote {len(names)} local entries: {', '.join(names)}")
+    ui.ok(f"updated {len(written)} OpenCode config(s) with every routable alias")
     if wired:
         ui.ok("added the `include:` line to config.yaml -- restart the proxy once to pick it up")
     else:
@@ -252,6 +257,77 @@ def model_use(key: str, context: int | None, min_context: int, ttl: int | None,
         )
         if report["evicted"]:
             ui.say(f"  [muted]unloaded: {', '.join(report['evicted'])}[/muted]")
+
+
+@main.command()
+@click.option("--days", type=float, default=None, help="Only count the last N days.")
+@click.option("--json", "as_json", is_flag=True)
+def report(days: float | None, as_json: bool) -> None:
+    """Show what delegation has actually bought you."""
+    events = ledger.read_events(since_days=days)
+    stats = ledger.summarise(events)
+
+    if as_json:
+        ui.emit_json(stats)
+        return
+    if not events:
+        ui.say("[muted]nothing recorded yet -- the ledger fills as you delegate[/muted]")
+        return
+
+    d = stats["delegations"]
+    w, t, s = stats["work_offloaded"], stats["transcript_contained"], stats["sessions"]
+
+    ui.heading("Delegations")
+    if not d["total"]:
+        ui.say("  [muted]none yet[/muted]")
+    else:
+        ui.say(f"  {d['total']} run, {d['failed']} failed")
+        if d["substituted"]:
+            ui.warn(f"  {d['substituted']} were silently answered by a fallback provider "
+                    "-- work you routed locally did not stay local")
+        grid = ui.table("TIER", "RUNS", "FAILED", "TOTAL TIME", "LINES WRITTEN")
+        for tier, entry in sorted(d["by_tier"].items()):
+            grid.add_row(tier, str(entry["runs"]), str(entry["failed"]),
+                         f"{entry['seconds']:.0f}s", f"{entry['lines']:,}")
+        ui.console.print(grid)
+
+    ui.heading("Work the manager did not have to type")
+    ui.say(f"  [ok]{w['lines_written']:,} lines written by delegates[/ok]  "
+           f"[muted](~{w['approx_tokens']:,} tokens at {ledger.TOKENS_PER_LINE}/line)[/muted]")
+    ui.say("  [muted]had the manager written these, every line would have passed through "
+           "its context as tool input[/muted]")
+
+    ui.heading("Delegate transcript kept in logs")
+    ui.say(f"  emitted {t['delegate_output_bytes'] / 1024:.0f} KB, "
+           f"summarised to {t['summary_bytes'] / 1024:.0f} KB, "
+           f"[ok]{t['bytes'] / 1024:.0f} KB never read[/ok]")
+    ui.say("  [muted]measurement corrected an assumption here: opencode's own output is "
+           "terse, so containing it saves far less than the generated code does[/muted]")
+
+    if stats["routes"]["total"]:
+        ui.heading("Routing")
+        ui.say(f"  {stats['routes']['total']} rankings requested")
+
+    ui.heading("Window utilisation per session")
+    if s["with_usable_quota_readings"] < 2:
+        ui.say(f"  [muted]{s['seen']} session(s) seen, {s['with_usable_quota_readings']} with "
+               "usable readings at both ends. Needs a few more before the comparison "
+               "means anything.[/muted]")
+    else:
+        with_d = s["mean_five_hour_spend_with_delegation"]
+        without = s["mean_five_hour_spend_without"]
+        ui.say(f"  delegating    : {with_d:.1f} points per session  ({s['counted_with']} sessions)"
+               if with_d is not None else "  delegating    : no data yet")
+        ui.say(f"  not delegating: {without:.1f} points per session  ({s['counted_without']} sessions)"
+               if without is not None else "  not delegating: no data yet")
+    if s["spanning_a_reset_excluded"]:
+        ui.say(f"  [muted]{s['spanning_a_reset_excluded']} session(s) excluded for spanning a "
+               "window reset[/muted]")
+
+    ui.say("")
+    ui.say("[muted]The two figures above are direct measurements. The utilisation numbers are "
+           "not: the same window is shared with every other project, and no counterfactual "
+           "was ever run, so they are observations rather than attribution.[/muted]")
 
 
 @main.command()
@@ -515,7 +591,13 @@ def provider_add(provider_name: str | None, model: str | None, alias: str | None
     litellm_cfg.write_providers(providers_mod.litellm_entries(registry))
     litellm_cfg.wire_include()
 
-    ui.ok(f"{alias} registered -- restart the proxy to route to it "
+    # Declare it to OpenCode as well. A model the proxy serves but OpenCode has never
+    # heard of fails with an opaque "Unexpected server error" that says nothing about
+    # the actual cause.
+    aliases = sorted(set(litellm_cfg.routable_aliases()) | {alias})
+    litellm_cfg.sync_opencode(aliases)
+
+    ui.ok(f"{alias} registered in LiteLLM and OpenCode -- restart the proxy to route to it "
           "(`Stop-ScheduledTask`/`Start-ScheduledTask -TaskName RutiLiteLLM`)")
 
 

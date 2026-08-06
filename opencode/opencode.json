@@ -9,9 +9,21 @@
         "apiKey": "not-used-locally"
       },
       "models": {
-        "local-qwen3-4b": { "name": "Local Qwen3 4B (LM Studio)" },
-        "local-llama-31-8b": { "name": "Local Llama 3.1 8B (LM Studio)" },
-        "gemini-flash": { "name": "Gemini Flash" }
+        "gemini-flash": {
+          "name": "Gemini Flash"
+        },
+        "gemini-flash-lite": {
+          "name": "Gemini Flash Lite"
+        },
+        "local-llama-31-8b": {
+          "name": "Llama 31 8B (local)"
+        },
+        "local-qwen25-coder-14b": {
+          "name": "Qwen25 Coder 14B (local)"
+        },
+        "local-qwen3-4b": {
+          "name": "Qwen3 4B (local)"
+        }
       }
     }
   }
