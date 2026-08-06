@@ -5,6 +5,17 @@ litellm/.env
 # Runtime output
 *.log
 
+# Rebuilt from this machine's state by `ruti models sync` and `ruti provider add`.
+# start-litellm.ps1 stubs them on a fresh clone so the include: never dangles.
+litellm/models.generated.yaml
+litellm/providers.generated.yaml
+
+# Python packaging
+__pycache__/
+*.egg-info/
+build/
+dist/
+
 # Local scratch
 scratch*/
 

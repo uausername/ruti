@@ -1,50 +1,92 @@
-# Copy into ~/.claude/CLAUDE.md (or append to your existing one).
-# This is what actually makes the delegation happen - without it, Claude Code has no
-# reason to shell out to `opencode` instead of writing the code itself.
+# Append to ~/.claude/CLAUDE.md, or install it with `ruti install --claude-md`.
+# Without this Claude Code has no reason to prefer a delegate over doing the work itself.
 
-## Delegate implementation-heavy work to conserve Pro subscription quota
+## Routing implementation work
 
-This machine runs a local router (`C:\mycode\ruti`) so you can offload token-heavy work to
-non-Anthropic-billed backends without leaving the current session. `opencode` talks to a
-LiteLLM proxy on `http://localhost:4000`, which routes to a local LM Studio model and falls
-back to Gemini (rotating between two API keys). The proxy auto-starts at logon via the
-`RutiLiteLLM` scheduled task.
+This machine runs `ruti` (`C:\mycode\ruti`), which knows what models are available
+locally and remotely, how much of the Claude subscription window is left, and what
+each option costs. Claude Code stays exactly as it is — same subscription, same
+session — and gains a way to hand off work that does not need its judgement.
 
-Default to delegating rather than writing everything yourself when a task is substantial
-implementation work: generating boilerplate, repetitive multi-file edits, straightforward
-refactors, or any single self-contained chunk of code generation that doesn't require deep
-back-and-forth judgment. Use the Bash tool:
+**The manager must not run out of budget.** If this session hits the five-hour limit,
+nothing else gets assigned any work either. There is no paid overage on this account,
+so the limit is a hard stop. Protecting the manager's remaining budget takes priority
+over finishing any individual task quickly.
 
-```
-opencode run --model ruti-router/lm-studio-local "<precise, self-contained instructions>"
-opencode run --model ruti-router/gemini-flash "<precise, self-contained instructions>"
-```
+### First step of any substantial task
 
-`opencode run` writes files itself, so run it from the directory the work belongs in and
-review the resulting diff — you stay responsible for correctness. Prefer the local model for
-routine work; switch to `gemini-flash` when the task needs stronger reasoning or a bigger
-context than the local model's window.
-
-Keep for yourself (do not delegate): planning and architecture decisions, anything requiring
-back-and-forth exploration of the codebase first, security-sensitive code, and final review.
-
-The Bash tool's default timeout is 2 minutes and local-model runs regularly exceed it; pass an
-explicit longer `timeout`, or let Claude Code background the command and poll it, rather than
-assuming it failed.
-
-If a delegated call fails because the local model isn't loaded or the proxy isn't running, do
-the work yourself instead of retrying repeatedly.
-
-### Swapping the local model
-
-Only one model fits in this machine's 6 GB of VRAM at a time. To change it:
+Classify the task, then ask for a ranking. Classification is yours; the facts are not.
 
 ```
-lms unload --all
-lms load <model> --gpu max --context-length 32768 --identifier <name>
+ruti route --kind implement --files 12 --loc 800 --repo-context large --json
 ```
 
-Then point `model:` in `C:\mycode\ruti\litellm\config.yaml` at `openai/<name>` and restart the
-proxy (`Stop-ScheduledTask`/`Start-ScheduledTask -TaskName RutiLiteLLM`). Note that not every
-model handles agentic tool-calling reliably — Qwen2.5-Coder emitted tool calls as plain text
-here, while Llama-3.1-8B works.
+`--kind` is one of `boilerplate`, `implement`, `refactor`, `debug`, `analyze`,
+`review`, `security`. The output ranks eligible executors, states why each was ruled
+out, and gives the exact command to run.
+
+Skip the call when the task is obviously small — under ~40 lines in one or two files.
+Routing that costs a tool call to be told "just write it" is itself a waste.
+
+### Delegating
+
+Never call `opencode` directly. Use:
+
+```
+ruti delegate --model <alias> --dir <path> --task "<complete brief>" --json
+```
+
+It runs the delegate under a timeout, keeps the verbose output in a log file, and
+returns a short summary — exit code, files changed, `git diff --stat`. That containment
+is where the saving actually comes from: **the subscription burn is driven by context
+length**, so the win is not that the delegate is cheaper, it is that its output never
+enters this window.
+
+It also checks which model really answered. If it reports `substituted: true`, a
+backend is down and LiteLLM's fallback took the request — work meant to stay on this
+machine went to a remote provider instead. Stop and run `ruti doctor --fix`.
+
+For a large delegation, hand the run to the `delegate-runner` agent instead, and the
+resulting diff to `delegate-verifier` when it exceeds ~3 files or ~200 lines. Below
+that, read the diff yourself; two subagents for a small change cost more than they save.
+
+### What stays in this session
+
+Planning and architecture. Anything needing back-and-forth exploration of the codebase
+first. Security-sensitive code. Final review of anything a delegate produced. `ruti
+route` already refuses to delegate `security` and `review` work — that is policy, not
+a scoring accident.
+
+### Budget bands
+
+A hook injects the current band on each prompt, so act on what it says rather than
+guessing. In outline: **GREEN** — delegate bulk generation freely. **YELLOW** —
+delegate aggressively, drop effort for planning. **ORANGE** — no Opus, everything
+mechanical goes to a non-Anthropic executor, no speculative repo exploration.
+**RED** — finish what is open, write a handoff, warn the user. **CRITICAL** — stop.
+**UNKNOWN** — the reading is stale; assume the window is mostly spent.
+
+Anthropic subagents are legitimate executors, but they draw on the *same* window. A
+Haiku subagent is worth spawning because its context stays out of this one, not
+because its tokens are free.
+
+### Local models
+
+`ruti model use <key>` loads a model, deciding for itself whether to load alongside or
+evict, sizing the context to fit the GPU, and measuring the result. Do not pass a
+context length unless there is a reason to: asking for more than fits does not fail,
+it spills into system memory and runs an order of magnitude slower.
+
+Two facts worth carrying: `opencode` sends an **8095-token system prompt** before any
+task text, so a model with a smaller window cannot run it at all — it fails, and on
+the way it may claim to have written files it never touched. And a model that cannot
+emit structured tool calls cannot drive `opencode` regardless of how good it is at
+code; `ruti route` gates on both.
+
+### When something is wrong
+
+`ruti doctor` checks the failures that are otherwise silent — intercepted TLS, a
+stopped LM Studio server, a model list that drifted from disk, a proxy listening on
+every interface. `ruti doctor --fix` repairs what it safely can. If a delegation fails
+twice for the same reason, do the work yourself rather than retrying: a retry loop
+costs more turns than the delegation would have saved.

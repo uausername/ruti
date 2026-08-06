@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ruti"
+version = "2.0.0"
+description = "Keeps Claude Code as the manager and routes implementation work to whichever model is cheapest and capable enough"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+
+# Every one of these already ships as a transitive dependency of litellm, which is
+# itself required for the proxy. Install with `pip install -e . --no-deps` so a
+# broken TLS chain (see `ruti doctor --fix-tls`) can never block a reinstall.
+dependencies = [
+    "litellm>=1.95",
+    "click>=8.1",
+    "rich>=13.0",
+    "httpx>=0.27",
+    "PyYAML>=6.0",
+    "prompt_toolkit>=3.0",
+    "certifi",
+]
+
+[project.scripts]
+ruti = "ruti.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["ruti*"]
