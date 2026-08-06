@@ -8,7 +8,7 @@ from . import delegate as delegate_mod
 from . import doctor as doctor_mod
 from . import install as install_mod
 from . import providers as providers_mod
-from . import ledger, lmstudio, litellm_cfg, planner, router, tls, ui, vram
+from . import ledger, lmstudio, litellm_cfg, planner, quota, router, tls, ui, vram
 from .config import ensure_dirs, file_lock, load_dotenv
 
 
@@ -28,13 +28,25 @@ def main() -> None:
 @main.command()
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
 def status(as_json: bool) -> None:
-    """One screen: GPU, local models, proxy health."""
+    """One screen: subscription budget, GPU, local models, proxy health."""
+    snapshot = quota.load()
     gpu = vram.primary_gpu()
     server_up = lmstudio.server_running() if lmstudio.available() else False
     loaded = lmstudio.loaded_models() if server_up else []
     proxy_up = litellm_cfg.liveliness()
 
     payload = {
+        "budget": {
+            "band": snapshot.band,
+            "five_hour_used_percentage": (
+                None if snapshot.five_hour is None else snapshot.five_hour.used_percentage
+            ),
+            "seven_day_used_percentage": (
+                None if snapshot.seven_day is None else snapshot.seven_day.used_percentage
+            ),
+            "freshness": snapshot.freshness,
+            "summary": snapshot.summary(),
+        },
         "gpu": None
         if gpu is None
         else {
@@ -61,6 +73,15 @@ def status(as_json: bool) -> None:
     if as_json:
         ui.emit_json(payload)
         return
+
+    # Budget first: it is the constraint every other line is subordinate to. Running out
+    # of it stops all work, whereas a full GPU only costs an executor.
+    ui.heading("Subscription budget")
+    # `summary()` already opens with the band, so it is not repeated here.
+    ui.say(f"  [head]{ui.literal(snapshot.summary())}[/head]")
+    if snapshot.seven_day is not None:
+        ui.say(f"  [muted]{snapshot.seven_day.used_percentage:.0f}% of the 7d window used[/muted]")
+    ui.say(f"  [muted]{ui.literal(quota.BAND_POLICY[snapshot.band]['guidance'])}[/muted]")
 
     ui.heading("GPU")
     if gpu is None:

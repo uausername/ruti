@@ -147,6 +147,17 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
 
 
 def main() -> int:
+    # Claude Code decodes this script's output as UTF-8, but Python on Windows encodes
+    # stdout in the console code page when it is a pipe. The separator below is U+00B7,
+    # which cp1251 happily encodes as a single byte -- and which then arrives as a
+    # replacement character. Say what the encoding is rather than inheriting it.
+    try:
+        # newline="\n" as well: text mode would otherwise append a carriage return that
+        # the interface has no reason to render.
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace", newline="\n")
+    except Exception:
+        pass
+
     # Nothing below may raise: whatever happens, print something printable and exit 0.
     try:
         raw = sys.stdin.read()

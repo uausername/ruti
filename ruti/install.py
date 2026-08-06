@@ -48,6 +48,28 @@ def _python() -> str:
     return sys.executable
 
 
+def _shell_command(module: str) -> str:
+    """A command string for `statusLine`, which -- unlike a hook -- takes no `args`.
+
+    Three Windows-specific traps, each of which fails silently rather than loudly:
+
+    * `statusLine` accepts only `type`, `command`, `padding`, `refreshInterval` and
+      `hideVimModeIndicator`. An `args` array survives being written and is then
+      dropped the next time Claude Code rewrites settings.json itself, leaving
+      `python.exe` to be launched with no arguments -- an interpreter waiting on
+      stdin, printing nothing.
+    * The command runs through Git Bash, which eats unquoted backslashes, so a
+      `C:\\Users\\...` path arrives with its separators removed. Forward slashes only.
+    * This machine's interpreter path contains a space, so it needs quoting. Quotes
+      are added only when needed: without them the string is also valid in PowerShell,
+      which is what Claude Code falls back to where Git Bash is absent.
+    """
+    interpreter = _python().replace("\\", "/")
+    if " " in interpreter:
+        interpreter = f"'{interpreter}'"
+    return f"{interpreter} -m {module}"
+
+
 def _exec_hook(module: str, timeout: int) -> dict[str, Any]:
     # Exec form rather than a shell string: this machine's home directory contains a
     # space, and exec form removes the entire class of quoting bugs.
@@ -63,8 +85,7 @@ def desired_settings(current: dict[str, Any]) -> dict[str, Any]:
 
     updated["statusLine"] = {
         "type": "command",
-        "command": _python(),
-        "args": ["-m", "ruti.statusline"],
+        "command": _shell_command("ruti.statusline"),
         "refreshInterval": 5,
     }
 

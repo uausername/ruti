@@ -83,16 +83,31 @@ BAND_POLICY: dict[str, dict[str, Any]] = {
 @dataclass(frozen=True)
 class Window:
     used_percentage: float
-    resets_at: str | None
+    # Claude Code sends this as Unix epoch seconds. Kept permissive because the value
+    # is also read back from quota.json files written before that was known, which
+    # hold an ISO string instead.
+    resets_at: str | int | float | None
 
     @property
     def resets_in_seconds(self) -> float | None:
-        if not self.resets_at:
+        """Seconds until the window resets, or None if that cannot be determined.
+
+        Never raises. The band, and therefore every routing decision, is derived from
+        this: a reset timestamp in an unexpected shape must degrade to "unknown", not
+        take the status line and the router down with it.
+        """
+        if self.resets_at in (None, ""):
             return None
-        try:
-            when = datetime.fromisoformat(self.resets_at.replace("Z", "+00:00"))
-        except ValueError:
-            return None
+        raw = self.resets_at
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            when = datetime.fromtimestamp(float(raw), timezone.utc)
+        else:
+            try:
+                when = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
         return (when - datetime.now(timezone.utc)).total_seconds()
 
 

@@ -177,6 +177,18 @@ Things that cost time here, so they don't cost you any:
   independently, and a stopped server means every "local" request quietly answers from
   a remote fallback instead. That is indistinguishable from success unless you look at
   which model replied — which `ruti delegate` now does.
+- **The status line has three Windows traps, and all three fail silently.** It accepts
+  only `type`, `command`, `padding`, `refreshInterval` and `hideVimModeIndicator` — an
+  `args` array is written happily and then dropped the next time Claude Code rewrites
+  `settings.json` itself, leaving a bare `python.exe` waiting on stdin. The command runs
+  through Git Bash, which eats backslashes, so a `C:\Users\...` path arrives with its
+  separators gone. And Python encodes stdout in the console code page, so a `·`
+  separator reaches the interface as a replacement character. None of this errors: the
+  status line is simply blank, quota stays `UNKNOWN`, and the router quietly behaves as
+  if the window were nearly spent. `ruti doctor` now checks for all three.
+- **`rate_limits.*.resets_at` is Unix epoch seconds, not an ISO string.** Worth stating
+  because the fabricated test payload used to build this feature had it the other way
+  round, so the mistake survived until the first real reading arrived.
 - **`lms load --estimate-only` is a stub.** It returns the model's file size, unchanged
   between 4096 and 131072 tokens of context and between `--gpu off` and `--gpu max`.
   `ruti` computes the KV cache from GGUF headers instead, then corrects itself against

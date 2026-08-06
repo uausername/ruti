@@ -336,7 +336,82 @@ def _check_env_permissions() -> Check:
     return Check("secrets", OK, f".env restricted to {len(sids)} privileged principal(s)")
 
 
+def _check_statusline() -> Check:
+    """Is the status line registered, and is it actually producing readings?
+
+    This check exists because its absence cost a day. The status line is the only local
+    source of quota data, and when it does not run, nothing breaks -- `ruti route` just
+    reports UNKNOWN forever and quietly routes as if the window were nearly spent. The
+    two ways it silently dies are both checked here: a config Claude Code rewrote (it
+    drops the unsupported `args` key, leaving a bare interpreter that prints nothing),
+    and a config that looks right but has never produced a reading.
+    """
+    from . import install, quota
+
+    try:
+        settings = json.loads(install.SETTINGS.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return Check("statusline", BAD, "settings.json is missing or unreadable",
+                     detail="run `ruti install --apply`")
+
+    configured = settings.get("statusLine") or {}
+    command = str(configured.get("command") or "")
+
+    if "ruti.statusline" not in command:
+        return Check(
+            "statusline", BAD,
+            "ruti's status line is not registered" if not command
+            else "statusLine points somewhere else",
+            detail=(
+                "without it there is no quota reading at all, and routing falls back to "
+                "assuming the window is nearly spent"
+                + (" -- note `args` is not a supported statusLine field and is dropped "
+                   "by Claude Code" if configured.get("args") else "")
+            ),
+            fix=lambda: "registered ruti.statusline" if _fix_install() else "",
+            fix_label="register it",
+        )
+
+    if "\\" in command:
+        return Check(
+            "statusline", BAD, "the status line command contains backslashes",
+            detail=("Claude Code runs it through Git Bash, which consumes them as escapes; "
+                    "the command then fails with no visible error. Use forward slashes."),
+            fix=lambda: "rewrote the command with forward slashes" if _fix_install() else "",
+            fix_label="rewrite it",
+        )
+
+    snapshot = quota.load()
+    if snapshot.five_hour is None:
+        return Check(
+            "statusline", WARN, "registered, but no quota reading has ever arrived",
+            detail=("restart Claude Code so it picks the setting up; if it is already "
+                    "running, the reading appears on the next repaint"),
+        )
+    if snapshot.freshness in ("unknown", "never"):
+        return Check(
+            "statusline", WARN,
+            f"last reading is stale ({snapshot.freshness})",
+            detail="normal between sessions; routing assumes ORANGE until it refreshes",
+        )
+    return Check(
+        "statusline", OK,
+        f"live: {snapshot.five_hour.used_percentage:.0f}% of the 5h window used",
+    )
+
+
+def _fix_install() -> bool:
+    from . import install
+
+    changes = [c for c in install.plan() if c[0] == "settings.json"]
+    if not changes:
+        return False
+    install.apply(changes)
+    return True
+
+
 CHECKS = (
+    _check_statusline,
     _check_tls,
     _check_proxy_bind,
     _check_proxy_alive,
