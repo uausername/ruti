@@ -100,7 +100,17 @@ def status(as_json: bool) -> None:
         ui.warn("server up, but no model is loaded")
     else:
         for model in loaded:
-            ui.ok(f"{model.identifier}  ctx {model.loaded_context}  ({model.status}, {model.queued} queued)")
+            ui.ok(f"{model.identifier}  ctx {model.loaded_context}  "
+                  f"({model.status}, {model.queued} queued)")
+            # Whether and when the card frees itself. Without this the only way to find
+            # out a model is squatting on the GPU is to try to start something else and
+            # have it fail.
+            if model.ttl_ms:
+                ui.say(f"  [muted]holds ~{planner.footprint(model)} MiB; releases it "
+                       f"after {model.ttl_ms // 60000} min idle[/muted]")
+            else:
+                ui.warn(f"  no idle timeout -- holds the GPU until "
+                        f"`ruti model unload {model.identifier}`")
 
     ui.heading("LiteLLM proxy")
     if proxy_up:
@@ -222,7 +232,8 @@ def model() -> None:
 @click.option("--context", "-c", type=int, default=None, help="Preferred context window.")
 @click.option("--min-context", type=int, default=vram.CONTEXT_FLOOR,
               help="Refuse rather than load below this window.")
-@click.option("--ttl", type=int, default=None, help="Auto-unload after N idle seconds.")
+@click.option("--ttl", type=int, default=lmstudio.DEFAULT_TTL_SECONDS, show_default=True,
+              help="Auto-unload after N idle seconds; 0 to stay resident indefinitely.")
 @click.option("--dry-run", is_flag=True, help="Show the plan without executing it.")
 @click.option("--json", "as_json", is_flag=True)
 def model_use(key: str, context: int | None, min_context: int, ttl: int | None,
@@ -258,7 +269,7 @@ def model_use(key: str, context: int | None, min_context: int, ttl: int | None,
             ui.ok(f"plan: {plan.action} at context {plan.context}")
             return
 
-        report = planner.execute(plan, ttl_seconds=ttl)
+        report = planner.execute(plan, ttl_seconds=ttl or None)
 
     if report.get("spilled"):
         ui.warn("measured VRAM is well under the prediction while the card is full -- "

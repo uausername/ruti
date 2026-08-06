@@ -74,6 +74,7 @@ manager is always aware of its own budget without spending a tool call to ask.
 | **Your session is never interrupted** | Claude Code runs unmodified — no env vars, no proxy in front of it |
 | **Local work is free and private** | Code never leaves the machine when routed to LM Studio |
 | **Model swaps are automatic** | `ruti model use` decides load-alongside vs evict, sizes the context to the GPU, and measures the result |
+| **The GPU comes back** | A loaded model releases its VRAM after 15 minutes idle, so it never quietly blocks a game; `ruti model unload` frees it now |
 | **Keys are tested before they're saved** | Four stages with *distinguishable* failures — a broken certificate chain never reads as a bad key |
 | **Budget-aware routing** | Five bands from GREEN to CRITICAL, driven by burn rate as well as level |
 | **Silent failures made loud** | A "local" request answered by a remote fallback is reported, not ignored |

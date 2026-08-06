@@ -62,6 +62,7 @@ class Model:
     loaded_context: int | None = None
     status: str | None = None
     queued: int = 0
+    ttl_ms: int | None = None
 
     @property
     def loaded(self) -> bool:
@@ -91,6 +92,7 @@ class Model:
             loaded_context=raw.get("contextLength"),
             status=raw.get("status"),
             queued=int(raw.get("queued") or 0),
+            ttl_ms=raw.get("ttlMs"),
         )
 
 
@@ -110,6 +112,14 @@ def list_models() -> list[Model]:
     """Every model on disk. Works with the server stopped."""
     result = _lms(["ls", "--json"]).check()
     return [Model.from_json(entry) for entry in json.loads(result.stdout or "[]")]
+
+
+# A loaded model holds VRAM until something explicitly frees it, and VRAM is exclusive
+# in a way CPU and system memory are not: a resident model does not slow a game down,
+# it stops it starting. Idling for a quarter of an hour is a good sign the work is over,
+# and reloading is cheap next to a card that stays blocked all evening. Pass `--ttl 0`
+# to keep a model resident indefinitely.
+DEFAULT_TTL_SECONDS = 900
 
 
 def loaded_models() -> list[Model]:
