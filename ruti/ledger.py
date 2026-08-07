@@ -80,6 +80,29 @@ def read_events(since_days: float | None = None) -> list[dict[str, Any]]:
     return events
 
 
+def last_delegation() -> dict[str, Any] | None:
+    """The most recent delegation event, read from the tail so the status line can
+    afford to call this on every repaint without scanning the whole ledger."""
+    if not LEDGER.exists():
+        return None
+    try:
+        with LEDGER.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - 65536))
+            data = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in reversed(data.splitlines()):
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("event") == "delegation":
+            return entry
+    return None
+
+
 def _sessions(events: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
     """Pair up session start/end markers with the delegations in between."""
     by_session: dict[str | None, dict[str, Any]] = {}

@@ -22,9 +22,20 @@ from pathlib import Path
 from typing import Any
 
 from . import proc
-from .config import LOG_DIR, PROXY_BASE, ensure_dirs
+from .config import LOG_DIR, PROXY_BASE, STATE_ROOT, ensure_dirs, write_json
 
 DEFAULT_TIMEOUT = 900.0
+
+# Written while a delegate is running so the status line can say what is executing
+# right now, rather than only what finished last.
+RUNNING_FILE = STATE_ROOT / "running.json"
+
+# Directories a delegate fills as a side effect of running code, never as work. Listed
+# by name rather than by path: they turn up nested as readily as at the top level.
+GENERATED_DIRS = frozenset({
+    "__pycache__", ".git", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox",
+    ".venv", "venv", "node_modules", ".next", "dist", "build", "target", ".gradle",
+})
 
 
 @dataclass
@@ -140,6 +151,7 @@ def run(
     dirty_before = set(_git(["status", "--porcelain"], directory).splitlines())
 
     started = time.monotonic()
+    _mark_running(model, timeout)
     try:
         # `opencode run` has no timeout flag of its own, so the parent has to impose
         # one or a stuck delegate wedges the session indefinitely.
@@ -166,6 +178,7 @@ def run(
         outcome.exit_code = -1
     finally:
         outcome.duration_s = time.monotonic() - started
+        _clear_running()
 
     dirty_after = set(_git(["status", "--porcelain"], directory).splitlines())
     outcome.files_changed = sorted(
@@ -188,9 +201,55 @@ def run(
     return outcome
 
 
+def _mark_running(model: str, timeout: float) -> None:
+    """Announce that a delegate is executing. Never raises: this is only reporting.
+
+    Carries an expiry rather than a pid. If this process is killed outright the marker
+    is never cleared, and a status line that trusted it would claim a delegate is still
+    running for the rest of the session. The run cannot outlive its own timeout, so
+    anything past that is stale by definition.
+    """
+    try:
+        ensure_dirs()
+        write_json(RUNNING_FILE, {
+            "model": model,
+            "started_at": time.time(),
+            "expires_at": time.time() + timeout,
+        })
+    except Exception:
+        pass
+
+
+def _clear_running() -> None:
+    try:
+        RUNNING_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _is_generated(path: Path, directory: Path) -> bool:
+    """Whether any component of `path` is a directory tooling produces on its own."""
+    try:
+        parts = path.relative_to(directory).parts
+    except ValueError:
+        parts = path.parts
+    return any(part in GENERATED_DIRS for part in parts)
+
+
 def _iter_written_files(paths: list[str], directory: Path):
+    """Every file under the delegate's changed paths, minus what tooling generated.
+
+    A delegate that runs the tests it has just written leaves `__pycache__` behind, and
+    git reports the directory as changed like any other. Those files are not work, and
+    counting them inverts the measurement rather than merely blurring it: this
+    project's own first end-to-end delegation recorded 923 lines written for two files
+    containing 155, the difference being compiled bytecode read as though it were
+    source.
+    """
     for entry in paths:
         target = directory / entry.strip().strip('"')
+        if _is_generated(target, directory):
+            continue
         try:
             candidates = (
                 [p for p in target.rglob("*") if p.is_file()] if target.is_dir() else [target]
@@ -198,6 +257,8 @@ def _iter_written_files(paths: list[str], directory: Path):
         except OSError:
             continue
         for path in candidates:
+            if _is_generated(path, directory):
+                continue
             yield path
 
 
@@ -243,10 +304,18 @@ def _count_written_lines(paths: list[str], directory: Path) -> int:
     total = 0
     for path in _iter_written_files(paths, directory):
         try:
-            if path.stat().st_size < 1_000_000:
-                total += len(path.read_text(encoding="utf-8", errors="ignore").splitlines())
+            if path.stat().st_size >= 1_000_000:
+                continue
+            blob = path.read_bytes()
         except OSError:
             continue
+        # A NUL byte is the cheapest reliable "this is not source" signal, and it
+        # catches artefacts an extension list would not think to name. Decoding with
+        # errors="ignore" is what made this necessary: it turns any binary file into a
+        # plausible-looking line count instead of failing loudly enough to skip it.
+        if b"\x00" in blob:
+            continue
+        total += len(blob.decode("utf-8", errors="ignore").splitlines())
     return total
 
 

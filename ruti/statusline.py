@@ -98,10 +98,29 @@ def _refresh_facts() -> dict[str, Any]:
         pass
 
     try:
+        from . import ledger
+
+        facts["last_delegation"] = ledger.last_delegation()
+    except Exception:
+        pass
+
+    try:
         write_json(FACTS_FILE, facts)
     except Exception:
         pass
     return facts
+
+
+def _running_delegate() -> dict[str, Any] | None:
+    """The delegate executing right now, or None if the marker is absent or stale."""
+    from .delegate import RUNNING_FILE
+
+    entry = read_json(RUNNING_FILE, default=None)
+    if not isinstance(entry, dict):
+        return None
+    if time.time() > entry.get("expires_at", 0):
+        return None
+    return entry
 
 
 def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
@@ -135,6 +154,26 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
         segments.append(_colour(f"local:{first['id']}@{first.get('ctx') or '?'}", "36"))
     else:
         segments.append(_colour("local:none", "90"))
+
+    # Read live rather than from the cached facts: a 30-second-old answer to "is a
+    # delegate running right now" is the one thing this segment cannot afford.
+    running = _running_delegate()
+    if running:
+        elapsed = max(0, int(time.time() - running.get("started_at", time.time())))
+        model = str(running.get("model", "?")).split("/")[-1]
+        segments.append(_colour(f"running:{model} {elapsed}s", "33"))
+
+    last = facts.get("last_delegation")
+    if last and not running:
+        # The model that actually answered, not just the one asked for -- a mismatch
+        # here is the fallback substitution delegate.py checks for on every run.
+        requested = str(last.get("model", "?")).split("/")[-1]
+        if last.get("substituted"):
+            segments.append(_colour(f"last:{requested} SUBST", "31"))
+        elif not last.get("ok"):
+            segments.append(_colour(f"last:{requested} FAILED", "31"))
+        else:
+            segments.append(_colour(f"last:{requested}", "36"))
 
     gpu = facts.get("gpu")
     if gpu:
