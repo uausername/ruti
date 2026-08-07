@@ -110,10 +110,17 @@ mkdir "$env:USERPROFILE\.config\opencode"
 cp opencode\opencode.json "$env:USERPROFILE\.config\opencode\opencode.json"
 
 # 5. Proxy at logon
-$action  = New-ScheduledTaskAction -Execute "powershell.exe" `
+# RunLevel Highest matters: litellm/.env is locked down to SYSTEM/Administrators
+# (see `ruti doctor`'s secrets check), and a task registered without it can never
+# read its own keys. Some machines block elevated token duplication for a plain
+# user account outright, even with this set correctly -- if `ruti doctor` still
+# shows the proxy down after logon, `ruti doctor --fix` falls back to a direct
+# elevated launch (one UAC prompt) instead of requiring a rebuild of this task.
+$action    = New-ScheduledTaskAction -Execute "powershell.exe" `
   -Argument '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\mycode\ruti\litellm\start-litellm.ps1"'
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-Register-ScheduledTask -TaskName "RutiLiteLLM" -Action $action -Trigger $trigger -Force
+$trigger   = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
+Register-ScheduledTask -TaskName "RutiLiteLLM" -Action $action -Trigger $trigger -Principal $principal -Force
 Start-ScheduledTask -TaskName "RutiLiteLLM"
 
 # 6. Wire it into Claude Code (previews the diff; --apply writes it, keeping backups)

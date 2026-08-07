@@ -3,10 +3,16 @@
 
 ## Routing implementation work
 
-This machine runs `ruti` (`C:\mycode\ruti`), which knows what models are available
-locally and remotely, how much of the Claude subscription window is left, and what
-each option costs. Claude Code stays exactly as it is — same subscription, same
-session — and gains a way to hand off work that does not need its judgement.
+This machine runs `ruti`, which knows what models are available locally and
+remotely, how much of the Claude subscription window is left, and what each option
+costs. Claude Code stays exactly as it is — same subscription, same session — and
+gains a way to hand off work that does not need its judgement. Day-to-day use
+(`route`/`delegate`/`doctor`) never needs its source location; the command is on
+PATH regardless of clone path, and that path is not the same on every machine. Only
+a task that edits `ruti` itself needs the source, and how it was installed varies
+by machine (pip, pipx, uv, conda, ...) — trace the command instead of assuming a
+package manager: `where ruti` (or `which ruti`) finds the entry point, and `pip
+show ruti` adds the `Editable project location` line when pip put it there.
 
 **The manager must not run out of budget.** If this session hits the five-hour limit,
 nothing else gets assigned any work either. There is no paid overage on this account,

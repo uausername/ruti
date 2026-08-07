@@ -33,6 +33,7 @@ LITELLM_CONFIG = LITELLM_DIR / "config.yaml"
 LITELLM_GENERATED = LITELLM_DIR / "models.generated.yaml"
 LITELLM_PROVIDERS = LITELLM_DIR / "providers.generated.yaml"
 LITELLM_ENV = LITELLM_DIR / ".env"
+LITELLM_START_SCRIPT = LITELLM_DIR / "start-litellm.ps1"
 
 PROXY_BASE = "http://127.0.0.1:4000"
 LMSTUDIO_BASE = "http://127.0.0.1:1234"

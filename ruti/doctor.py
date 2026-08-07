@@ -12,13 +12,16 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
 from . import litellm_cfg, lmstudio, planner, tls
 from .config import (
-    CA_BUNDLE, LITELLM_ENV, LITELLM_GENERATED, REPO_ROOT, load_dotenv,
+    CA_BUNDLE, LITELLM_ENV, LITELLM_GENERATED, LITELLM_START_SCRIPT, REPO_ROOT,
+    SCHEDULED_TASK, load_dotenv,
 )
 
 OK, WARN, BAD = "ok", "warn", "bad"
@@ -81,6 +84,55 @@ def _set_env_var(key: str, value: str) -> None:
             lines.append("")
         lines.append(f"{key}={value}")
     LITELLM_ENV.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _wait_for_liveliness(budget_s: float, *, interval_s: float = 2.0) -> bool:
+    deadline = time.monotonic() + budget_s
+    while time.monotonic() < deadline:
+        if litellm_cfg.liveliness(timeout=2.0):
+            return True
+        time.sleep(interval_s)
+    return litellm_cfg.liveliness(timeout=2.0)
+
+
+def _fix_proxy_start() -> str:
+    """Bring the proxy up, trying the quiet path before the interactive one.
+
+    `schtasks /Run` reports exit code 0 whether or not the triggered instance
+    ever actually launches the action -- on a machine where something blocks
+    elevated token duplication for a plain user account, the instance sits in
+    the Queued state forever and the exit code says nothing about that (found by
+    checking the Task Scheduler operational log: every *other* elevated task on
+    that machine ran as SYSTEM or through a signed Group trigger, never as a
+    plain user account, which is what actually gave the game away). Liveliness
+    is therefore the only trustworthy signal, and a direct elevated launch --
+    the same one the "run this by hand" instructions describe -- is the fallback
+    when the task does not deliver within a few seconds.
+    """
+    from . import proc
+
+    proc.run(["schtasks", "/Run", "/TN", SCHEDULED_TASK], timeout=15.0)
+    if _wait_for_liveliness(12.0):
+        return f"started via the {SCHEDULED_TASK} scheduled task"
+
+    # .env is only readable by SYSTEM/Administrators (see the secrets check
+    # below), so this still needs a real elevated token -- it prompts UAC once
+    # rather than running silently.
+    subprocess.Popen(
+        [
+            "powershell.exe", "-NoProfile", "-WindowStyle", "Hidden", "-Command",
+            "Start-Process powershell -Verb RunAs -ArgumentList "
+            "'-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass',"
+            f"'-File','{LITELLM_START_SCRIPT}'",
+        ],
+        stdin=subprocess.DEVNULL,
+    )
+    if _wait_for_liveliness(20.0):
+        return "the scheduled task never left Queued; launched directly instead (UAC approved)"
+    return (
+        "the scheduled task did not come up, and a direct elevated launch is "
+        "pending -- approve the UAC prompt if one is waiting, then re-run `ruti doctor`"
+    )
 
 
 def _fix_lmstudio_server() -> str:
@@ -170,7 +222,12 @@ def _check_proxy_alive() -> Check:
                      detail=", ".join(served))
     return Check(
         "proxy", BAD, "not responding on /health/liveliness",
-        detail="start it with `Start-ScheduledTask -TaskName RutiLiteLLM`",
+        detail=(
+            f"the {SCHEDULED_TASK} scheduled task should start it at logon; "
+            "`--fix` retries that and falls back to a direct elevated launch "
+            "(one UAC prompt) if the task never leaves the Queued state"
+        ),
+        fix=_fix_proxy_start, fix_label="start the proxy",
     )
 
 
