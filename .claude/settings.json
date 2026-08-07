@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(nvidia-smi --query-gpu=*)",
+      "Bash(where *)",
+      "Bash(ruti status *)",
+      "Bash(ruti route *)",
+      "Bash(ruti models)",
+      "Bash(ruti models --json)"
+    ]
+  }
+}
