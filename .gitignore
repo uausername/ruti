@@ -19,5 +19,9 @@ dist/
 # Local scratch
 scratch*/
 
+# The originating proposal. Kept on disk for reference, deliberately out of the
+# repository: it is a private document and this repository is public.
+docs/*.pdf
+
 # Local-only Claude Code permission cache
 .claude/settings.local.json
