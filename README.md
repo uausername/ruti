@@ -182,6 +182,11 @@ Things that cost time here, so they don't cost you any:
   `certifi` — which is what LiteLLM verifies against. Every provider call fails with
   `CERTIFICATE_VERIFY_FAILED`. `ruti doctor --fix-tls` builds a merged bundle;
   `ruti provider add` reports it as interception rather than blaming your key.
+- **And it breaks git separately.** git does not use `certifi`: Git for Windows ships
+  its own `ca-bundle.crt` and defaults to the openssl backend, so `git push` fails with
+  `unable to get local issuer certificate` while every ruti check is green. Discovered
+  publishing this repository. `ruti doctor` now checks git too, and fixes it by
+  verifying against the Windows certificate store rather than by verifying less.
 - **The LM Studio GUI being open does not mean its server is running.** They start
   independently, and a stopped server means every "local" request quietly answers from
   a remote fallback instead. That is indistinguishable from success unless you look at

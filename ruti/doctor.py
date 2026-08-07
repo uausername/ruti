@@ -336,6 +336,66 @@ def _check_env_permissions() -> Check:
     return Check("secrets", OK, f".env restricted to {len(sids)} privileged principal(s)")
 
 
+def _git_ssl_backend() -> str | None:
+    """The TLS backend git will actually use, or None if git is unavailable."""
+    from . import proc
+
+    try:
+        result = proc.run(["git", "config", "--get", "http.sslBackend"], timeout=10.0)
+    except (proc.ToolNotFound, proc.ToolTimeout):
+        return None
+    # Unset means git's compiled-in default. Git for Windows ships a system gitconfig
+    # that sets openssl explicitly, so an empty answer here means a non-Windows build.
+    return (result.stdout or "").strip().lower() or ""
+
+
+def _fix_git_tls() -> str:
+    from . import proc
+
+    proc.run(
+        ["git", "config", "--global", "http.sslBackend", "schannel"], timeout=15.0
+    ).check()
+    return "set git's global http.sslBackend to schannel (the Windows certificate store)"
+
+
+def _check_git_tls() -> Check:
+    """Does git trust the intercepting root, or does it fail the way everything else did?
+
+    The `tls` check above covers Python, which verifies against certifi. git does not
+    use certifi: Git for Windows ships its own `ca-bundle.crt` and defaults to the
+    openssl backend, so it fails separately, with the same uninformative message, and
+    the earlier check passing says nothing about it. Found while pushing this
+    repository -- `ruti doctor` was entirely green at the time.
+
+    The fix is to verify against the Windows certificate store, which does trust the
+    root, rather than to stop verifying.
+    """
+    backend = _git_ssl_backend()
+    if backend is None:
+        return Check("git-tls", WARN, "git is not on PATH",
+                     detail="cannot check whether it can reach an HTTPS remote")
+    if backend == "schannel":
+        return Check("git-tls", OK, "git verifies through the Windows certificate store")
+
+    # Only a problem when something is actually intercepting; on a clean machine the
+    # bundled roots are fine and there is nothing to fix.
+    found = tls.detect()
+    if not found.intercepted:
+        return Check("git-tls", OK,
+                     f"git uses {backend or 'its default backend'}; nothing is intercepting")
+
+    return Check(
+        "git-tls", BAD,
+        f"git verifies against its own bundle while {found.issuer!r} intercepts TLS",
+        detail=(
+            "`git push` and `git clone` over HTTPS fail with `unable to get local "
+            "issuer certificate`. The Windows certificate store does trust that root, "
+            "so switching backends fixes it without weakening verification"
+        ),
+        fix=_fix_git_tls, fix_label="point git at the Windows certificate store",
+    )
+
+
 def _check_statusline() -> Check:
     """Is the status line registered, and is it actually producing readings?
 
@@ -413,6 +473,7 @@ def _fix_install() -> bool:
 CHECKS = (
     _check_statusline,
     _check_tls,
+    _check_git_tls,
     _check_proxy_bind,
     _check_proxy_alive,
     _check_lmstudio,
