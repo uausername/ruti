@@ -593,7 +593,7 @@ def provider_add(provider_name: str | None, model: str | None, alias: str | None
     alias = alias or click.prompt("Route it through the proxy as", default=model.split("/")[-1])
 
     ui.heading(f"Testing {qualified}")
-    verdict = providers_mod.test_key(name, qualified, key)
+    verdict = providers_mod.test_key(name, qualified, key, api_base=api_base)
     _report(verdict)
 
     if not verdict.usable:
@@ -688,7 +688,9 @@ def provider_test(alias: str | None, as_json: bool) -> None:
             results.append({"alias": record["alias"], "usable": False, "reason": "key missing"})
             continue
         ui.heading(f"{record['alias']} -> {record['model']}")
-        verdict = providers_mod.test_key(record["provider"], record["model"], key)
+        verdict = providers_mod.test_key(
+            record["provider"], record["model"], key, api_base=record.get("api_base")
+        )
         if not as_json:
             _report(verdict)
         results.append({
