@@ -173,6 +173,20 @@ def run(
     except proc.ToolTimeout as exc:
         outcome.error = str(exc)
         outcome.exit_code = -1
+        # Whatever the child printed before it was killed -- often the only clue to
+        # what it was stuck doing (indexing the repo, waiting on a prompt, ...). Write
+        # it to the same log a normal run would have produced rather than leaving no
+        # trace at all.
+        if exc.stdout or exc.stderr:
+            log_path.write_text(
+                f"$ opencode run --model {model}\n\n=== KILLED: {exc} ===\n\n"
+                f"=== stdout (partial) ===\n{exc.stdout}\n"
+                f"=== stderr (partial) ===\n{exc.stderr}\n",
+                encoding="utf-8",
+            )
+            outcome.tail = "\n".join(
+                (exc.stderr or exc.stdout).strip().splitlines()[-20:]
+            )
     except proc.ToolNotFound as exc:
         outcome.error = str(exc)
         outcome.exit_code = -1

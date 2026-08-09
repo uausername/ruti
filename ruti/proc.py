@@ -42,7 +42,18 @@ class ToolNotFound(RuntimeError):
 
 
 class ToolTimeout(RuntimeError):
-    """The child process outlived its timeout and was killed."""
+    """The child process outlived its timeout and was killed.
+
+    Carries whatever the child had written before it was killed: on Windows,
+    `subprocess.run` drains the pipes after killing the process and attaches them to
+    the exception, so this is real output, not a guess -- and it is often the only clue
+    to what the process was doing (e.g. still indexing the repo) when it was cut off.
+    """
+
+    def __init__(self, message: str, *, stdout: str = "", stderr: str = ""):
+        super().__init__(message)
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 @dataclass(frozen=True)
@@ -112,6 +123,32 @@ def resolve(exe: str, extra_dirs: tuple[Path, ...] = ()) -> str:
     return found
 
 
+def _kill_tree(process: subprocess.Popen) -> tuple[bytes, bytes]:
+    """Kill a process and everything it spawned, then drain what it had written.
+
+    `Popen.kill()` only signals the direct child. `opencode` spawns its own
+    subprocesses (node, in practice), and those keep running after the parent dies --
+    still holding the stdout/stderr pipe open, which is exactly what made the
+    follow-up read hang forever waiting for a pipe that would never close, defeating
+    the timeout this function exists to enforce. `taskkill /T /F` kills the whole tree
+    in one call, which is what actually lets the pipe close.
+    """
+    if sys.platform == "win32":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+            capture_output=True, timeout=10,
+        )
+    else:
+        process.kill()
+    try:
+        return process.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        # Everything should already be dead and its pipes closed; a second hang here
+        # means something this function cannot fix. Give up on the output rather than
+        # block the caller indefinitely a second time.
+        return b"", b""
+
+
 def run(
     argv: list[str],
     *,
@@ -125,6 +162,10 @@ def run(
 
     `env`, when given, is merged over the current environment rather than replacing
     it -- these tools need PATH and (on Windows) SYSTEMROOT to function at all.
+
+    Uses `Popen` directly rather than `subprocess.run(timeout=...)`: the latter's own
+    timeout handling only kills the direct child, which is not enough here -- see
+    `_kill_tree`.
     """
     import time
 
@@ -135,28 +176,34 @@ def run(
     merged.setdefault("PYTHONIOENCODING", "utf-8")
 
     started = time.monotonic()
+    process = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=str(cwd) if cwd else None,
+        env=merged,
+        creationflags=_NO_WINDOW,
+    )
     try:
-        completed = subprocess.run(
-            argv,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=timeout,
-            cwd=str(cwd) if cwd else None,
-            env=merged,
-            creationflags=_NO_WINDOW,
-        )
-    except subprocess.TimeoutExpired as exc:
+        raw_out, raw_err = process.communicate(timeout=timeout)
+        returncode = process.returncode
+    except subprocess.TimeoutExpired:
+        raw_out, raw_err = _kill_tree(process)
+        partial_out = clean(_decode(raw_out)) if strip_progress else _decode(raw_out)
+        partial_err = clean(_decode(raw_err)) if strip_progress else _decode(raw_err)
         raise ToolTimeout(
-            f"{argv[0]} did not finish within {timeout:g}s and was killed"
-        ) from exc
+            f"{argv[0]} did not finish within {timeout:g}s and was killed",
+            stdout=partial_out, stderr=partial_err,
+        )
 
-    out, err = _decode(completed.stdout), _decode(completed.stderr)
+    out, err = _decode(raw_out), _decode(raw_err)
     if strip_progress:
         out, err = clean(out), clean(err)
 
     return Result(
         argv=argv,
-        returncode=completed.returncode,
+        returncode=returncode,
         stdout=out,
         stderr=err,
         duration_s=time.monotonic() - started,
