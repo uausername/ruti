@@ -15,6 +15,9 @@
         "gemini-flash-lite": {
           "name": "Gemini Flash Lite"
         },
+        "kimi": {
+          "name": "Kimi"
+        },
         "local-llama-31-8b": {
           "name": "Llama 31 8B (local)"
         },

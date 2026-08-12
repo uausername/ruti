@@ -101,6 +101,31 @@ def who_answers(model: str, timeout: float = 30.0) -> str | None:
         return None
 
 
+def _opencode_executable() -> str:
+    """The real `opencode.exe`, not the npm `.cmd` shim that wraps it.
+
+    Windows `CreateProcess` cannot launch a `.cmd`/`.bat` directly; Python's
+    `subprocess` silently retries through `cmd.exe /c` when that happens, and cmd.exe's
+    own reparsing of the command line is where a long task brief gets mangled -- an
+    embedded newline truncates the argument outright, and a literal `%` triggers
+    variable expansion. Found from a delegation that came back exit 0 with the model
+    complaining its message was empty, while the exact same text written to the task
+    log on disk was complete. The shim itself does nothing but forward every argument
+    to this .exe a few directories down (`"%dp0%\\node_modules\\opencode-ai\\bin\\
+    opencode.exe" %*`); calling it directly means cmd.exe never sees the argument.
+    """
+    import shutil
+
+    shim = shutil.which("opencode")
+    if not shim:
+        return "opencode"  # let proc.resolve() fail with its own ToolNotFound message
+    path = Path(shim)
+    if path.suffix.lower() not in (".cmd", ".bat"):
+        return shim
+    candidate = path.parent / "node_modules" / "opencode-ai" / "bin" / "opencode.exe"
+    return str(candidate) if candidate.is_file() else shim
+
+
 def _git(args: list[str], cwd: Path) -> str:
     try:
         result = proc.run(["git", *args], cwd=cwd, timeout=30.0)
@@ -156,7 +181,8 @@ def run(
         # `opencode run` has no timeout flag of its own, so the parent has to impose
         # one or a stuck delegate wedges the session indefinitely.
         result = proc.run(
-            ["opencode", "run", "--dir", str(directory), "--model", model, "--auto", task],
+            [_opencode_executable(), "run", "--dir", str(directory), "--model", model,
+             "--auto", task],
             timeout=timeout,
             cwd=directory,
         )
@@ -173,6 +199,20 @@ def run(
     except proc.ToolTimeout as exc:
         outcome.error = str(exc)
         outcome.exit_code = -1
+        # Whatever the child printed before it was killed -- often the only clue to
+        # what it was stuck doing (indexing the repo, waiting on a prompt, ...). Write
+        # it to the same log a normal run would have produced rather than leaving no
+        # trace at all.
+        if exc.stdout or exc.stderr:
+            log_path.write_text(
+                f"$ opencode run --model {model}\n\n=== KILLED: {exc} ===\n\n"
+                f"=== stdout (partial) ===\n{exc.stdout}\n"
+                f"=== stderr (partial) ===\n{exc.stderr}\n",
+                encoding="utf-8",
+            )
+            outcome.tail = "\n".join(
+                (exc.stderr or exc.stdout).strip().splitlines()[-20:]
+            )
     except proc.ToolNotFound as exc:
         outcome.error = str(exc)
         outcome.exit_code = -1

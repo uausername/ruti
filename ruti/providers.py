@@ -148,7 +148,8 @@ def _classify(exc: Exception) -> tuple[str, str]:
     return (f"{type(exc).__name__}", text[:200])
 
 
-def test_key(provider: str, model: str, api_key: str, *, timeout: float = 30.0) -> Verdict:
+def test_key(provider: str, model: str, api_key: str, *, api_base: str | None = None,
+              timeout: float = 30.0) -> Verdict:
     """Four stages, each with a distinguishable failure. Costs roughly 35 tokens."""
     import litellm
 
@@ -179,7 +180,8 @@ def test_key(provider: str, model: str, api_key: str, *, timeout: float = 30.0) 
     #    returns an empty list, so an empty result proves nothing and must not gate.
     try:
         seen = litellm.get_valid_models(
-            check_provider_endpoint=True, custom_llm_provider=provider, api_key=api_key
+            check_provider_endpoint=True, custom_llm_provider=provider, api_key=api_key,
+            api_base=api_base,
         )
         verdict.models_seen = [str(m) for m in (seen or [])]
         verdict.stages.append(Stage(
@@ -198,6 +200,7 @@ def test_key(provider: str, model: str, api_key: str, *, timeout: float = 30.0) 
             model=qualified,
             messages=[{"role": "user", "content": "Reply with the word ok."}],
             api_key=api_key,
+            api_base=api_base,
             max_tokens=PROBE_MAX_TOKENS,
             timeout=timeout,
         )
@@ -226,6 +229,7 @@ def test_key(provider: str, model: str, api_key: str, *, timeout: float = 30.0) 
             tools=_PROBE_TOOL,
             tool_choice="required",
             api_key=api_key,
+            api_base=api_base,
             max_tokens=PROBE_MAX_TOKENS,
             timeout=timeout,
         )

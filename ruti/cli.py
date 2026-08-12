@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import click
 
+from . import council as council_mod
 from . import delegate as delegate_mod
 from . import doctor as doctor_mod
 from . import install as install_mod
@@ -566,6 +567,58 @@ def delegate(model: str, task: str | None, task_file: str | None, directory: str
     raise SystemExit(0 if outcome.ok else 1)
 
 
+# --------------------------------------------------------------------------- council
+
+
+@main.command()
+@click.argument("question")
+@click.option("--models", default=None,
+              help="Comma-separated proxy model names. Default: every enabled remote "
+                   "provider. A resident local model can be added explicitly.")
+@click.option("--timeout", type=float, default=council_mod.DEFAULT_TIMEOUT)
+@click.option("--yes", is_flag=True, help="Skip the cost confirmation.")
+@click.option("--json", "as_json", is_flag=True)
+def council(question: str, models: str | None, timeout: float, yes: bool,
+            as_json: bool) -> None:
+    """Ask several models the same question and show every answer, unreconciled.
+
+    For a genuinely hard or ambiguous call, not mechanical work -- `ruti route` is
+    for that. This spends real money and real context on purpose: N parallel API
+    calls, and every raw answer is meant to be read, not just the winning one.
+    """
+    picked = [m.strip() for m in models.split(",")] if models else council_mod.default_models()
+    if not picked:
+        raise click.ClickException(
+            "no remote provider is registered -- `ruti provider add` one first, "
+            "or pass --models explicitly"
+        )
+
+    if not as_json and not yes:
+        ui.warn(f"about to ask {len(picked)} model(s) in parallel: {', '.join(picked)}")
+        ui.say("[muted]each is a separate paid API call outside your Claude "
+               "subscription; none of this touches the 5h window[/muted]")
+        if not click.confirm("Proceed?", default=True):
+            ui.say("[muted]nothing sent[/muted]")
+            return
+
+    result = council_mod.convene(question, picked, timeout=timeout)
+
+    if as_json:
+        ui.emit_json(result.summary())
+        return
+
+    for opinion in result.opinions:
+        ui.heading(f"{opinion.model}  [muted]({opinion.duration_s:.1f}s)[/muted]")
+        if opinion.ok:
+            ui.say(ui.literal(opinion.text))
+        else:
+            ui.bad(ui.literal(opinion.error))
+    failed = sum(1 for o in result.opinions if not o.ok)
+    if failed:
+        ui.say("")
+        ui.warn(f"{failed} of {len(result.opinions)} model(s) did not answer")
+
+
 # ------------------------------------------------------------------------- provider
 
 
@@ -648,7 +701,7 @@ def provider_add(provider_name: str | None, model: str | None, alias: str | None
     alias = alias or click.prompt("Route it through the proxy as", default=model.split("/")[-1])
 
     ui.heading(f"Testing {qualified}")
-    verdict = providers_mod.test_key(name, qualified, key)
+    verdict = providers_mod.test_key(name, qualified, key, api_base=api_base)
     _report(verdict)
 
     if not verdict.usable:
@@ -743,7 +796,9 @@ def provider_test(alias: str | None, as_json: bool) -> None:
             results.append({"alias": record["alias"], "usable": False, "reason": "key missing"})
             continue
         ui.heading(f"{record['alias']} -> {record['model']}")
-        verdict = providers_mod.test_key(record["provider"], record["model"], key)
+        verdict = providers_mod.test_key(
+            record["provider"], record["model"], key, api_base=record.get("api_base")
+        )
         if not as_json:
             _report(verdict)
         results.append({
