@@ -58,6 +58,12 @@ def _mark_start() -> None:
         freshness=snapshot.freshness,
     )
 
+    # A new session gets a new id, so a stale `ruti off` toggle can never affect it --
+    # this only keeps sessions.json from accreting entries for sessions long over.
+    from ruti import sessions
+
+    sessions.prune()
+
 
 def main() -> int:
     try:

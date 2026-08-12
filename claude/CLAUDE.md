@@ -56,6 +56,16 @@ For a large delegation, hand the run to the `delegate-runner` agent instead, and
 resulting diff to `delegate-verifier` when it exceeds ~3 files or ~200 lines. Below
 that, read the diff yourself; two subagents for a small change cost more than they save.
 
+### Turning delegation off for one session
+
+`ruti off` disables `route` and `delegate` — both refuse until re-enabled — for the
+current Claude Code session only; a different session, or this one after it ends, is
+unaffected. `ruti on` re-enables them. Nothing here is written to CLAUDE.md: the
+toggle lives in `ruti`'s own state, keyed to the session, so it cannot leak into a
+future session or another project. Use it when the user says to stop delegating for
+now, or when a task's judgement calls are dense enough that routing overhead is not
+worth it — `ruti status` shows whether it is currently off.
+
 ### What stays in this session
 
 Planning and architecture. Anything needing back-and-forth exploration of the codebase

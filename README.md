@@ -78,6 +78,7 @@ manager is always aware of its own budget without spending a tool call to ask.
 | **Keys are tested before they're saved** | Four stages with *distinguishable* failures — a broken certificate chain never reads as a bad key |
 | **Budget-aware routing** | Five bands from GREEN to CRITICAL, driven by burn rate as well as level |
 | **Silent failures made loud** | A "local" request answered by a remote fallback is reported, not ignored |
+| **A session-scoped kill switch** | `ruti off`/`ruti on` disable and re-enable `route`/`delegate` for the current Claude Code session only — nothing persists to another session or project |
 
 ## Requirements
 

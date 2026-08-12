@@ -15,7 +15,7 @@ import json
 import sys
 import time
 
-from ruti import quota
+from ruti import quota, sessions
 from ruti.config import STATE_ROOT, read_json, write_json
 
 MEMO_FILE = STATE_ROOT / "hook-memo.json"
@@ -25,6 +25,17 @@ FULL_EVERY = 12
 
 
 def build_context() -> tuple[str, bool]:
+    # A session-scoped `ruti off` means routing advice is not just unhelpful here, it's
+    # actively wrong -- so replace the whole budget block with a one-line reminder
+    # rather than layering it on top.
+    session_id = sessions.current_session_id()
+    if sessions.is_disabled(session_id):
+        return (
+            "ruti: OFF for this session -- `route` and `delegate` refuse. Do "
+            "implementation work in-session. Run `ruti on` to resume delegation.",
+            False,
+        )
+
     snapshot = quota.load()
     memo = read_json(MEMO_FILE, default={}) or {}
 

@@ -8,7 +8,7 @@ from . import delegate as delegate_mod
 from . import doctor as doctor_mod
 from . import install as install_mod
 from . import providers as providers_mod
-from . import ledger, lmstudio, litellm_cfg, planner, quota, router, tls, ui, vram
+from . import ledger, lmstudio, litellm_cfg, planner, quota, router, sessions, tls, ui, vram
 from .config import ensure_dirs, file_lock, load_dotenv
 
 
@@ -34,8 +34,11 @@ def status(as_json: bool) -> None:
     server_up = lmstudio.server_running() if lmstudio.available() else False
     loaded = lmstudio.loaded_models() if server_up else []
     proxy_up = litellm_cfg.liveliness()
+    session_id = sessions.current_session_id()
+    session_disabled = sessions.is_disabled(session_id)
 
     payload = {
+        "session": {"id": session_id, "disabled": session_disabled},
         "budget": {
             "band": snapshot.band,
             "five_hour_used_percentage": (
@@ -73,6 +76,9 @@ def status(as_json: bool) -> None:
     if as_json:
         ui.emit_json(payload)
         return
+
+    if session_disabled:
+        ui.warn("ruti is OFF for this session -- `route`/`delegate` refuse; `ruti on` to resume")
 
     # Budget first: it is the constraint every other line is subordinate to. Running out
     # of it stops all work, whereas a full GPU only costs an executor.
@@ -403,6 +409,52 @@ def install(do_apply: bool) -> None:
            "run `/hooks` there to confirm they parsed[/muted]")
 
 
+# ------------------------------------------------------------------------- on / off
+
+
+def _session_or_die() -> str:
+    session_id = sessions.current_session_id()
+    if not session_id:
+        raise click.ClickException(
+            f"no ${sessions.ENV_VAR} in the environment -- this only works run from "
+            "inside a Claude Code session"
+        )
+    return session_id
+
+
+@main.command()
+def off() -> None:
+    """Disable `route`/`delegate` for the current Claude Code session only."""
+    session_id = _session_or_die()
+    sessions.set_disabled(session_id, True)
+    ui.ok(f"ruti disabled for this session ({session_id[:8]}) -- "
+          "`route` and `delegate` will refuse until `ruti on`")
+
+
+@main.command()
+def on() -> None:
+    """Re-enable `route`/`delegate` for the current Claude Code session."""
+    session_id = _session_or_die()
+    was_disabled = sessions.is_disabled(session_id)
+    sessions.set_disabled(session_id, False)
+    if was_disabled:
+        ui.ok("ruti re-enabled for this session")
+    else:
+        ui.say("[muted]ruti was already enabled for this session[/muted]")
+
+
+def _refuse_if_disabled(as_json: bool) -> None:
+    """Exit before doing any work if `ruti off` is in effect for this session."""
+    if not sessions.is_disabled(sessions.current_session_id()):
+        return
+    message = "ruti is OFF for this session -- run `ruti on` to resume, or do this in-session."
+    if as_json:
+        ui.emit_json({"disabled": True, "message": message})
+    else:
+        ui.bad(message)
+    raise SystemExit(1)
+
+
 # ---------------------------------------------------------------------------- route
 
 
@@ -423,6 +475,7 @@ def install(do_apply: bool) -> None:
 def route(kind: str, files: int, loc: int, needs_tools: bool, repo_context: str,
           risk: str, latency: str, as_json: bool) -> None:
     """Rank the executors for a task you have already classified."""
+    _refuse_if_disabled(as_json)
     task = router.Task(kind=kind, files=files, loc=loc, needs_tools=needs_tools,
                        repo_context=repo_context, risk=risk, latency=latency)
     result = router.rank(task)
@@ -466,6 +519,8 @@ def delegate(model: str, task: str | None, task_file: str | None, directory: str
              timeout: float, as_json: bool) -> None:
     """Run a task through `opencode` and report back in a few lines."""
     from pathlib import Path
+
+    _refuse_if_disabled(as_json)
 
     if task_file:
         text = Path(task_file).read_text(encoding="utf-8")
