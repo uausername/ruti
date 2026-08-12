@@ -147,6 +147,13 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
     if model:
         segments.append(f"{model}{'/' + effort if effort else ''}")
 
+    # Same number `/context` reports -- how full the current turn's context window is,
+    # not to be confused with the five-hour subscription budget above.
+    ctx_used = (payload.get("context_window") or {}).get("used_percentage")
+    if ctx_used is not None:
+        colour = "31" if ctx_used >= 85 else "33" if ctx_used >= 60 else "32"
+        segments.append(_colour(f"{ctx_used:.0f}% ctx", colour))
+
     facts = _refresh_facts()
     loaded = facts.get("loaded") or []
     if loaded:
