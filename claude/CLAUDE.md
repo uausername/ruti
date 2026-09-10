@@ -66,6 +66,27 @@ future session or another project. Use it when the user says to stop delegating 
 now, or when a task's judgement calls are dense enough that routing overhead is not
 worth it — `ruti status` shows whether it is currently off.
 
+### Coding mode and free mode
+
+Two session-scoped modes, set the same way `ruti off` is and shown in the status line
+(`code`, `free`):
+
+* `ruti mode coding on` — a hint, not a gate. While it is on, the prompt hook tells
+  you to reach for the `pareto-code` alias (OpenRouter's Pareto coding router) and
+  other coding-tuned models when you delegate, instead of a general-purpose one. Turn
+  it on when the session's work is programming; leave it off for everything else ruti
+  is used for.
+* `ruti mode free soft|hard` — keep delegation on zero-cost models. `soft`
+  deprioritises paid metered APIs in `ruti route` and warns before `ruti delegate`
+  uses one; `hard` makes `route` rule them out and `delegate` refuse them outright.
+  The Claude subscription, local models and Anthropic subagents are all money-free
+  and unaffected — this is only about paid provider keys.
+
+`ruti openrouter models` lists the recommended coding models (ruti's shortlist plus
+OpenRouter's live catalogue); `ruti openrouter setup` registers the routers
+(`pareto-code`, `free`) and any free models you pick as routable aliases. Neither the
+modes nor the registration touch this file.
+
 ### What stays in this session
 
 Planning and architecture. Anything needing back-and-forth exploration of the codebase

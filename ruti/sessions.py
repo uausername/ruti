@@ -44,8 +44,21 @@ def is_disabled(session_id: str | None) -> bool:
 def set_disabled(session_id: str, disabled: bool) -> None:
     with file_lock("sessions", timeout=10.0):
         data = _load()
+        record = data.get(session_id) or {}
         if disabled:
-            data[session_id] = {"disabled": True, "at": time.time()}
+            record["disabled"] = True
+        else:
+            record.pop("disabled", None)
+        record["at"] = time.time()
+        # Keep the record only while it still carries something worth remembering;
+        # `ruti on` with no mode set should leave sessions.json as it found it.
+        meaningful = (
+            record.get("disabled")
+            or record.get("coding")
+            or record.get("free", "off") != "off"
+        )
+        if meaningful:
+            data[session_id] = record
         else:
             data.pop(session_id, None)
         write_json(SESSIONS_FILE, data)

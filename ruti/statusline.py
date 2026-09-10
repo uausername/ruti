@@ -147,6 +147,23 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
     if model:
         segments.append(f"{model}{'/' + effort if effort else ''}")
 
+    # Session task modes, shown only while active. Never let this raise -- a status
+    # line that throws is rendered as a traceback.
+    try:
+        session_id = payload.get("session_id")
+        if session_id:
+            from . import modes
+
+            active = modes.current(session_id)
+            if active["coding"]:
+                segments.append(_colour("code", "36"))
+            if active["free"] == "soft":
+                segments.append(_colour("free", "32"))
+            elif active["free"] == "hard":
+                segments.append(_colour("free!", "33"))
+    except Exception:
+        pass
+
     # Same number `/context` reports -- how full the current turn's context window is,
     # not to be confused with the five-hour subscription budget above.
     ctx_used = (payload.get("context_window") or {}).get("used_percentage")

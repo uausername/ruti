@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from . import litellm_cfg, lmstudio, planner, providers, quota, vram
+from . import litellm_cfg, lmstudio, modes, planner, providers, quota, sessions, vram
 
 # Measured, not guessed: `opencode run` sends an 8095-token system prompt before any
 # task text. A model whose window cannot hold it will not run slowly, it will fail --
@@ -54,6 +54,10 @@ class Candidate:
     quota_cost: float  # 0 = free, 1 = burns the subscription window hardest
     speed: float  # 0..1, higher is faster to a finished answer
     capability: float  # 0..1, rough ceiling on task difficulty it can handle
+    # Monetary cost, which is a different axis from quota_cost: True = confirmed
+    # zero-cost, False = confirmed paid metered API, None = ruti has no record.
+    # Only `free` mode looks at this.
+    free: bool | None = True
     command: str = ""
     reasons: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
@@ -165,6 +169,7 @@ def _remote_candidates(task: Task) -> list[Candidate]:
             quota_cost=0.0,
             speed=0.75,
             capability=0.7,
+            free=record.get("free"),
             command=f"ruti delegate --model {alias} --task-file <file>",
             reasons=[f"{record['model']} -- costs no subscription quota"],
         )
@@ -187,6 +192,7 @@ def _remote_candidates(task: Task) -> list[Candidate]:
             quota_cost=0.0,
             speed=0.75,
             capability=0.7,
+            free=None,  # a bare config.yaml entry says nothing about its price
             command=f"ruti delegate --model {alias} --task-file <file>",
             reasons=["configured in config.yaml; costs no subscription quota"],
         ))
@@ -245,6 +251,8 @@ def _self_candidate(task: Task, snapshot: quota.Quota) -> Candidate:
 def rank(task: Task, snapshot: quota.Quota | None = None) -> dict[str, Any]:
     snapshot = snapshot or quota.load()
     needed = task.estimated_tokens + (OPENCODE_PROMPT_TOKENS if task.needs_tools else 0)
+    session_modes = modes.current(sessions.current_session_id())
+    free_mode = session_modes["free"]
 
     candidates = (
         _local_candidates(task)
@@ -273,9 +281,28 @@ def rank(task: Task, snapshot: quota.Quota | None = None) -> dict[str, Any]:
                 "judgement about code the delegate cannot see"
             )
 
+        # Free mode: a paid metered API is deprioritised (soft) or ruled out (hard).
+        # Local, Anthropic and self all count as money-free -- the subscription is
+        # already paid for -- so this only ever touches remote candidates.
+        if free_mode != "off" and candidate.tier == "remote" and candidate.free is not True:
+            if free_mode == "hard":
+                paid = "a paid metered API" if candidate.free is False \
+                    else "not a confirmed zero-cost model"
+                candidate.blockers.append(
+                    f"free mode (hard) is on and this is {paid} -- `ruti mode free soft` "
+                    "to permit it, or register a `:free` alias with `ruti openrouter setup`"
+                )
+            else:
+                candidate.reasons.append(
+                    "free mode is on and this is not a confirmed zero-cost model"
+                )
+
         # Score. Budget dominates, then speed; capability is already gated above.
         budget_term = 1.0 - candidate.quota_cost * (0.4 + 0.6 * _pressure(snapshot))
         candidate.score = round(budget_term * (0.6 + 0.4 * candidate.speed), 3)
+        if (free_mode != "off" and candidate.tier == "remote"
+                and candidate.free is not True and candidate.eligible):
+            candidate.score = round(candidate.score * 0.4, 3)
 
     if task.trivial:
         # Every executor except the session itself carries a round trip: writing the
@@ -321,6 +348,7 @@ def rank(task: Task, snapshot: quota.Quota | None = None) -> dict[str, Any]:
             "estimated_tokens": needed, "difficulty": round(task.difficulty, 2),
             "trivial": task.trivial,
         },
+        "modes": session_modes,
         "ranked": [_render(c) for c in eligible],
         "rejected": [_render(c) for c in rejected],
         "advice": _advice(task, snapshot, eligible),
@@ -340,6 +368,7 @@ def _render(candidate: Candidate) -> dict[str, Any]:
         "executor": candidate.name,
         "tier": candidate.tier,
         "score": candidate.score,
+        "free": candidate.free,
         "context_window": candidate.context_window,
         "command": candidate.command,
         "reasons": candidate.reasons,

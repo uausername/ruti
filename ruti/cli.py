@@ -9,6 +9,8 @@ from . import delegate as delegate_mod
 from . import doctor as doctor_mod
 from . import install as install_mod
 from . import providers as providers_mod
+from . import modes as modes_mod
+from . import openrouter as openrouter_mod
 from . import ledger, lmstudio, litellm_cfg, planner, quota, router, sessions, tls, ui, vram
 from .config import ensure_dirs, file_lock, load_dotenv
 
@@ -444,6 +446,94 @@ def on() -> None:
         ui.say("[muted]ruti was already enabled for this session[/muted]")
 
 
+# ----------------------------------------------------------------------- mode
+
+
+@main.group("mode", invoke_without_command=True)
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+@click.pass_context
+def mode(ctx: click.Context, as_json: bool) -> None:
+    """Session task modes: `coding` biases delegation toward the coding harness and
+    coding-tuned models; `free` keeps it on zero-cost models. Both are scoped to this
+    Claude Code session, like `ruti off`."""
+    if ctx.invoked_subcommand is not None:
+        return
+
+    session_id = sessions.current_session_id()
+    state = modes_mod.current(session_id)
+
+    if as_json:
+        ui.emit_json({"session": session_id, **state})
+        return
+
+    if not session_id:
+        ui.warn(f"no ${sessions.ENV_VAR} in the environment -- modes only mean something "
+                "run from inside a Claude Code session")
+    ui.say(f"  coding : {'[ok]on[/ok]' if state['coding'] else '[muted]off[/muted]'}")
+    free = state["free"]
+    ui.say(f"  free   : {'[muted]off[/muted]' if free == 'off' else f'[ok]{free}[/ok]'}")
+    summary = modes_mod.active_summary(state)
+    if summary:
+        ui.say(f"\n[muted]active: {summary}[/muted]")
+
+
+@mode.command("coding")
+@click.argument("state", type=click.Choice(["on", "off"]))
+def mode_coding(state: str) -> None:
+    """Toggle the coding hint. On: the prompt hook tells the manager to prefer the
+    `pareto-code` router and coding-tuned models whenever it delegates."""
+    session_id = _session_or_die()
+    modes_mod.set_coding(session_id, state == "on")
+    if state == "on":
+        ui.ok("coding mode on -- the manager will be told to reach for `pareto-code` and "
+              "coding models when it delegates (register them with `ruti openrouter setup`)")
+    else:
+        ui.ok("coding mode off")
+
+
+@mode.command("free")
+@click.argument("level", type=click.Choice(["off", "soft", "hard"]))
+def mode_free(level: str) -> None:
+    """Prefer zero-cost models. `soft` flags and deprioritises paid APIs; `hard`
+    makes `route` rule them out and `delegate` refuse them."""
+    session_id = _session_or_die()
+    modes_mod.set_free(session_id, level)
+    ui.ok({
+        "off": "free mode off",
+        "soft": "free mode: soft -- paid metered APIs are flagged and deprioritised, not blocked",
+        "hard": "free mode: hard -- `route` rules out paid metered APIs, `delegate` refuses them",
+    }[level])
+
+
+def _free_status_of(alias: str) -> bool | None:
+    """True if the alias is a confirmed zero-cost model, False if confirmed paid,
+    None if ruti has no record of it either way."""
+    for record in providers_mod.load_registry()["providers"]:
+        if record["alias"] == alias:
+            return record.get("free")
+    return None
+
+
+def _guard_free_mode(model_alias: str, as_json: bool) -> None:
+    """Warn, or in `hard` mode refuse, before delegating to a non-free model."""
+    level = modes_mod.current(sessions.current_session_id())["free"]
+    if level == "off":
+        return
+    status = _free_status_of(model_alias)
+    if status is True:
+        return
+    detail = "a paid metered API" if status is False else "not a confirmed zero-cost model"
+    if level == "hard":
+        message = (f"free mode (hard) is on and {model_alias!r} is {detail} -- "
+                   "`ruti mode free soft` to allow it, or delegate to a `:free`/`free` alias")
+        if as_json:
+            ui.emit_json({"blocked": True, "reason": message})
+        else:
+            ui.bad(message)
+        raise SystemExit(1)
+    ui.warn(f"free mode is on and {model_alias!r} is {detail} -- proceeding anyway")
+
+
 def _refuse_if_disabled(as_json: bool) -> None:
     """Exit before doing any work if `ruti off` is in effect for this session."""
     if not sessions.is_disabled(sessions.current_session_id()):
@@ -529,6 +619,8 @@ def delegate(model: str, task: str | None, task_file: str | None, directory: str
         text = task
     else:
         raise click.ClickException("give either --task or --task-file")
+
+    _guard_free_mode(model.split("/")[-1], as_json)
 
     qualified = model if "/" in model else f"ruti-router/{model}"
     outcome = delegate_mod.run(
@@ -833,6 +925,185 @@ def provider_remove(alias: str, yes: bool) -> None:
     ui.ok(f"removed {alias}")
     ui.say("[muted]its key is still in litellm/.env -- delete the "
            f"{', '.join(r['env_var'] for r in removed)} line(s) if you want it gone[/muted]")
+
+
+# ----------------------------------------------------------------------- openrouter
+
+
+@main.group()
+def openrouter() -> None:
+    """OpenRouter's coding routers and free models: list them, register them."""
+
+
+@openrouter.command("models")
+@click.option("--free/--all", "free_only", default=True,
+              help="Only zero-cost models (the default).")
+@click.option("--coding/--any", "coding_only", default=True,
+              help="Only tool-capable models, which OpenCode requires (the default).")
+@click.option("--refresh", is_flag=True, help="Bypass the 6-hour catalogue cache.")
+@click.option("--json", "as_json", is_flag=True)
+def openrouter_models(free_only: bool, coding_only: bool, refresh: bool, as_json: bool) -> None:
+    """The recommended coding models: ruti's shortlist, plus the live catalogue."""
+    catalog = openrouter_mod.fetch_catalog(force=refresh)
+    rows = openrouter_mod.recommended(catalog, free_only=free_only, coding_only=coding_only)
+    registered = {r["alias"] for r in providers_mod.load_registry()["providers"]}
+    for row in rows:
+        row["registered"] = row["alias"] in registered
+
+    if as_json:
+        ui.emit_json({"catalogue_reachable": bool(catalog), "count": len(rows), "models": rows})
+        return
+
+    if not catalog:
+        ui.warn("OpenRouter's catalogue is unreachable and nothing is cached -- "
+                "showing the shortlist, unverified")
+    grid = ui.table("SLUG", "ALIAS", "CTX", "TOOLS", "COST", "UPSTREAM", "REGISTERED")
+    for row in rows:
+        grid.add_row(
+            row["id"],
+            row["alias"],
+            f"{row['context_length'] // 1000}k" if row["context_length"] else "?",
+            "[ok]yes[/ok]" if row["supports_tools"] else "[bad]no[/bad]",
+            "[ok]free[/ok]" if row["free"] else "paid",
+            "[ok]listed[/ok]" if row["present"] else "[bad]missing[/bad]",
+            "[ok]yes[/ok]" if row["registered"] else "[muted]no[/muted]",
+        )
+    ui.console.print(grid)
+    ui.say("[muted]register a set with `ruti openrouter setup`[/muted]")
+
+
+@openrouter.command("setup")
+@click.option("--models", "slugs_csv", default=None,
+              help="Comma-separated slugs to register. Default: the shortlist, "
+                   "confirmed against the catalogue.")
+@click.option("--key-stdin", is_flag=True, help="Read the OpenRouter key from stdin.")
+@click.option("--skip-verify", is_flag=True,
+              help="Register without probing the key first (for when the proxy or "
+                   "network is down).")
+@click.option("--yes", is_flag=True, help="Take the defaults and do not ask before writing.")
+def openrouter_setup(slugs_csv: str | None, key_stdin: bool, skip_verify: bool,
+                     yes: bool) -> None:
+    """Register the OpenRouter coding routers and free models as routable aliases.
+
+    This is the 'coding harness' switch on the plumbing side: afterwards `pareto-code`
+    and `free` (plus any free models you pick) are selectable through the proxy and
+    OpenCode. Turn the per-session hint on separately with `ruti mode coding on`.
+    """
+    import os
+    import sys
+    import time
+
+    provider_name = "openrouter"
+    expected = providers_mod.env_var_for(provider_name)
+    registry = providers_mod.load_registry()
+    existing = [r for r in registry["providers"] if r["provider"] == provider_name]
+    env = load_dotenv()
+
+    # A key already on file for OpenRouter is reused rather than asked for again.
+    reuse_env_var = next(
+        (r["env_var"] for r in existing if env.get(r.get("env_var", ""))), None
+    )
+    key = ""
+    if key_stdin:
+        key = sys.stdin.read().strip()
+    elif reuse_env_var:
+        ui.say(f"[muted]reusing the OpenRouter key already in .env ({reuse_env_var})[/muted]")
+    elif os.environ.get(expected):
+        ui.say(f"\n[warn]{expected}[/warn] is set in your environment "
+               f"({ui.mask(os.environ[expected])})")
+        if click.confirm("Use it?", default=True):
+            key = os.environ[expected]
+    while not key and not reuse_env_var:
+        key = click.prompt("OpenRouter API key", hide_input=True).strip()
+        if len(key) < 12:
+            ui.warn("that looks too short to be a key -- did the paste get truncated?")
+            key = ""
+
+    catalog = openrouter_mod.fetch_catalog()
+    if slugs_csv:
+        slugs = [s.strip() for s in slugs_csv.split(",") if s.strip()]
+    else:
+        slugs = []
+        for row in openrouter_mod.recommended(catalog, free_only=True, coding_only=True):
+            if not row["shortlisted"]:
+                continue
+            if not row["present"]:
+                ui.say(f"[muted]skipping {row['id']} -- not in the catalogue right now[/muted]")
+                continue
+            if yes or click.confirm(f"register {row['id']}  ({row['alias']})?", default=True):
+                slugs.append(row["id"])
+    if not slugs:
+        raise click.ClickException("nothing selected")
+
+    # Probe the key once, against a slug certain to exist.
+    if not skip_verify:
+        probe = openrouter_mod.PARETO_CODE if openrouter_mod.PARETO_CODE in slugs else slugs[0]
+        key_to_test = key or env.get(reuse_env_var or "", "")
+        ui.heading(f"Testing the key against {probe}")
+        verdict = providers_mod.test_key(
+            provider_name, openrouter_mod.litellm_model_for(probe), key_to_test
+        )
+        _report(verdict)
+        if not verdict.usable:
+            failure = verdict.failure
+            raise click.ClickException(
+                f"not saved -- {failure.detail if failure else 'the key did not pass'}"
+            )
+
+    if reuse_env_var:
+        env_var = reuse_env_var
+    else:
+        index = providers_mod.next_key_index(provider_name)
+        env_var = providers_mod.ruti_env_var(provider_name, index)
+
+    by_id = {e.get("id"): e for e in catalog}
+    known_aliases = {r["alias"] for r in registry["providers"]}
+    planned = []
+    for slug in slugs:
+        alias = openrouter_mod.alias_for(slug)
+        if alias in known_aliases:
+            ui.say(f"[muted]{alias} already registered -- skipping[/muted]")
+            continue
+        known_aliases.add(alias)
+        planned.append({
+            "provider": provider_name,
+            "alias": alias,
+            "model": openrouter_mod.litellm_model_for(slug),
+            "env_var": env_var,
+            "api_base": None,
+            "supports_tools": True,
+            "free": openrouter_mod.is_free(slug),
+            "context_window": openrouter_mod._context(by_id.get(slug)) or None,
+            "enabled": True,
+            "verified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        })
+    if not planned:
+        ui.ok("everything selected was already registered")
+        return
+
+    ui.heading("About to write")
+    for record in planned:
+        ui.say(f"  {record['alias']:<18} -> {record['model']}"
+               + ("  [ok](free)[/ok]" if record["free"] else "  [muted](paid)[/muted]"))
+    if not reuse_env_var:
+        ui.say(f"  litellm/.env        {env_var}=<your key>")
+    if not yes and not click.confirm("Write these?", default=True):
+        ui.say("[muted]nothing written[/muted]")
+        return
+
+    if not reuse_env_var:
+        doctor_mod._set_env_var(env_var, key)
+    registry["providers"].extend(planned)
+    providers_mod.save_registry(registry)
+    litellm_cfg.write_providers(providers_mod.litellm_entries(registry))
+    litellm_cfg.wire_include()
+    aliases = sorted(set(litellm_cfg.routable_aliases()) | {r["alias"] for r in planned})
+    litellm_cfg.sync_opencode(aliases)
+
+    ui.ok(f"registered {len(planned)} alias(es): {', '.join(r['alias'] for r in planned)}")
+    ui.say("[muted]restart the proxy to route to them "
+           "(`Stop-ScheduledTask`/`Start-ScheduledTask -TaskName RutiLiteLLM`), "
+           "then turn the hint on with `ruti mode coding on`[/muted]")
 
 
 @main.command()

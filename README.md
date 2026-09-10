@@ -54,12 +54,15 @@ Claude Code  (subscription, OAuth, untouched)
      ├── ruti delegate   → runs opencode, returns a summary instead of a transcript
      ├── ruti model use  → loads/evicts local models, sized to actually fit the GPU
      ├── ruti provider   → adds API providers, testing the key before writing anything
+     ├── ruti openrouter → the pareto-code / free routers and free coding models, from the live catalogue
+     ├── ruti mode       → coding / free toggles for the session, shown in the status line
      ├── ruti report     → whether any of this is actually paying for itself
      └── ruti doctor     → finds the failures that are otherwise silent
                     │
                     ▼
             LiteLLM proxy  :4000        ← loopback only, auto-starts at logon
                     ├──► LM Studio :1234   → local models   (free, private)
+                    ├──► OpenRouter        → pareto-code, free router, hundreds of :free models
                     └──► Gemini / any provider you add      (free tiers, cheap tiers)
 ```
 
@@ -79,6 +82,9 @@ manager is always aware of its own budget without spending a tool call to ask.
 | **Budget-aware routing** | Five bands from GREEN to CRITICAL, driven by burn rate as well as level |
 | **Silent failures made loud** | A "local" request answered by a remote fallback is reported, not ignored |
 | **A session-scoped kill switch** | `ruti off`/`ruti on` disable and re-enable `route`/`delegate` for the current Claude Code session only — nothing persists to another session or project |
+| **A coding mode** | `ruti mode coding on` tells the manager, on every prompt, to reach for OpenRouter's `pareto-code` router and coding-tuned models when it delegates — because `ruti` is used for more than code, and the hint only makes sense while you are writing some |
+| **A free mode, soft or hard** | `ruti mode free soft` deprioritises paid metered APIs and warns before one is used; `ruti mode free hard` rules them out entirely. The subscription, local models and Anthropic subagents are money-free and unaffected |
+| **OpenRouter coding models, one command** | `ruti openrouter models` merges a vetted shortlist with OpenRouter's live catalogue; `ruti openrouter setup` registers the `pareto-code` / `free` routers and any `:free` models you pick as routable aliases |
 
 ## Requirements
 
@@ -98,6 +104,11 @@ pip install -e . --no-deps
 
 # 2. Keys
 cp litellm\.env.example litellm\.env    # then put your real keys in it
+
+# 2b. OpenRouter coding models (optional) - registers pareto-code, the free
+#     router, and the free :free models you pick; needs an OpenRouter key.
+ruti openrouter models        # see what is on offer
+ruti openrouter setup         # register a set, then restart the proxy
 
 # 3. Local model (optional)
 irm https://lmstudio.ai/install.ps1 | iex
@@ -232,6 +243,13 @@ Things that cost time here, so they don't cost you any:
   cross-promoted on content farms, with README claims contradicting Anthropic's
   documented behaviour. Check `created_at` and `owner.type` before you
   `npm install -g` something that collects every API key you own.
+- **A pasted "top free coding models" list is half real at best.** The one this
+  feature was built from — AI-generated, complete with citation markers — mixed
+  genuine slugs with plausible-looking inventions. `ruti openrouter models` ships a
+  shortlist that was checked against OpenRouter's `/api/v1/models` and always merges
+  it with a live query, so a slug that has since vanished shows as `missing` rather
+  than 404-ing mid-delegation. The routing endpoints (`openrouter/pareto-code`,
+  `openrouter/free`) were confirmed against OpenRouter's own docs.
 - **Qwen Code CLI is not viable for local models.** Its system prompt is ~31k tokens.
   On a local 8B model that took 8 minutes and still timed out.
 
@@ -242,9 +260,10 @@ ruti/                       the CLI
   proc.py                   the only place a subprocess is spawned - stdin closed, timeout always
   lmstudio.py  gguf.py      what models exist, and what they cost in memory
   vram.py      planner.py   fit arithmetic, and the load-alongside-or-evict decision
-  providers.py              the provider catalog and the four-stage key test
+  providers.py openrouter.py  the provider catalog, the key test, and OpenRouter's live model list
   quota.py     statusline.py  the budget, and the only place Claude Code reveals it
   router.py    delegate.py  who does the work, and running them without paying for the noise
+  sessions.py  modes.py     the per-session kill switch and the coding / free toggles
   doctor.py    install.py   the silent failures, and wiring into Claude Code
 claude/CLAUDE.md            the policy that makes Claude route rather than type
 claude/agents/              delegate-runner, delegate-verifier
