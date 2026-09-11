@@ -86,6 +86,60 @@ manager is always aware of its own budget without spending a tool call to ask.
 | **A free mode, soft or hard** | `ruti mode free soft` deprioritises paid metered APIs and warns before one is used; `ruti mode free hard` rules them out entirely. The subscription, local models and Anthropic subagents are money-free and unaffected |
 | **OpenRouter coding models, one command** | `ruti openrouter models` merges a vetted shortlist with OpenRouter's live catalogue; `ruti openrouter setup` registers the `pareto-code` / `free` routers and any `:free` models you pick as routable aliases |
 
+## Command reference
+
+Every command that matters, what it actually does, and why it exists. `-h`/`--help`
+on any of them gives the same detail from the CLI itself; `--json` on the read
+commands makes the output machine-parseable for scripting.
+
+### Deciding and delegating — the core loop
+
+| Command | What it does | Why it earns a place in your workflow |
+|---|---|---|
+| `ruti route --kind K --files N --loc N [--repo-context ...] [--risk ...] [--json]` | Ranks every eligible executor (local GPU, remote API, Anthropic subagent, or "write it yourself") for a task you've already classified — scored on budget, speed, and capability, with each rejected candidate showing *why* it was ruled out. | This is the one call that turns "should I delegate this?" from a guess into a decision backed by live facts: what's actually loaded, what actually fits, what the subscription actually has left. Costs one cheap tool call to avoid a wrong, expensive one. |
+| `ruti delegate --model M (--task "..." \| --task-file F) [--dir D] [--json]` | Runs the task through `opencode` against the chosen model, under a timeout, with verbose tool traffic captured to a log file — and hands back only a short summary (exit code, files changed, `git diff --stat`). Refuses paid models outright if free mode is `hard`, and flags it if the answering model isn't the one you asked for (`substituted: true` — a backend is down and LiteLLM silently failed over). | **This is where the actual saving lives.** Not cheaper tokens — tokens that never enter Claude's context at all. A delegate can produce tens of thousands of tokens of tool chatter; you only ever see six lines of it. |
+| `ruti council "question" [--models ...] [--timeout ...] [--yes] [--json]` | Fires the same question at several models in parallel and prints every raw answer, unreconciled — no voting, no synthesis. | For the genuinely hard or ambiguous call, not mechanical work. Spends real money and context on purpose, because for that one class of question a second (and third) independent opinion is worth more than a single fast answer. |
+
+### Session controls — scoped to *this* Claude Code session only
+
+| Command | What it does | Why it earns a place in your workflow |
+|---|---|---|
+| `ruti off` / `ruti on` | Disables/re-enables `route` and `delegate` for the current session's `CLAUDE_CODE_SESSION_ID` — nothing else. | A kill switch that can't leak into your next project by accident. Useful the moment you want Claude to just write the code itself for a while, without deregistering anything permanent. |
+| `ruti mode coding {on\|off}` | Turns on a prompt-hook hint telling the manager to prefer OpenRouter's `pareto-code` router and other coding-tuned models when it delegates. | `ruti` isn't only for programming sessions, so this hint should only fire while you're actually writing code — and it should survive this session's own context compaction, which a purely verbal instruction to Claude cannot. |
+| `ruti mode free {off\|soft\|hard}` | `soft` flags and deprioritises paid metered APIs in `route`'s ranking; `hard` makes `route` rule them out entirely and `delegate` refuse to run them. Local models, the Anthropic subscription, and self are always money-free and untouched either way. | Lets you decide, per session, whether "cheap" is good enough or you want a hard guarantee that nothing billed gets touched — without editing any config. |
+
+### Setup and inventory — run once, or whenever the picture changes
+
+| Command | What it does | Why it earns a place in your workflow |
+|---|---|---|
+| `ruti install [--apply]` | Wires `ruti` into Claude Code: status line, hooks, agents, and the policy file. Previews the diff by default; `--apply` writes it and keeps backups. | The entire point is that Claude Code itself stays untouched in every way that matters (OAuth, subscription, session) — this command makes the *few* things that do need wiring reviewable before they're written. |
+| `ruti model use KEY [-c N] [--min-context N] [--ttl N] [--dry-run]` | Makes a local model resident: decides for itself whether to load alongside what's already loaded or evict it, sizes the context window to what the GPU can actually hold, and measures the real result rather than trusting the loader's own estimate. | Model memory math is fiddly and silently wrong if done by hand (`lms load --estimate-only` is a stub that ignores context size entirely). This is a decision engine, not a thin wrapper. |
+| `ruti model unload [IDENTIFIER] [--all]` | Frees a loaded model's VRAM immediately. | Loaded models already auto-release after 15 minutes idle so a forgotten model never quietly blocks a game — this is for when you want the GPU back *now*. |
+| `ruti models [--json]` | Lists every local model and the largest context each one actually fits at, given current GPU memory. | The fact that decides whether a model can run `opencode` at all — a context window too small doesn't run slow, it fails outright. |
+| `ruti models sync` | Regenerates the LiteLLM model list from what's actually on disk. | Keeps the proxy's model list truthful after you download or remove something in LM Studio, without a manual config edit. |
+| `ruti provider add [--provider ...] [--model ...] [--alias ...] [--api-base ...] [--key-stdin] [--yes]` | Adds a remote API provider — but writes nothing until the key is tested against four distinguishable failure stages (bad cert chain, bad key, no chat support, no tool-call support). | A key that "doesn't work" is not one problem, it's four different ones, and conflating them wastes time. TLS interception from antivirus software looks *exactly* like a bad key unless you separate the checks. |
+| `ruti provider list [--json]` / `ruti provider test [ALIAS] [--json]` / `ruti provider remove ALIAS [--yes]` | Show what's registered, re-run the key checks for one or all providers, or remove a provider (the key itself stays in `.env` unless you say otherwise). | Providers drift — keys expire, tiers change. These give you a live read instead of trusting a config file you wrote weeks ago. |
+| `ruti openrouter models [--free/--all] [--coding/--any] [--refresh] [--json]` | Shows the recommended coding models: a hand-checked shortlist merged live against OpenRouter's own `/api/v1/models` catalogue, defaulting to free, tool-capable models only. | A pasted "top free coding models" list off the internet is half real at best — this checks every slug against the live catalogue so a model that's vanished shows as `missing` instead of 404ing mid-delegation. |
+| `ruti openrouter setup [--models ...] [--key-stdin] [--skip-verify] [--yes]` | Registers the `pareto-code` and `free` OpenRouter routers, plus any `:free` models you pick, as routable proxy aliases — after testing the key for chat and tool-call support. | The "coding harness" switch on the plumbing side. Without it, `coding` mode has nothing coding-tuned to point at, and `free hard` mode has no zero-cost remote option to fall back to. |
+
+### Visibility — know what's actually happening before you trust it
+
+| Command | What it does | Why it earns a place in your workflow |
+|---|---|---|
+| `ruti status [--json]` | One screen: subscription budget and band, GPU memory, which local models are loaded, proxy health. | The fastest way to answer "can I delegate right now, and to what" without piecing it together from four other commands. |
+| `ruti doctor [--fix]` | Checks the failures that would otherwise stay completely silent: TLS interception, a stopped LM Studio server, a model list that's drifted from disk, a proxy bound to every network interface, a "local" request quietly answered by a remote fallback. `--fix` repairs what it safely can. | Every one of these failure modes was discovered the hard way, because none of them throw an error — they just quietly produce a worse answer from a different place than you asked. This is the single command that surfaces all of them at once. |
+| `ruti report [--days N] [--json]` | Shows what delegation has actually bought you — lines written by delegates and their approximate token cost, how much delegate transcript stayed in logs instead of your context — from a ledger `ruti` keeps as it goes. | Built to be falsifiable on purpose: it already caught its own bad assumptions twice (verbose output turned out to be terse; "successful" delegations turned out to include code that never should have been counted). It only claims what it can actually measure. |
+
+### Status line and prompt hook — always on, nothing to run
+
+These aren't commands you type — `ruti install --apply` wires them in, and from then
+on they run automatically on every turn:
+
+| Piece | What it shows | Why it earns a place in your workflow |
+|---|---|---|
+| Status line | Subscription budget and band (GREEN→CRITICAL), 7-day usage, current model/effort, and — only while active — `code` / `free` / `free!` for the session's task modes. | Claude Code exposes the remaining subscription budget in exactly one place locally, and nowhere else. Losing this silently (three separate Windows-specific ways it can go blank) means the router quietly behaves as if the window were nearly spent. |
+| `UserPromptSubmit` hook | Feeds the budget band and its guidance, plus any active session modes, back into context on every prompt. | The manager gets budget-awareness for free, without spending a tool call to ask — and a mode you turned on ten prompts ago doesn't get silently forgotten. |
+
 ## Requirements
 
 - **Claude Code** with a subscription
