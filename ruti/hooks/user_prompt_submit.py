@@ -15,7 +15,7 @@ import json
 import sys
 import time
 
-from ruti import quota, sessions
+from ruti import modes, quota, sessions
 from ruti.config import STATE_ROOT, read_json, write_json
 
 MEMO_FILE = STATE_ROOT / "hook-memo.json"
@@ -63,12 +63,41 @@ def build_context() -> tuple[str, bool]:
             "so their output never enters this context."
         )
 
+    # Modes are short and only matter while active, so they ride on every prompt they
+    # are set for rather than following the band debounce.
+    for note in _mode_notes(session_id):
+        line += "\n" + note
+
     write_json(MEMO_FILE, {
         "last_band": band,
         "prompts_since_full": 0 if full else count,
         "at": time.time(),
     })
     return line, full
+
+
+def _mode_notes(session_id: str | None) -> list[str]:
+    state = modes.current(session_id)
+    notes: list[str] = []
+    if state["coding"]:
+        notes.append(
+            "ruti coding mode is ON: when you delegate implementation to subagents, "
+            "prefer the `pareto-code` alias (OpenRouter's Pareto coding router) and "
+            "other coding-tuned models over general-purpose ones."
+        )
+    if state["free"] == "soft":
+        notes.append(
+            "ruti free mode is ON (soft): prefer zero-cost models (`free` router, "
+            "`*:free` aliases) when delegating, and warn the user before using a paid "
+            "metered API. `ruti route` deprioritises paid APIs but still lists them."
+        )
+    elif state["free"] == "hard":
+        notes.append(
+            "ruti free mode is ON (hard): delegate only to zero-cost models (`free` "
+            "router, `*:free` aliases). `ruti route` rules out paid metered APIs and "
+            "`ruti delegate` refuses them."
+        )
+    return notes
 
 
 def main() -> int:
