@@ -154,8 +154,24 @@ def _fix_sync() -> str:
 
 def _fix_opencode_drift() -> str:
     LIVE_OPENCODE.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(REPO_OPENCODE, LIVE_OPENCODE)
-    return f"copied {REPO_OPENCODE} over {LIVE_OPENCODE}"
+    if not LIVE_OPENCODE.exists():
+        shutil.copyfile(REPO_OPENCODE, LIVE_OPENCODE)
+        return f"copied {REPO_OPENCODE} over {LIVE_OPENCODE}"
+
+    # Merge rather than overwrite: a locally registered provider (`ruti provider
+    # add`, `ruti openrouter setup`) adds models to the live file that the repo
+    # template never had and never will -- those are not drift, and a plain
+    # copy used to delete them every time the repo picked up a new baseline
+    # model. Only the repo's own models are ever added or refreshed; anything
+    # live-only is left alone.
+    live = json.loads(LIVE_OPENCODE.read_text(encoding="utf-8"))
+    repo = json.loads(REPO_OPENCODE.read_text(encoding="utf-8"))
+    live_models = live.setdefault("provider", {}).setdefault("ruti-router", {}).setdefault("models", {})
+    repo_models = repo.get("provider", {}).get("ruti-router", {}).get("models") or {}
+    added = [name for name in repo_models if name not in live_models]
+    live_models.update(repo_models)
+    LIVE_OPENCODE.write_text(json.dumps(live, indent=2) + "\n", encoding="utf-8")
+    return f"merged {len(added)} new model(s) from the repo into {LIVE_OPENCODE}"
 
 
 # -------------------------------------------------------------------------- checks
@@ -322,13 +338,20 @@ def _check_opencode_drift() -> Check:
 
     live_models = set((live.get("provider", {}).get("ruti-router", {}).get("models") or {}))
     repo_models = set((repo.get("provider", {}).get("ruti-router", {}).get("models") or {}))
-    if live_models != repo_models:
+    # Only models the repo has and the install lacks are drift (a version bump
+    # added a baseline model this machine never picked up). Models the install
+    # has beyond the repo's are locally registered providers (`provider add`,
+    # `openrouter setup`) -- expected, not a problem, and never worth flagging.
+    missing = repo_models - live_models
+    if missing:
         return Check(
-            "opencode", WARN, "the installed OpenCode config lists different models",
-            detail=f"installed: {sorted(live_models)}; repo: {sorted(repo_models)}",
-            fix=_fix_opencode_drift, fix_label="overwrite the installed copy",
+            "opencode", WARN, "the installed OpenCode config is missing repo models",
+            detail=f"missing: {sorted(missing)}; installed has {len(live_models)} total",
+            fix=_fix_opencode_drift, fix_label="merge the repo's models in",
         )
-    return Check("opencode", OK, f"config matches the repo ({len(live_models)} models)")
+    extra = live_models - repo_models
+    note = f" (plus {len(extra)} locally registered)" if extra else ""
+    return Check("opencode", OK, f"config matches the repo ({len(live_models)} models){note}")
 
 
 # Groups whose membership is effectively "anyone with a session on this box". A
