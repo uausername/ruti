@@ -129,7 +129,10 @@ def _opencode_executable() -> str:
 def _git(args: list[str], cwd: Path) -> str:
     try:
         result = proc.run(["git", *args], cwd=cwd, timeout=30.0)
-        return result.stdout.strip() if result.ok else ""
+        # rstrip only -- `git status --porcelain` uses a leading space as a real
+        # status column (e.g. " M file.py"), and a plain .strip() eats it, which
+        # then shifts every line[3:] slice in files_changed by one character.
+        return result.stdout.rstrip() if result.ok else ""
     except (proc.ToolNotFound, proc.ToolTimeout):
         return ""
 
