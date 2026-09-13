@@ -171,13 +171,12 @@ def _pretty(alias: str) -> str:
     return alias.replace("-", " ").title()
 
 
-def routable_aliases() -> list[str]:
-    """Every model name the proxy can route to, from the proxy if it is up."""
-    served = served_models()
-    if served:
-        return served
+def declared_models() -> list[str]:
+    """Every model name the configuration declares, read from disk.
 
-    # Proxy down: fall back to what the configuration declares.
+    Deliberately independent of the proxy: comparing this against `served_models()`
+    is what catches a proxy still serving the config it started with.
+    """
     names: list[str] = []
     for path in (LITELLM_CONFIG, *INCLUDES):
         try:
@@ -189,6 +188,11 @@ def routable_aliases() -> list[str]:
             if name and name not in names:
                 names.append(name)
     return names
+
+
+def routable_aliases() -> list[str]:
+    """Every model name the proxy can route to, from the proxy if it is up."""
+    return served_models() or declared_models()
 
 
 def liveliness(timeout: float = 5.0) -> bool:

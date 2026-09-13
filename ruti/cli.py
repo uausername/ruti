@@ -340,6 +340,10 @@ def report(days: float | None, as_json: bool) -> None:
     if w.get("discarded_lines"):
         ui.say(f"  [warn]{w['discarded_lines']:,} further lines came from runs that failed "
                f"and are not counted[/warn]")
+    if w.get("files"):
+        shown = ", ".join(w["files"][:8])
+        more = f" (+{len(w['files']) - 8} more)" if len(w["files"]) > 8 else ""
+        ui.say(f"  [muted]written by delegates: {shown}{more}[/muted]")
     ui.say("  [muted]an upper bound: a run counts as successful when the process exited "
            "cleanly and any Python it wrote parses, which is weaker than the work being "
            "usable[/muted]")
@@ -351,9 +355,15 @@ def report(days: float | None, as_json: bool) -> None:
     ui.say("  [muted]measurement corrected an assumption here: opencode's own output is "
            "terse, so containing it saves far less than the generated code does[/muted]")
 
-    if stats["routes"]["total"]:
+    r = stats["routes"]
+    if r["total"]:
         ui.heading("Routing")
-        ui.say(f"  {stats['routes']['total']} rankings requested")
+        ui.say(f"  {r['total']} ranking(s) requested: [ok]{r['followed']} followed[/ok], "
+               f"{r['recommended_self']} recommended this session, "
+               + (f"[warn]{r['ignored']} ignored[/warn]" if r["ignored"] else "0 ignored"))
+        if r["ignored"]:
+            ui.say("  [muted]ignored means the ranking named a delegate and no delegation "
+                   "to it followed in that session[/muted]")
 
     ui.heading("Window utilisation per session")
     if s["with_usable_quota_readings"] < 2:
@@ -1073,6 +1083,7 @@ def openrouter_setup(slugs_csv: str | None, key_stdin: bool, skip_verify: bool,
             "api_base": None,
             "supports_tools": True,
             "free": openrouter_mod.is_free(slug),
+            "coding": openrouter_mod.is_coding(slug),
             "context_window": openrouter_mod._context(by_id.get(slug)) or None,
             "enabled": True,
             "verified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

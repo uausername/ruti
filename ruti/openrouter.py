@@ -87,6 +87,16 @@ def is_router(slug: str) -> bool:
     return slug in ROUTERS
 
 
+def is_coding(slug: str) -> bool:
+    """Whether this endpoint is specifically for code.
+
+    Only `pareto-code` qualifies by construction: it is OpenRouter's coding router.
+    The catalogue advertises no coding flag, and a model's name is not evidence, so
+    nothing else is guessed at -- a record in providers.json can be marked by hand.
+    """
+    return slug == PARETO_CODE
+
+
 def alias_for(slug: str) -> str:
     """The short name to route to through the proxy, e.g. inkling-small, pareto-code."""
     base = slug.split("/")[-1]

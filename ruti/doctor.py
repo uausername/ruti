@@ -95,6 +95,55 @@ def _wait_for_liveliness(budget_s: float, *, interval_s: float = 2.0) -> bool:
     return litellm_cfg.liveliness(timeout=2.0)
 
 
+def _listening_pids(port: int = 4000) -> list[int]:
+    """PIDs holding a LISTENING socket on `port`, from netstat's last column."""
+    from . import proc
+
+    try:
+        result = proc.run(["netstat", "-ano"], timeout=15.0)
+    except (proc.ToolNotFound, proc.ToolTimeout):
+        return []
+
+    pids: list[int] = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 5 or "LISTEN" not in parts[3].upper():
+            continue
+        if not parts[1].endswith(f":{port}"):
+            continue
+        try:
+            pid = int(parts[-1])
+        except ValueError:
+            continue
+        if pid and pid not in pids:
+            pids.append(pid)
+    return pids
+
+
+def _fix_proxy_restart() -> str:
+    """Replace a proxy that is alive but serving the config it started with.
+
+    Stopping the scheduled task is not enough, and the failure looks like success:
+    the task's action is a PowerShell wrapper that launches litellm through `cmd`,
+    so stopping the task kills the wrapper while the grandchild keeps :4000. The
+    replacement instance then cannot bind, dies, and the stale process carries on
+    answering -- `schtasks` having reported exit 0 throughout.
+    """
+    from . import proc
+
+    killed: list[int] = []
+    for pid in _listening_pids():
+        try:
+            if proc.run(["taskkill", "/PID", str(pid), "/T", "/F"], timeout=15.0).ok:
+                killed.append(pid)
+        except (proc.ToolNotFound, proc.ToolTimeout):
+            continue
+
+    started = _fix_proxy_start()
+    freed = ", ".join(str(pid) for pid in killed) or "nothing"
+    return f"killed {freed}, then {started}"
+
+
 def _fix_proxy_start() -> str:
     """Bring the proxy up, trying the quiet path before the interactive one.
 
@@ -234,6 +283,22 @@ def _check_proxy_bind() -> Check:
 def _check_proxy_alive() -> Check:
     if litellm_cfg.liveliness():
         served = litellm_cfg.served_models()
+        # Liveness alone is not health. A proxy that started before the last
+        # `provider add` / `openrouter setup` keeps answering happily while missing
+        # every model registered since, and `route` then rules those out as
+        # "registered but not served" -- the silent failure this tool exists to catch.
+        missing = [name for name in litellm_cfg.declared_models() if name not in served]
+        if missing:
+            return Check(
+                "proxy", WARN,
+                f"alive, but serving {len(served)} of {len(served) + len(missing)} "
+                "declared model(s)",
+                detail=(
+                    f"declared but not served: {', '.join(missing)}. The running process "
+                    "predates their registration; restarting it is what picks them up"
+                ),
+                fix=_fix_proxy_restart, fix_label="restart the proxy",
+            )
         return Check("proxy", OK, f"alive, serving {len(served)} model(s)",
                      detail=", ".join(served))
     return Check(

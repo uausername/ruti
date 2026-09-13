@@ -58,6 +58,8 @@ class Candidate:
     # zero-cost, False = confirmed paid metered API, None = ruti has no record.
     # Only `free` mode looks at this.
     free: bool | None = True
+    # Tuned for code rather than general chat. Only `coding` mode looks at this.
+    coding: bool = False
     command: str = ""
     reasons: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
@@ -133,6 +135,7 @@ def _local_candidates(task: Task) -> list[Candidate]:
             quota_cost=0.0,
             speed=0.55 if resident else 0.4,  # a swap costs several seconds
             capability=0.35,  # small local models; honest about the ceiling
+            coding="coder" in model.key.lower(),
             command=f"ruti delegate --model {identifier} --task-file <file>",
         )
         candidate.reasons.append("runs on this machine: no subscription cost, no data leaves")
@@ -170,6 +173,7 @@ def _remote_candidates(task: Task) -> list[Candidate]:
             speed=0.75,
             capability=0.7,
             free=record.get("free"),
+            coding=bool(record.get("coding")),
             command=f"ruti delegate --model {alias} --task-file <file>",
             reasons=[f"{record['model']} -- costs no subscription quota"],
         )
@@ -304,6 +308,13 @@ def rank(task: Task, snapshot: quota.Quota | None = None) -> dict[str, Any]:
                 and candidate.free is not True and candidate.eligible):
             candidate.score = round(candidate.score * 0.4, 3)
 
+        # Coding mode: prefer an executor tuned for code. A bonus rather than a gate,
+        # because the mode says what the session is doing, not what it may use -- a
+        # general model must stay selectable when nothing coding-tuned is eligible.
+        if session_modes["coding"] and candidate.coding and candidate.eligible:
+            candidate.score = round(candidate.score * 1.25, 3)
+            candidate.reasons.append("coding mode is on and this one is tuned for code")
+
     if task.trivial:
         # Every executor except the session itself carries a round trip: writing the
         # brief, waiting, reading the summary, reviewing the diff. Those turns are
@@ -369,6 +380,7 @@ def _render(candidate: Candidate) -> dict[str, Any]:
         "tier": candidate.tier,
         "score": candidate.score,
         "free": candidate.free,
+        "coding": candidate.coding,
         "context_window": candidate.context_window,
         "command": candidate.command,
         "reasons": candidate.reasons,

@@ -380,6 +380,10 @@ def _record(outcome: Outcome, log_path: Path) -> None:
         substituted=outcome.substituted,
         duration_s=round(outcome.duration_s, 1),
         files_changed=len(outcome.files_changed),
+        # The names, not just the count: without them the report can say how much a
+        # delegate wrote but never which files, and nothing can tell whether a given
+        # file came from a delegate or was typed in the session.
+        files=list(outcome.files_changed),
         lines_written=outcome.lines_written,
         log_bytes=log_bytes,
         summary_bytes=len(json.dumps(outcome.summary())),

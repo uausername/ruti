@@ -42,9 +42,18 @@ TOKENS_PER_LINE = 12
 
 
 def current_session() -> str | None:
-    """The session id the status line last saw, used to group events."""
+    """The session that ran the command, used to group events.
+
+    `CLAUDE_CODE_SESSION_ID` is exported into every tool subprocess, so it names the
+    session that actually invoked `route` or `delegate`. quota.json's id is only a
+    fallback for callers outside a session: the status line writes it, and the status
+    line is shared, so whichever session repainted last would otherwise be credited
+    with another session's work -- silently mixing two sessions' compliance together.
+    """
+    from . import sessions
+
     data = read_json(STATE_ROOT / "quota.json", default={}) or {}
-    return data.get("session_id")
+    return sessions.current_session_id() or data.get("session_id")
 
 
 def record(event: str, **fields: Any) -> None:
@@ -103,6 +112,94 @@ def last_delegation() -> dict[str, Any] | None:
     return None
 
 
+def _alias_of(executor: str) -> str:
+    """`ruti-router/free` -> `free`. A `claude:*` executor has no alias."""
+    return executor.split("/")[-1] if "/" in executor else executor
+
+
+def _route_followed(entries: list[dict[str, Any]], index: int) -> bool:
+    """Did a later delegation in this session use what the ranking recommended?"""
+    alias = _alias_of(entries[index].get("recommended") or "")
+    return any(
+        later.get("event") == "delegation"
+        and _alias_of(later.get("model") or "") == alias
+        for later in entries[index + 1:]
+    )
+
+
+def _by_session(events: list[dict[str, Any]]) -> dict[str | None, list[dict[str, Any]]]:
+    grouped: dict[str | None, list[dict[str, Any]]] = {}
+    for entry in events:
+        grouped.setdefault(entry.get("session"), []).append(entry)
+    return grouped
+
+
+def route_compliance(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Whether rankings were acted on, derived by pairing rather than stored.
+
+    The ledger is append-only, so a route event cannot be marked after the fact.
+    Compliance is read back instead: a ranking counts as followed when a later
+    delegation in the same session used the alias it recommended. A ranking that
+    recommended the session itself is not a violation -- writing the code here *is*
+    following that advice -- so it is counted separately rather than as ignored.
+    """
+    total = followed = ignored = recommended_self = 0
+    for entries in _by_session(events).values():
+        for index, entry in enumerate(entries):
+            if entry.get("event") != "route":
+                continue
+            total += 1
+            recommended = entry.get("recommended") or ""
+            if not recommended or recommended.startswith("claude:"):
+                recommended_self += 1
+            elif _route_followed(entries, index):
+                followed += 1
+            else:
+                ignored += 1
+    return {
+        "total": total,
+        "followed": followed,
+        "ignored": ignored,
+        "recommended_self": recommended_self,
+    }
+
+
+def unfollowed_route(session_id: str | None) -> dict[str, Any] | None:
+    """The latest ranking in this session that named a delegate and was not acted on.
+
+    Read from the tail like `last_delegation`, because the prompt hook calls this on
+    every prompt and must not scan a ledger that grows all day.
+    """
+    if not session_id or not LEDGER.exists():
+        return None
+    try:
+        with LEDGER.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - 131072))
+            data = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+
+    entries: list[dict[str, Any]] = []
+    for line in data.splitlines():
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("session") == session_id:
+            entries.append(entry)
+
+    for index in range(len(entries) - 1, -1, -1):
+        if entries[index].get("event") != "route":
+            continue
+        recommended = entries[index].get("recommended") or ""
+        if not recommended or recommended.startswith("claude:"):
+            return None
+        return None if _route_followed(entries, index) else entries[index]
+    return None
+
+
 def _sessions(events: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
     """Pair up session start/end markers with the delegations in between."""
     by_session: dict[str | None, dict[str, Any]] = {}
@@ -122,7 +219,6 @@ def _sessions(events: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
 
 def summarise(events: list[dict[str, Any]]) -> dict[str, Any]:
     delegations = [e for e in events if e["event"] == "delegation"]
-    routes = [e for e in events if e["event"] == "route"]
 
     log_bytes = sum(e.get("log_bytes", 0) for e in delegations)
     summary_bytes = sum(e.get("summary_bytes", 0) for e in delegations)
@@ -136,6 +232,12 @@ def summarise(events: list[dict[str, Any]]) -> dict[str, Any]:
     succeeded = [e for e in delegations if e.get("ok")]
     lines_written = sum(e.get("lines_written", 0) for e in succeeded)
     discarded_lines = sum(e.get("lines_written", 0) for e in delegations if not e.get("ok"))
+
+    delegated_files: list[str] = []
+    for entry in succeeded:
+        for name in entry.get("files") or []:
+            if name not in delegated_files:
+                delegated_files.append(name)
 
     by_tier: dict[str, dict[str, Any]] = {}
     for entry in delegations:
@@ -178,6 +280,7 @@ def summarise(events: list[dict[str, Any]]) -> dict[str, Any]:
             "lines_written": lines_written,
             "approx_tokens": lines_written * TOKENS_PER_LINE,
             "discarded_lines": discarded_lines,
+            "files": delegated_files,
         },
         "transcript_contained": {
             "bytes": avoided,
@@ -185,10 +288,7 @@ def summarise(events: list[dict[str, Any]]) -> dict[str, Any]:
             "delegate_output_bytes": log_bytes,
             "summary_bytes": summary_bytes,
         },
-        "routes": {
-            "total": len(routes),
-            "followed": sum(1 for r in routes if r.get("followed")),
-        },
+        "routes": route_compliance(events),
         "sessions": {
             "seen": len(sessions),
             "with_usable_quota_readings": len(usable),

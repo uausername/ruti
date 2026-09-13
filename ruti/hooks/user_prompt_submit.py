@@ -15,7 +15,7 @@ import json
 import sys
 import time
 
-from ruti import modes, quota, sessions
+from ruti import ledger, modes, quota, sessions
 from ruti.config import STATE_ROOT, read_json, write_json
 
 MEMO_FILE = STATE_ROOT / "hook-memo.json"
@@ -67,6 +67,17 @@ def build_context() -> tuple[str, bool]:
     # are set for rather than following the band debounce.
     for note in _mode_notes(session_id):
         line += "\n" + note
+
+    # A ranking that named a delegate and was never acted on is the one thing the
+    # manager cannot see for itself: the advice scrolls out of context long before the
+    # decision it was meant to inform is finished.
+    outstanding = ledger.unfollowed_route(session_id)
+    if outstanding:
+        line += (
+            f"\nruti: the last `ruti route` recommended {outstanding['recommended']} for "
+            f"{outstanding.get('kind') or 'this'} work and nothing has been delegated to "
+            "it since -- delegate, or say why you are writing it in-session instead."
+        )
 
     write_json(MEMO_FILE, {
         "last_band": band,
