@@ -14,6 +14,12 @@ Two rules keep it honest:
 * **Delegation is not always right.** Below a size threshold the round trip costs more
   turns than writing the code inline, and orchestration turns are billed to the same
   budget delegation is meant to protect. The router says so.
+
+Two costs are kept apart because conflating them is expensive: the Claude subscription
+window (`quota_cost`) and money on a metered API (`free`, `metered`, `pays_in`). "Costs
+no subscription quota" is true of every remote executor and says nothing about the
+bill -- a router such as `pareto-code` spends no quota at all and may still hand a
+100-line script to a frontier model at frontier prices.
 """
 
 from __future__ import annotations
@@ -21,7 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from . import litellm_cfg, lmstudio, modes, planner, providers, quota, sessions, vram
+from . import litellm_cfg, lmstudio, modes, openrouter, planner, providers, quota, sessions, vram
 
 # Measured, not guessed: `opencode run` sends an 8095-token system prompt before any
 # task text. A model whose window cannot hold it will not run slowly, it will fail --
@@ -37,6 +43,12 @@ RESPONSE_HEADROOM = 4000
 # Below this, orchestration costs more than it saves.
 TRIVIAL_LOC = 40
 TRIVIAL_FILES = 2
+
+# At or below this difficulty a brief is specific enough that a free model can carry
+# it: boilerplate, a refactor, a single-file implementation spelled out in detail. A
+# metered executor buys nothing there that a free one would not, so it ranks below
+# every free delegate however it scored otherwise -- coding mode included.
+LOW_DIFFICULTY = 0.5
 
 Kind = Literal["boilerplate", "implement", "refactor", "debug", "analyze", "review", "security"]
 
@@ -56,10 +68,15 @@ class Candidate:
     capability: float  # 0..1, rough ceiling on task difficulty it can handle
     # Monetary cost, which is a different axis from quota_cost: True = confirmed
     # zero-cost, False = confirmed paid metered API, None = ruti has no record.
-    # Only `free` mode looks at this.
+    # Free mode and the low-difficulty rule look at this.
     free: bool | None = True
     # Tuned for code rather than general chat. Only `coding` mode looks at this.
     coding: bool = False
+    # A router picks the real model per request, so neither its class nor its price
+    # is known before it has run.
+    router: bool = False
+    # Who bills a metered executor, e.g. "openrouter". Only meaningful for remote.
+    provider: str | None = None
     command: str = ""
     reasons: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
@@ -68,6 +85,32 @@ class Candidate:
     @property
     def eligible(self) -> bool:
         return not self.blockers
+
+    @property
+    def money_free(self) -> bool:
+        """Costs no money per call. Local runs and the subscription both qualify."""
+        return self.tier != "remote" or self.free is True
+
+    @property
+    def metered(self) -> bool | None:
+        """Billed per token: True, False, or None when ruti has no price on record."""
+        if self.money_free:
+            return False
+        return True if self.free is False else None
+
+    @property
+    def pays_in(self) -> str:
+        if self.tier == "local":
+            return "nothing -- runs on this machine"
+        if self.tier in ("anthropic", "self"):
+            return "the Claude subscription window -- no per-token charge"
+        if self.free is True:
+            return "nothing -- a zero-cost model"
+        if self.free is False:
+            if self.provider == "openrouter":
+                return "USD per token, from OpenRouter credits"
+            return f"USD per token, billed by {self.provider or 'the provider'}"
+        return "unknown -- ruti has no price on record for it"
 
 
 @dataclass
@@ -174,9 +217,18 @@ def _remote_candidates(task: Task) -> list[Candidate]:
             capability=0.7,
             free=record.get("free"),
             coding=bool(record.get("coding")),
+            router=openrouter.is_router_record(record),
+            provider=record.get("provider"),
             command=f"ruti delegate --model {alias} --task-file <file>",
-            reasons=[f"{record['model']} -- costs no subscription quota"],
         )
+        candidate.reasons.append(f"{record['model']} -- {_money_reason(candidate)}")
+        if candidate.router:
+            candidate.reasons.append(
+                "a router, not a model: it picks the model per request, so which model "
+                "runs is unknown until afterwards"
+                + (" (every pick is zero-cost)" if candidate.free is True
+                   else " -- and so is what it costs")
+            )
         if alias not in served:
             candidate.blockers.append("registered but not served -- restart the proxy")
         if not record.get("supports_tools"):
@@ -188,7 +240,7 @@ def _remote_candidates(task: Task) -> list[Candidate]:
     for alias in sorted(served):
         if alias.startswith("local-") or alias in seen:
             continue
-        out.append(Candidate(
+        candidate = Candidate(
             name=f"ruti-router/{alias}",
             tier="remote",
             context_window=1_000_000,
@@ -198,9 +250,19 @@ def _remote_candidates(task: Task) -> list[Candidate]:
             capability=0.7,
             free=None,  # a bare config.yaml entry says nothing about its price
             command=f"ruti delegate --model {alias} --task-file <file>",
-            reasons=["configured in config.yaml; costs no subscription quota"],
-        ))
+        )
+        candidate.reasons.append(f"configured in config.yaml -- {_money_reason(candidate)}")
+        out.append(candidate)
     return out
+
+
+def _money_reason(candidate: Candidate) -> str:
+    """Quota and money in one clause, so neither can be read as the other."""
+    if candidate.free is True:
+        return "no subscription quota, and a zero-cost model"
+    if candidate.free is False:
+        return f"no subscription quota, but metered: {candidate.pays_in}"
+    return "no subscription quota; price unknown to ruti, so it may be metered"
 
 
 def _anthropic_candidates(task: Task, snapshot: quota.Quota) -> list[Candidate]:
@@ -315,6 +377,9 @@ def rank(task: Task, snapshot: quota.Quota | None = None) -> dict[str, Any]:
             candidate.score = round(candidate.score * 1.25, 3)
             candidate.reasons.append("coding mode is on and this one is tuned for code")
 
+    if task.difficulty <= LOW_DIFFICULTY:
+        _rank_paid_below_free(task, candidates)
+
     if task.trivial:
         # Every executor except the session itself carries a round trip: writing the
         # brief, waiting, reading the summary, reviewing the diff. Those turns are
@@ -366,6 +431,33 @@ def rank(task: Task, snapshot: quota.Quota | None = None) -> dict[str, Any]:
     }
 
 
+def _rank_paid_below_free(task: Task, candidates: list[Candidate]) -> None:
+    """On an easy task, put every possibly-paid remote below every free delegate.
+
+    Applied after all the bonuses on purpose. Coding mode prefers a coding router, and
+    for hard work that is right; for a brief spelled out to the last detail it means
+    paying frontier prices for boilerplate, which is how this rule came to exist. A
+    model with no price on record is treated as paid, as free mode does.
+    """
+    free_scores = [
+        c.score for c in candidates
+        if c.eligible and c.tier in ("local", "remote") and c.free is True
+    ]
+    if not free_scores:
+        return  # nothing free can do it; a paid delegate still spares the quota
+    ceiling = round(min(free_scores) * 0.95, 3)
+    for candidate in candidates:
+        if not (candidate.eligible and candidate.tier == "remote"
+                and candidate.free is not True and candidate.score > ceiling):
+            continue
+        candidate.score = ceiling
+        kind = "metered" if candidate.free is False else "possibly paid"
+        candidate.reasons.append(
+            f"difficulty {task.difficulty:.2f} is low: a {kind} model buys nothing a free "
+            "one would not, so it ranks below the free ones"
+        )
+
+
 def _pressure(snapshot: quota.Quota) -> float:
     """0 when the window is untouched, 1 when it is nearly spent."""
     order = [quota.GREEN, quota.YELLOW, quota.ORANGE, quota.RED, quota.CRITICAL]
@@ -380,6 +472,9 @@ def _render(candidate: Candidate) -> dict[str, Any]:
         "tier": candidate.tier,
         "score": candidate.score,
         "free": candidate.free,
+        "metered": candidate.metered,
+        "pays_in": candidate.pays_in,
+        "router": candidate.router,
         "coding": candidate.coding,
         "context_window": candidate.context_window,
         "command": candidate.command,

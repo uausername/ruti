@@ -9,6 +9,7 @@ from . import delegate as delegate_mod
 from . import doctor as doctor_mod
 from . import install as install_mod
 from . import providers as providers_mod
+from . import usage as usage_mod
 from . import modes as modes_mod
 from . import openrouter as openrouter_mod
 from . import ledger, lmstudio, litellm_cfg, planner, quota, router, sessions, tls, ui, vram
@@ -332,6 +333,8 @@ def report(days: float | None, as_json: bool) -> None:
                          f"{entry['seconds']:.0f}s", f"{entry['lines']:,}")
         ui.console.print(grid)
 
+    _report_money(stats["money"])
+
     ui.heading("Work the manager did not have to type")
     ui.say(f"  [ok]{w['lines_written']:,} lines written by delegates[/ok]  "
            f"[muted](~{w['approx_tokens']:,} tokens at {ledger.TOKENS_PER_LINE}/line)[/muted]")
@@ -385,6 +388,40 @@ def report(days: float | None, as_json: bool) -> None:
     ui.say("[muted]The two figures above are direct measurements. The utilisation numbers are "
            "not: the same window is shared with every other project, and no counterfactual "
            "was ever run, so they are observations rather than attribution.[/muted]")
+
+
+def _report_money(money: dict) -> None:
+    ui.heading("Money")
+    if not money["by_provider"]:
+        ui.say("  [muted]no delegations[/muted]")
+        return
+    if not money["counted"]:
+        ui.warn("  money is not counted: no remote delegation here carries a price its "
+                "provider stated")
+        ui.say("  [muted]ruti records cost only from the provider's own response (OpenRouter "
+               "states it per request); runs from before this was tracked, and providers "
+               "that state no price, are counted as runs but not as money[/muted]")
+    grid = ui.table("PROVIDER", "RUNS", "COSTED", "USD")
+    for provider, row in sorted(money["by_provider"].items()):
+        costed = f"{row['costed_runs']}/{row['runs']}"
+        usd = f"${row['usd']:.4f}" if row["costed_runs"] else "[muted]not counted[/muted]"
+        grid.add_row(provider, str(row["runs"]),
+                     costed if row["costed_runs"] == row["runs"] else f"[warn]{costed}[/warn]",
+                     usd)
+    ui.console.print(grid)
+    if money["counted"] and money["uncosted_runs"]:
+        ui.say(f"  [warn]{money['uncosted_runs']} run(s) carry no stated price -- the total "
+               f"is a lower bound[/warn]")
+    if money["by_model"]:
+        grid = ui.table("MODEL THAT ACTUALLY ANSWERED", "RUNS", "REQUESTS", "USD")
+        ranked = sorted(money["by_model"].items(),
+                        key=lambda item: (item[1]["usd"] or 0.0, item[1]["requests"]),
+                        reverse=True)
+        for model, row in ranked:
+            grid.add_row(ui.literal(model), str(row["runs"]), str(row["requests"]),
+                         f"${row['usd']:.4f}" if row["usd"] is not None
+                         else "[muted]not stated[/muted]")
+        ui.console.print(grid)
 
 
 @main.command()
@@ -594,7 +631,7 @@ def route(kind: str, files: int, loc: int, needs_tools: bool, repo_context: str,
 
     ui.heading("Eligible")
     for entry in result["ranked"]:
-        ui.say(f"  [ok]{entry['score']:.2f}[/ok]  {entry['executor']}  "
+        ui.say(f"  [ok]{entry['score']:.2f}[/ok]  {entry['executor']}  {_executor_tags(entry)}  "
                f"[muted]{entry['command']}[/muted]")
         for reason in entry["reasons"]:
             ui.say(f"        [muted]- {ui.literal(reason)}[/muted]")
@@ -602,10 +639,29 @@ def route(kind: str, files: int, loc: int, needs_tools: bool, repo_context: str,
     if result["rejected"]:
         ui.heading("Ruled out")
         for entry in result["rejected"]:
-            ui.say(f"  [bad]x[/bad]  {entry['executor']}: {ui.literal(entry['blockers'][0])}")
+            ui.say(f"  [bad]x[/bad]  {entry['executor']} {_executor_tags(entry)}: "
+                   f"{ui.literal(entry['blockers'][0])}")
 
     ui.heading("Advice")
     ui.say(f"  {ui.literal(result['advice'])}")
+
+
+def _executor_tags(entry: dict) -> str:
+    """`(router: ..., metered: ...)` -- who picks the model, and who gets paid."""
+    tags = []
+    if entry.get("router"):
+        tags.append("[warn]router: picks the model per request[/warn]")
+    if entry.get("metered") is True:
+        tags.append(f"[warn]metered: {ui.literal(entry['pays_in'])}[/warn]")
+    elif entry.get("metered") is None:
+        tags.append("[warn]price unknown[/warn]")
+    elif entry["tier"] == "remote":
+        tags.append("[ok]zero-cost[/ok]")
+    elif entry["tier"] == "local":
+        tags.append("[ok]local[/ok]")
+    else:
+        tags.append("[muted]subscription[/muted]")
+    return "(" + ", ".join(tags) + ")"
 
 
 @main.command()
@@ -652,6 +708,7 @@ def delegate(model: str, task: str | None, task_file: str | None, directory: str
     else:
         ui.bad(f"{outcome.model_requested} failed "
                f"({outcome.error or f'exit {outcome.exit_code}'}) after {outcome.duration_s:.0f}s")
+    _say_effective_model(outcome)
     if outcome.files_changed:
         ui.say("  changed: " + ", ".join(outcome.files_changed))
     if outcome.broken_files:
@@ -667,6 +724,38 @@ def delegate(model: str, task: str | None, task_file: str | None, directory: str
             ui.say(f"  [muted]{ui.literal(line)}[/muted]")
     ui.say(f"[muted]  full log: {ui.literal(outcome.log_path)}[/muted]")
     raise SystemExit(0 if outcome.ok else 1)
+
+
+def _say_effective_model(outcome: delegate_mod.Outcome) -> None:
+    """`pareto-code -> anthropic/claude-fable-5-1`, and what it cost if that is known."""
+    alias = outcome.model_requested.split("/")[-1]
+    spent = outcome.usage
+    # ASCII on purpose: through a pipe Python writes the console code page, and on a
+    # cp1251 console a real arrow arrives as a literal backslash escape.
+    arrow = f"{alias} -> {outcome.model_effective}"
+    if outcome.model_effective == usage_mod.UNKNOWN:
+        ui.warn(f"  model: {ui.literal(arrow)}"
+                + (f" -- {ui.literal(spent.note)}" if spent and spent.note else ""))
+        return
+
+    details = []
+    if outcome.router:
+        details.append("the router's pick")
+    if spent and len(spent.models) > 1:
+        others = ", ".join(f"{r['model']} x{r['requests']}" for r in spent.models[1:4])
+        details.append(f"{spent.models[0]['requests']} of {spent.requests} requests; "
+                       f"also {others}")
+    elif spent:
+        details.append(f"{spent.requests} request{'s' if spent.requests != 1 else ''}")
+    if spent and spent.cost_usd is not None:
+        details.append(f"${spent.cost_usd:.4f}"
+                       + ("" if spent.cost_complete else " for the requests that stated a price"))
+    elif spent and spent.requests:
+        details.append("cost not stated by the provider")
+    ui.say(f"  model: [head]{ui.literal(arrow)}[/head]"
+           + (f"  [muted]({ui.literal('; '.join(details))})[/muted]" if details else ""))
+    if spent and spent.note:
+        ui.say(f"  [muted]{ui.literal(spent.note)}[/muted]")
 
 
 # --------------------------------------------------------------------------- council
@@ -867,16 +956,27 @@ def provider_list(as_json: bool) -> None:
         ui.say("[muted]no providers registered; add one with `ruti provider add`[/muted]")
         return
 
-    grid = ui.table("ALIAS", "MODEL", "TOOLS", "KEY", "VERIFIED")
+    grid = ui.table("ALIAS", "MODEL", "TOOLS", "BILLING", "KEY", "VERIFIED")
     for record in registry["providers"]:
         secret = env.get(record["env_var"], "")
         grid.add_row(
-            record["alias"], record["model"],
+            record["alias"],
+            record["model"] + ("\n[warn]router: picks the model per request[/warn]"
+                               if openrouter_mod.is_router_record(record) else ""),
             "[ok]yes[/ok]" if record.get("supports_tools") else "[bad]no[/bad]",
+            _billing_label(record.get("free")),
             f"{record['env_var']} = {ui.mask(secret)}" if secret else "[bad]MISSING[/bad]",
             record.get("verified_at", "?"),
         )
     ui.console.print(grid)
+
+
+def _billing_label(free: bool | None) -> str:
+    if free is True:
+        return "[ok]zero-cost[/ok]"
+    if free is False:
+        return "[warn]metered, USD[/warn]"
+    return "[muted]unknown[/muted]"
 
 
 @provider.command("test")
@@ -967,18 +1067,25 @@ def openrouter_models(free_only: bool, coding_only: bool, refresh: bool, as_json
     if not catalog:
         ui.warn("OpenRouter's catalogue is unreachable and nothing is cached -- "
                 "showing the shortlist, unverified")
-    grid = ui.table("SLUG", "ALIAS", "CTX", "TOOLS", "COST", "UPSTREAM", "REGISTERED")
+    grid = ui.table("SLUG", "ALIAS", "KIND", "CTX", "TOOLS", "COST", "UPSTREAM", "REGISTERED")
     for row in rows:
         grid.add_row(
             row["id"],
             row["alias"],
+            # A router's model -- and so its class and its price -- is chosen per
+            # request. Saying "paid" alone would hide that the price is open-ended.
+            "[warn]router[/warn]" if row["router"] else "model",
             f"{row['context_length'] // 1000}k" if row["context_length"] else "?",
             "[ok]yes[/ok]" if row["supports_tools"] else "[bad]no[/bad]",
-            "[ok]free[/ok]" if row["free"] else "paid",
+            ("[ok]free[/ok]" if row["free"] else
+             "[warn]metered, varies by pick[/warn]" if row["router"] else "metered"),
             "[ok]listed[/ok]" if row["present"] else "[bad]missing[/bad]",
             "[ok]yes[/ok]" if row["registered"] else "[muted]no[/muted]",
         )
     ui.console.print(grid)
+    if any(row["router"] for row in rows):
+        ui.say("[muted]a router picks the real model per request; `ruti delegate` reports "
+               "which one it picked[/muted]")
     ui.say("[muted]register a set with `ruti openrouter setup`[/muted]")
 
 
@@ -1084,6 +1191,7 @@ def openrouter_setup(slugs_csv: str | None, key_stdin: bool, skip_verify: bool,
             "supports_tools": True,
             "free": openrouter_mod.is_free(slug),
             "coding": openrouter_mod.is_coding(slug),
+            "router": openrouter_mod.is_router(slug),
             "context_window": openrouter_mod._context(by_id.get(slug)) or None,
             "enabled": True,
             "verified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1095,7 +1203,9 @@ def openrouter_setup(slugs_csv: str | None, key_stdin: bool, skip_verify: bool,
     ui.heading("About to write")
     for record in planned:
         ui.say(f"  {record['alias']:<18} -> {record['model']}"
-               + ("  [ok](free)[/ok]" if record["free"] else "  [muted](paid)[/muted]"))
+               + ("  [ok](free)[/ok]" if record["free"] else "  [muted](metered)[/muted]")
+               + ("  [warn](router: picks the model per request)[/warn]"
+                  if record["router"] else ""))
     if not reuse_env_var:
         ui.say(f"  litellm/.env        {env_var}=<your key>")
     if not yes and not click.confirm("Write these?", default=True):

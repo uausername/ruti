@@ -35,3 +35,8 @@ litellm_settings:
   # swapped out every "local" request silently answered from Gemini instead - which
   # looks identical to the local model working, only slower and off-machine.
   default_fallbacks: ["gemini-flash"]
+  # One line per completion in %LOCALAPPDATA%\ruti\usage.jsonl naming the model that
+  # really answered. For a router alias such as pareto-code that is the only place the
+  # router's pick survives: the proxy rewrites `model` in every response to the alias
+  # the client asked for. `ruti delegate` reads it back -- see ruti_usage.py.
+  callbacks: ruti_usage.handler

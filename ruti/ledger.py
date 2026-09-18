@@ -14,6 +14,9 @@ What is measured exactly:
   completeness, but measurement showed this to be small -- `opencode`'s default output
   is terse, so containing it is worth far less than the design originally assumed.
 * **Delegation outcomes** -- succeeded, failed, silently answered by a fallback.
+* **Money, where the provider states it** -- which model really answered each run and
+  what the provider billed for it. Runs without a stated price are counted as runs,
+  never silently as zero.
 * **Utilisation at session start and end**, from the status line's readings.
 
 What is *not* measured, and must not be implied: the counterfactual. Nobody can say
@@ -31,6 +34,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterator
 
+from . import usage
 from .config import STATE_ROOT, ensure_dirs, read_json
 
 LEDGER = STATE_ROOT / "ledger.jsonl"
@@ -288,6 +292,7 @@ def summarise(events: list[dict[str, Any]]) -> dict[str, Any]:
             "delegate_output_bytes": log_bytes,
             "summary_bytes": summary_bytes,
         },
+        "money": usage.summarise_costs(delegations),
         "routes": route_compliance(events),
         "sessions": {
             "seen": len(sessions),

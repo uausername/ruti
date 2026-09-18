@@ -52,6 +52,12 @@ It also checks which model really answered. If it reports `substituted: true`, a
 backend is down and LiteLLM's fallback took the request — work meant to stay on this
 machine went to a remote provider instead. Stop and run `ruti doctor --fix`.
 
+`model_effective` is the model that actually did the work. For a router alias such as
+`pareto-code` it is the router's own pick, which can be a frontier model billed in USD
+— "no subscription quota" is not "free". `unknown` means the proxy could not say; the
+`usage.note` field says why. Read `route`'s `metered` / `pays_in` before picking a
+metered executor for work a free one could do.
+
 For a large delegation, hand the run to the `delegate-runner` agent instead, and the
 resulting diff to `delegate-verifier` when it exceeds ~3 files or ~200 lines. Below
 that, read the diff yourself; two subagents for a small change cost more than they save.

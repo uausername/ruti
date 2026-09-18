@@ -32,7 +32,8 @@ do not design, and you do not implement anything yourself.
 
 Six lines at most:
 
-- whether it succeeded, and which model actually answered;
+- whether it succeeded, and which model actually answered -- `model_effective`, not
+  the alias; for a router say both (`pareto-code -> <model>`) and the `cost_usd` if set;
 - the files changed with their `git diff --stat` line;
 - anything that does not match the brief;
 - the log path, only if it failed.

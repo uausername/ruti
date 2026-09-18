@@ -11,6 +11,10 @@ It also guards the failure that motivated this whole project: a request for a lo
 model silently answered by a remote one. LiteLLM's fallback chain does that by design,
 and from the outside it is indistinguishable from success -- except that the response
 names the model that really answered. So we ask, before sending the work.
+
+That check is about *which backend* took the request, and it says nothing about which
+model did the work behind a router. The two are reported separately: `substituted`
+for the first, `model_effective` for the second (see `usage.py`).
 """
 
 from __future__ import annotations
@@ -22,7 +26,8 @@ from pathlib import Path
 from typing import Any
 
 from . import proc
-from .config import LOG_DIR, PROXY_BASE, STATE_ROOT, ensure_dirs, write_json
+from . import usage as usage_mod
+from .config import LOG_DIR, PROXY_BASE, STATE_ROOT, ensure_dirs, read_json, write_json
 
 DEFAULT_TIMEOUT = 900.0
 
@@ -39,9 +44,23 @@ GENERATED_DIRS = frozenset({
 
 
 @dataclass
+class Probe:
+    """What the proxy said about a one-token request to an alias."""
+
+    model: str | None = None
+    group: str | None = None  # the model group that served it
+    fallbacks: int | None = None  # LiteLLM's own count of fallbacks attempted
+
+
+@dataclass
 class Outcome:
     model_requested: str
     model_answering: str | None = None
+    # The model that really did the work, from the proxy's usage log -- never the
+    # alias. For a router alias this is where its pick finally becomes visible.
+    model_effective: str = usage_mod.UNKNOWN
+    router: bool = False
+    usage: usage_mod.Usage | None = None
     exit_code: int | None = None
     duration_s: float = 0.0
     files_changed: list[str] = field(default_factory=list)
@@ -62,7 +81,11 @@ class Outcome:
             "ok": self.ok,
             "model_requested": self.model_requested,
             "model_answering": self.model_answering,
+            "model_effective": self.model_effective,
+            "router": self.router,
             "substituted": self.substituted,
+            "cost_usd": self.usage.cost_usd if self.usage else None,
+            **({"usage": self.usage.summary()} if self.usage else {}),
             "exit_code": self.exit_code,
             "duration_s": round(self.duration_s, 1),
             "files_changed": self.files_changed,
@@ -76,11 +99,18 @@ class Outcome:
 
 
 def who_answers(model: str, timeout: float = 30.0) -> str | None:
-    """Ask the proxy which model actually replies for `model`.
+    """Ask the proxy which model actually replies for `model`."""
+    return probe(model, timeout).model
+
+
+def probe(model: str, timeout: float = 30.0) -> Probe:
+    """Send `model` a one-token request and keep what the proxy says about the reply.
 
     A mismatch means LiteLLM's fallback is standing in for a backend that is down. The
     request still succeeds, so nothing downstream notices -- including the manager,
-    which will happily keep routing "local, private" work to a remote provider.
+    which will happily keep routing "local, private" work to a remote provider. The
+    proxy also states it outright in `x-litellm-attempted-fallbacks`, which is what
+    lets a router naming its own pick be told apart from a fallback.
     """
     import urllib.error
     import urllib.request
@@ -96,9 +126,55 @@ def who_answers(model: str, timeout: float = 30.0) -> str | None:
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8")).get("model")
+            body = json.loads(response.read().decode("utf-8"))
+            headers = response.headers
     except (urllib.error.URLError, ValueError, TimeoutError, OSError):
+        return Probe()
+    try:
+        fallbacks = int(headers.get("x-litellm-attempted-fallbacks"))
+    except (TypeError, ValueError):
+        fallbacks = None
+    return Probe(
+        model=body.get("model") if isinstance(body, dict) else None,
+        group=headers.get("x-litellm-model-group") or None,
+        fallbacks=fallbacks,
+    )
+
+
+def is_substitution(alias: str, answer: Probe, *, router: bool) -> bool:
+    """Did a different backend take the request than the one `alias` names?
+
+    Unchanged in meaning from the original name comparison: it is about LiteLLM's
+    fallback standing in for a backend that is down. What it must not do is read a
+    router's choice as that. A router answering under the name of the model it picked
+    is doing its job -- only the proxy reporting a fallback, or a different group
+    serving the request, counts as one.
+    """
+    if answer.fallbacks:
+        return True
+    if answer.group and answer.group != alias:
+        return True
+    if not answer.model or answer.model.split("/")[-1] == alias:
+        return False
+    return not router
+
+
+def _router_alias(alias: str) -> bool:
+    from . import openrouter, providers
+
+    return any(
+        openrouter.is_router_record(record)
+        for record in providers.load_registry()["providers"]
+        if record.get("alias") == alias
+    )
+
+
+def _running_alias() -> str | None:
+    """The alias another delegation is running against right now, if any."""
+    marker = read_json(RUNNING_FILE, default=None)
+    if not isinstance(marker, dict) or marker.get("expires_at", 0) < time.time():
         return None
+    return str(marker.get("model", "")).split("/")[-1] or None
 
 
 def _opencode_executable() -> str:
@@ -147,16 +223,16 @@ def run(
 ) -> Outcome:
     """Run one delegated task and return a summary small enough to read."""
     ensure_dirs()
-    outcome = Outcome(model_requested=model)
+    alias = model.split("/")[-1]
+    outcome = Outcome(model_requested=model, router=_router_alias(alias))
     stamp = time.strftime("%Y%m%d-%H%M%S")
     log_path = LOG_DIR / f"delegate-{stamp}-{model.replace('/', '_')}.log"
     outcome.log_path = str(log_path)
 
     if check_substitution:
-        answering = who_answers(f"{model.split('/')[-1]}")
-        outcome.model_answering = answering
-        if answering and answering.split("/")[-1] != model.split("/")[-1]:
-            outcome.substituted = True
+        answer = probe(alias)
+        outcome.model_answering = answer.model
+        outcome.substituted = is_substitution(alias, answer, router=outcome.router)
 
     # Kept alongside the log so a surprising result can be traced back to the exact
     # brief that produced it. It is not passed with `-f`: that flag takes a list of
@@ -178,7 +254,11 @@ def run(
     head_before = _git(["rev-parse", "HEAD"], directory)
     dirty_before = set(_git(["status", "--porcelain"], directory).splitlines())
 
+    # Usage is matched by alias and time, so a concurrent run against the same alias
+    # would be counted in with this one. Rare, but worth saying when it can happen.
+    overlapping = _running_alias() == alias
     started = time.monotonic()
+    started_wall = time.time()
     _mark_running(model, timeout)
     try:
         # `opencode run` has no timeout flag of its own, so the parent has to impose
@@ -221,7 +301,17 @@ def run(
         outcome.exit_code = -1
     finally:
         outcome.duration_s = time.monotonic() - started
+        finished_wall = time.time()
         _clear_running()
+
+    outcome.usage = usage_mod.collect(alias, started_wall, finished_wall)
+    outcome.model_effective = outcome.usage.model
+    if overlapping:
+        outcome.usage.note = "; ".join(filter(None, [
+            outcome.usage.note,
+            "another delegation to this alias was running at the same time, and its "
+            "requests may be counted here",
+        ]))
 
     dirty_after = set(_git(["status", "--porcelain"], directory).splitlines())
     outcome.files_changed = sorted(
@@ -372,12 +462,27 @@ def _record(outcome: Outcome, log_path: Path) -> None:
         log_bytes = 0
 
     alias = outcome.model_requested.split("/")[-1]
+    # A local run that a fallback answered was not local, and may have been billed.
+    local = alias.startswith("local-") and not outcome.substituted
+    spent = outcome.usage
     ledger.record(
         "delegation",
         model=outcome.model_requested,
         tier="local" if alias.startswith("local-") else "remote",
         ok=outcome.ok,
         substituted=outcome.substituted,
+        model_effective=outcome.model_effective,
+        router=outcome.router,
+        # Who sends the bill, for the report's money column. A local run costs nothing
+        # by construction; a remote one is costed only if the provider stated a price.
+        provider="local" if local else _billing_provider(alias),
+        requests=spent.requests if spent else 0,
+        cost_usd=0.0 if local else (spent.cost_usd if spent else None),
+        cost_complete=True if local else bool(spent and spent.cost_complete),
+        models={
+            row["model"]: {"requests": row["requests"], "cost_usd": row["cost_usd"]}
+            for row in (spent.models if spent else [])
+        },
         duration_s=round(outcome.duration_s, 1),
         files_changed=len(outcome.files_changed),
         # The names, not just the count: without them the report can say how much a
@@ -388,3 +493,12 @@ def _record(outcome: Outcome, log_path: Path) -> None:
         log_bytes=log_bytes,
         summary_bytes=len(json.dumps(outcome.summary())),
     )
+
+
+def _billing_provider(alias: str) -> str | None:
+    from . import providers
+
+    for record in providers.load_registry()["providers"]:
+        if record.get("alias") == alias:
+            return record.get("provider")
+    return None

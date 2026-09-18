@@ -28,6 +28,7 @@ from typing import Any
 from .config import STATE_ROOT, read_json, write_json
 
 CATALOG_URL = "https://openrouter.ai/api/v1/models"
+GENERATION_URL = "https://openrouter.ai/api/v1/generation"
 CATALOG_CACHE = STATE_ROOT / "openrouter-catalog.json"
 CATALOG_TTL_SECONDS = 6 * 3600
 
@@ -87,6 +88,24 @@ def is_router(slug: str) -> bool:
     return slug in ROUTERS
 
 
+def slug_of(litellm_model: str) -> str:
+    """`openrouter/openrouter/pareto-code` -> `openrouter/pareto-code`; others as given."""
+    prefix = "openrouter/"
+    return litellm_model[len(prefix):] if litellm_model.startswith(prefix) else litellm_model
+
+
+def is_router_record(record: dict[str, Any]) -> bool:
+    """Whether a registered alias is a router rather than one fixed model.
+
+    Records written before the flag existed are judged from their model string, so an
+    existing registry needs no migration.
+    """
+    if record.get("router") is not None:
+        return bool(record["router"])
+    model = str(record.get("model") or "")
+    return model.startswith("openrouter/") and is_router(slug_of(model))
+
+
 def is_coding(slug: str) -> bool:
     """Whether this endpoint is specifically for code.
 
@@ -95,6 +114,27 @@ def is_coding(slug: str) -> bool:
     nothing else is guessed at -- a record in providers.json can be marked by hand.
     """
     return slug == PARETO_CODE
+
+
+def generation(gen_id: str, api_key: str, *, timeout: float = 15.0) -> dict[str, Any] | None:
+    """OpenRouter's own record of one completion: the model it ran, and what it cost.
+
+    None when the id is not (yet) known -- OpenRouter indexes a generation a few
+    seconds after it finishes -- or when OpenRouter cannot be reached.
+    """
+    from urllib.parse import urlencode
+
+    request = urllib.request.Request(
+        f"{GENERATION_URL}?{urlencode({'id': gen_id})}",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+        return None
+    data = payload.get("data") if isinstance(payload, dict) else None
+    return data if isinstance(data, dict) else None
 
 
 def alias_for(slug: str) -> str:
