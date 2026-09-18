@@ -303,10 +303,18 @@ def model_use(key: str, context: int | None, min_context: int, ttl: int | None,
 
 @main.command()
 @click.option("--days", type=float, default=None, help="Only count the last N days.")
+@click.option("--routes", is_flag=True,
+              help="List each ranking instead: what was recommended, what was ruled out "
+                   "and why, and what came of it.")
+@click.option("--limit", type=int, default=15, show_default=True,
+              help="With --routes: how many of the latest rankings to show.")
 @click.option("--json", "as_json", is_flag=True)
-def report(days: float | None, as_json: bool) -> None:
+def report(days: float | None, routes: bool, limit: int, as_json: bool) -> None:
     """Show what delegation has actually bought you."""
     events = ledger.read_events(since_days=days)
+    if routes:
+        _report_routes(ledger.route_history(events, limit=limit or None), as_json)
+        return
     stats = ledger.summarise(events)
 
     if as_json:
@@ -362,11 +370,13 @@ def report(days: float | None, as_json: bool) -> None:
     if r["total"]:
         ui.heading("Routing")
         ui.say(f"  {r['total']} ranking(s) requested: [ok]{r['followed']} followed[/ok], "
-               f"{r['recommended_self']} recommended this session, "
+               f"{r['recommended_self']} kept on Claude (in session or a subagent), "
                + (f"[warn]{r['ignored']} ignored[/warn]" if r["ignored"] else "0 ignored"))
         if r["ignored"]:
             ui.say("  [muted]ignored means the ranking named a delegate and no delegation "
                    "to it followed in that session[/muted]")
+        ui.say("  [muted]each one, with what was ruled out and why: "
+               "`ruti report --routes`[/muted]")
 
     ui.heading("Window utilisation per session")
     if s["with_usable_quota_readings"] < 2:
@@ -388,6 +398,97 @@ def report(days: float | None, as_json: bool) -> None:
     ui.say("[muted]The two figures above are direct measurements. The utilisation numbers are "
            "not: the same window is shared with every other project, and no counterfactual "
            "was ever run, so they are observations rather than attribution.[/muted]")
+
+
+# How many ruled-out executors a ranking lists before summarising the rest.
+ROUTES_REJECTED_SHOWN = 5
+
+
+def _report_routes(rows: list[dict], as_json: bool) -> None:
+    """One block per ranking: the pick, the runners-up, what was ruled out, the outcome."""
+    import time
+
+    if as_json:
+        ui.emit_json({"routes": rows})
+        return
+    if not rows:
+        ui.say("[muted]no rankings recorded -- `ruti route` records one each time it is "
+               "asked (except with --probe)[/muted]")
+        return
+
+    this_session = sessions.current_session_id()
+    for row in rows:
+        when = time.strftime("%m-%d %H:%M", time.localtime(row.get("at", 0)))
+        modes = modes_mod.active_summary(row.get("modes") or {})
+        ui.say("")
+        ui.say(f"[head]{when}[/head]  {row.get('kind') or '?'}, {row.get('files', '?')} "
+               f"file(s), ~{row.get('loc', '?')} loc  [muted]{row.get('band') or '?'}"
+               + (f", {modes}" if modes else "")
+               + (", this session" if this_session and row.get("session") == this_session
+                  else "") + "[/muted]")
+        ui.say(f"  -> {row.get('recommended') or 'nothing eligible'}   "
+               + _route_outcome_text(row))
+
+        ranked = row.get("ranked")
+        if ranked is None:
+            # Recorded before the alternatives were logged.
+            ui.say(f"     [muted]{row.get('eligible', '?')} eligible; alternatives were "
+                   "not recorded then[/muted]")
+            continue
+        runners_up = [f"{r['executor']} {r['score']:.2f}" for r in ranked[1:]]
+        if runners_up:
+            ui.say(f"     [muted]next: {', '.join(runners_up)}[/muted]")
+        rejected = row.get("rejected") or []
+        for entry in rejected[:ROUTES_REJECTED_SHOWN]:
+            ui.say(f"     [bad]x[/bad] {entry['executor']}: "
+                   f"[muted]{ui.literal(entry['reason'])}[/muted]")
+        if len(rejected) > ROUTES_REJECTED_SHOWN:
+            ui.say(f"     [muted]... {len(rejected) - ROUTES_REJECTED_SHOWN} more ruled out "
+                   "(`--json` lists them all)[/muted]")
+
+
+def _route_outcome_text(row: dict) -> str:
+    """`[ok]delegated 14:05, answered by X, ok, 42 s, $0.0012[/ok]` and the like."""
+    import time
+
+    def run(entry: dict) -> str:
+        when = time.strftime("%H:%M", time.localtime(entry.get("at", 0)))
+        requested = str(entry.get("model") or "?").split("/")[-1]
+        answered = entry.get("model_effective")
+        who = (f"{requested}, answered by {answered}"
+               if answered and answered != "unknown" else requested)
+        state = ("SUBSTITUTED" if entry.get("substituted")
+                 else "ok" if entry.get("ok") else "FAILED")
+        cost = entry.get("cost_usd")
+        price = (f"${cost:.4f}" + ("" if entry.get("cost_complete") else "+")
+                 if cost is not None else "price unknown")
+        return f"{when} {who}, {state}, {entry.get('duration_s', '?')} s, {price}"
+
+    outcome = row.get("outcome")
+    instead = row.get("instead") or []
+    if outcome == "followed":
+        delegation = row["delegation"]
+        colour = "ok" if delegation.get("ok") and not delegation.get("substituted") else "bad"
+        tries = row.get("attempts") or 1
+        return (f"[{colour}]delegated{f' ({tries} attempts, latest)' if tries > 1 else ''} "
+                f"{run(delegation)}[/{colour}]")
+    if outcome == "in_session":
+        # ruti sees delegations, not how the manager did the rest -- so this says what
+        # was recommended, never that it was done.
+        recommended = row.get("recommended") or ""
+        if not recommended:
+            text = "[muted]nothing was eligible[/muted]"
+        elif recommended == "claude:self":
+            text = "[muted]recommended writing it in session[/muted]"
+        else:
+            text = (f"[muted]recommended a {recommended.split(':')[-1]} subagent "
+                    "(ruti does not see subagents)[/muted]")
+        if instead:
+            text += f"; [warn]delegated anyway: {run(instead[-1])}[/warn]"
+        return text
+    if outcome == "instead":
+        return f"[warn]delegated elsewhere: {run(instead[-1])}[/warn]"
+    return "[warn]not delegated[/warn]"
 
 
 def _report_money(money: dict) -> None:
@@ -528,12 +629,12 @@ def mode(ctx: click.Context, as_json: bool) -> None:
 @click.argument("state", type=click.Choice(["on", "off"]))
 def mode_coding(state: str) -> None:
     """Toggle the coding hint. On: the prompt hook tells the manager to prefer the
-    `pareto-code` router and coding-tuned models whenever it delegates."""
+    registered coding-tuned aliases whenever it delegates, and `route` ranks them up."""
     session_id = _session_or_die()
     modes_mod.set_coding(session_id, state == "on")
     if state == "on":
-        ui.ok("coding mode on -- the manager will be told to reach for `pareto-code` and "
-              "coding models when it delegates (register them with `ruti openrouter setup`)")
+        ui.ok("coding mode on -- the manager will be told:")
+        ui.say(f"  [muted]{ui.literal(modes_mod.coding_note(modes_mod.current(session_id)['free']))}[/muted]")
     else:
         ui.ok("coding mode off")
 
@@ -609,14 +710,18 @@ def _refuse_if_disabled(as_json: bool) -> None:
               help="How much of the repository has to be in context.")
 @click.option("--risk", type=click.Choice(["low", "medium", "high"]), default="low")
 @click.option("--latency", type=click.Choice(["interactive", "background"]), default="background")
+@click.option("--probe", is_flag=True,
+              help="Rank without recording a recommendation: for checking what route "
+                   "would say, not for a task about to start. The prompt hook then has "
+                   "nothing to remind you to delegate.")
 @click.option("--json", "as_json", is_flag=True)
 def route(kind: str, files: int, loc: int, needs_tools: bool, repo_context: str,
-          risk: str, latency: str, as_json: bool) -> None:
+          risk: str, latency: str, probe: bool, as_json: bool) -> None:
     """Rank the executors for a task you have already classified."""
     _refuse_if_disabled(as_json)
     task = router.Task(kind=kind, files=files, loc=loc, needs_tools=needs_tools,
                        repo_context=repo_context, risk=risk, latency=latency)
-    result = router.rank(task)
+    result = router.rank(task, record=not probe)
 
     if as_json:
         ui.emit_json(result)
@@ -842,12 +947,49 @@ def _pick_provider() -> str:
         ui.say("  " + ", ".join(matches[:25]))
 
 
+def _unverified(message: str) -> None:
+    ui.say(f"[warn]??[/warn]  {message}")
+
+
 def _report(verdict: providers_mod.Verdict) -> None:
     for stage in verdict.stages:
-        mark = {"pass": ui.ok, "fail": ui.bad, "skip": ui.say}[stage.result]
+        mark = {"pass": ui.ok, "fail": ui.bad, "skip": ui.say,
+                providers_mod.UNVERIFIED: _unverified}[stage.result]
         timing = f" [muted]({stage.latency_ms} ms)[/muted]" if stage.latency_ms else ""
         prefix = "    " if stage.result == "skip" else ""
         mark(f"{prefix}{stage.name:<10} {ui.literal(stage.detail)}{timing}")
+
+
+def _serve_written_aliases(no_restart: bool) -> None:
+    """Restart the proxy so it serves what was just written, and say what it serves.
+
+    This used to end with advice to restart it by hand with `Stop-ScheduledTask` /
+    `Start-ScheduledTask`, which does not work: stopping the task ends only its
+    launcher, the proxy it started keeps :4000, and every new alias stays "registered
+    but not served" (found live, 2026-09-18). The restart here is the one `ruti doctor
+    --fix` does, which kills the listener itself and confirms the port is free.
+    """
+    if no_restart:
+        ui.say("[muted]the running proxy was left alone (--no-restart) -- it serves the new "
+               "aliases once `ruti doctor --fix` restarts it[/muted]")
+        return
+    ui.heading("Restarting the proxy")
+    try:
+        ui.ok(doctor_mod._fix_proxy_restart())
+    except Exception as exc:
+        ui.bad(f"restart failed: {ui.literal(str(exc))}")
+        ui.say("[muted]registered, but not served until the proxy restarts -- `ruti doctor` "
+               "says what is in the way, `ruti doctor --fix` retries[/muted]")
+        return
+    declared = litellm_cfg.declared_models()
+    served = set(litellm_cfg.served_models())
+    missing = [name for name in declared if name not in served]
+    count = f"{len(declared) - len(missing)} of {len(declared)}"
+    if missing:
+        ui.warn(f"proxy is up, but serving {count} declared model(s) -- not served: "
+                f"{', '.join(missing)}; see litellm/litellm.log")
+    else:
+        ui.ok(f"proxy serving {count} declared model(s)")
 
 
 @provider.command("add")
@@ -856,9 +998,12 @@ def _report(verdict: providers_mod.Verdict) -> None:
 @click.option("--alias", default=None, help="Name to route to through the proxy.")
 @click.option("--api-base", default=None, help="Override the endpoint (custom deployments).")
 @click.option("--key-stdin", is_flag=True, help="Read the key from stdin instead of prompting.")
+@click.option("--no-restart", is_flag=True,
+              help="Leave the running proxy alone. By default it is restarted to serve the "
+                   "new alias, which fails any delegation running through it right then.")
 @click.option("--yes", is_flag=True, help="Do not ask for confirmation before writing.")
 def provider_add(provider_name: str | None, model: str | None, alias: str | None,
-                 api_base: str | None, key_stdin: bool, yes: bool) -> None:
+                 api_base: str | None, key_stdin: bool, no_restart: bool, yes: bool) -> None:
     """Add a provider. Nothing is written unless the key proves itself first."""
     import sys
 
@@ -900,7 +1045,10 @@ def provider_add(provider_name: str | None, model: str | None, alias: str | None
         raise click.ClickException(
             f"not saved -- {failure.detail if failure else 'the key did not pass'}"
         )
-    if not verdict.supports_tools:
+    if verdict.supports_tools is None:
+        ui.warn("tool calling could not be verified; it is registered without it until "
+                f"`ruti provider test {alias}` gets an answer")
+    elif not verdict.supports_tools:
         ui.warn("this model cannot drive `opencode`; it will be registered for text only")
 
     index = providers_mod.next_key_index(name)
@@ -938,8 +1086,8 @@ def provider_add(provider_name: str | None, model: str | None, alias: str | None
     aliases = sorted(set(litellm_cfg.routable_aliases()) | {alias})
     litellm_cfg.sync_opencode(aliases)
 
-    ui.ok(f"{alias} registered in LiteLLM and OpenCode -- restart the proxy to route to it "
-          "(`Stop-ScheduledTask`/`Start-ScheduledTask -TaskName RutiLiteLLM`)")
+    ui.ok(f"{alias} registered in LiteLLM and OpenCode")
+    _serve_written_aliases(no_restart)
 
 
 @provider.command("list")
@@ -963,7 +1111,8 @@ def provider_list(as_json: bool) -> None:
             record["alias"],
             record["model"] + ("\n[warn]router: picks the model per request[/warn]"
                                if openrouter_mod.is_router_record(record) else ""),
-            "[ok]yes[/ok]" if record.get("supports_tools") else "[bad]no[/bad]",
+            ("[warn]unverified[/warn]" if record.get("supports_tools") is None
+             else "[ok]yes[/ok]" if record["supports_tools"] else "[bad]no[/bad]"),
             _billing_label(record.get("free")),
             f"{record['env_var']} = {ui.mask(secret)}" if secret else "[bad]MISSING[/bad]",
             record.get("verified_at", "?"),
@@ -991,6 +1140,7 @@ def provider_test(alias: str | None, as_json: bool) -> None:
         raise click.ClickException(f"no provider registered as {alias!r}")
 
     results = []
+    changed = False
     for record in targets:
         key = env.get(record["env_var"], "")
         if not key:
@@ -1003,6 +1153,15 @@ def provider_test(alias: str | None, as_json: bool) -> None:
         )
         if not as_json:
             _report(verdict)
+        # A conclusive answer replaces what registration recorded -- which may have been
+        # "unverified" because the probe then was rate limited. Only a tools stage that
+        # ran and was judged counts: when the chat stage or TLS failed first, the probe
+        # never ran and `supports_tools` is just the default, not an answer.
+        judged = any(s.name == "tools" and s.result in (providers_mod.PASS, providers_mod.FAIL)
+                     for s in verdict.stages)
+        if judged and record.get("supports_tools") != verdict.supports_tools:
+            record["supports_tools"] = verdict.supports_tools
+            changed = True
         results.append({
             "alias": record["alias"], "usable": verdict.usable,
             "supports_tools": verdict.supports_tools,
@@ -1010,6 +1169,8 @@ def provider_test(alias: str | None, as_json: bool) -> None:
                        for s in verdict.stages],
         })
 
+    if changed:
+        providers_mod.save_registry(registry)
     if as_json:
         ui.emit_json(results)
     raise SystemExit(0 if all(r["usable"] for r in results) else 1)
@@ -1074,7 +1235,8 @@ def openrouter_models(free_only: bool, coding_only: bool, refresh: bool, as_json
             row["alias"],
             # A router's model -- and so its class and its price -- is chosen per
             # request. Saying "paid" alone would hide that the price is open-ended.
-            "[warn]router[/warn]" if row["router"] else "model",
+            ("[warn]router[/warn]" if row["router"] else "model")
+            + (", [ok]code[/ok]" if row["coding"] else ""),
             f"{row['context_length'] // 1000}k" if row["context_length"] else "?",
             "[ok]yes[/ok]" if row["supports_tools"] else "[bad]no[/bad]",
             ("[ok]free[/ok]" if row["free"] else
@@ -1097,14 +1259,22 @@ def openrouter_models(free_only: bool, coding_only: bool, refresh: bool, as_json
 @click.option("--skip-verify", is_flag=True,
               help="Register without probing the key first (for when the proxy or "
                    "network is down).")
+@click.option("--coding", is_flag=True,
+              help="Mark every model selected in this run as tuned for code, so coding "
+                   "mode ranks it up. The ones ruti knows as coding models are marked "
+                   "regardless.")
+@click.option("--no-restart", is_flag=True,
+              help="Leave the running proxy alone. By default it is restarted to serve the "
+                   "new aliases, which fails any delegation running through it right then.")
 @click.option("--yes", is_flag=True, help="Take the defaults and do not ask before writing.")
 def openrouter_setup(slugs_csv: str | None, key_stdin: bool, skip_verify: bool,
-                     yes: bool) -> None:
+                     coding: bool, no_restart: bool, yes: bool) -> None:
     """Register the OpenRouter coding routers and free models as routable aliases.
 
     This is the 'coding harness' switch on the plumbing side: afterwards `pareto-code`
     and `free` (plus any free models you pick) are selectable through the proxy and
-    OpenCode. Turn the per-session hint on separately with `ruti mode coding on`.
+    OpenCode, and the proxy is restarted to serve them. Turn the per-session hint on
+    separately with `ruti mode coding on`.
     """
     import os
     import sys
@@ -1176,9 +1346,13 @@ def openrouter_setup(slugs_csv: str | None, key_stdin: bool, skip_verify: bool,
     by_id = {e.get("id"): e for e in catalog}
     known_aliases = {r["alias"] for r in registry["providers"]}
     planned = []
+    marked = []  # already registered, now flagged as coding by --coding
     for slug in slugs:
         alias = openrouter_mod.alias_for(slug)
         if alias in known_aliases:
+            if coding:
+                marked.extend(r for r in registry["providers"]
+                              if r["alias"] == alias and not r.get("coding"))
             ui.say(f"[muted]{alias} already registered -- skipping[/muted]")
             continue
         known_aliases.add(alias)
@@ -1190,26 +1364,39 @@ def openrouter_setup(slugs_csv: str | None, key_stdin: bool, skip_verify: bool,
             "api_base": None,
             "supports_tools": True,
             "free": openrouter_mod.is_free(slug),
-            "coding": openrouter_mod.is_coding(slug),
+            "coding": coding or openrouter_mod.is_coding(slug),
             "router": openrouter_mod.is_router(slug),
             "context_window": openrouter_mod._context(by_id.get(slug)) or None,
             "enabled": True,
             "verified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         })
-    if not planned:
+    if not planned and not marked:
         ui.ok("everything selected was already registered")
+        _suggest_coding_mode()
         return
 
     ui.heading("About to write")
     for record in planned:
         ui.say(f"  {record['alias']:<18} -> {record['model']}"
                + ("  [ok](free)[/ok]" if record["free"] else "  [muted](metered)[/muted]")
+               + ("  [ok](coding)[/ok]" if record["coding"] else "")
                + ("  [warn](router: picks the model per request)[/warn]"
                   if record["router"] else ""))
-    if not reuse_env_var:
+    for record in marked:
+        ui.say(f"  {record['alias']:<18} already registered, marked as coding")
+    if planned and not reuse_env_var:
         ui.say(f"  litellm/.env        {env_var}=<your key>")
     if not yes and not click.confirm("Write these?", default=True):
         ui.say("[muted]nothing written[/muted]")
+        return
+
+    for record in marked:
+        record["coding"] = True
+    if not planned:
+        # Only flags changed: nothing the proxy or OpenCode reads, so no restart.
+        providers_mod.save_registry(registry)
+        ui.ok(f"marked {len(marked)} alias(es) as coding")
+        _suggest_coding_mode()
         return
 
     if not reuse_env_var:
@@ -1222,9 +1409,19 @@ def openrouter_setup(slugs_csv: str | None, key_stdin: bool, skip_verify: bool,
     litellm_cfg.sync_opencode(aliases)
 
     ui.ok(f"registered {len(planned)} alias(es): {', '.join(r['alias'] for r in planned)}")
-    ui.say("[muted]restart the proxy to route to them "
-           "(`Stop-ScheduledTask`/`Start-ScheduledTask -TaskName RutiLiteLLM`), "
-           "then turn the hint on with `ruti mode coding on`[/muted]")
+    _serve_written_aliases(no_restart)
+    _suggest_coding_mode()
+
+
+def _suggest_coding_mode() -> None:
+    """Point at `ruti mode coding on` -- only when it would change something: a coding
+    alias is registered for it to prefer, and the mode is not on already."""
+    if modes_mod.current(sessions.current_session_id())["coding"]:
+        return
+    if not modes_mod.coding_aliases():
+        return
+    ui.say("[muted]turn the hint on with `ruti mode coding on` to have delegation prefer "
+           "the coding aliases[/muted]")
 
 
 @main.command()

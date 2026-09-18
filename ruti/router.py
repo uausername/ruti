@@ -216,7 +216,7 @@ def _remote_candidates(task: Task) -> list[Candidate]:
             speed=0.75,
             capability=0.7,
             free=record.get("free"),
-            coding=bool(record.get("coding")),
+            coding=openrouter.is_coding_record(record),
             router=openrouter.is_router_record(record),
             provider=record.get("provider"),
             command=f"ruti delegate --model {alias} --task-file <file>",
@@ -230,8 +230,14 @@ def _remote_candidates(task: Task) -> list[Candidate]:
                    else " -- and so is what it costs")
             )
         if alias not in served:
-            candidate.blockers.append("registered but not served -- restart the proxy")
-        if not record.get("supports_tools"):
+            candidate.blockers.append(
+                "registered but not served -- `ruti doctor --fix` restarts the proxy")
+        if record.get("supports_tools") is None:
+            candidate.blockers.append(
+                "tool calling not verified yet (the probe got no answer) -- "
+                f"`ruti provider test {alias}` re-checks it"
+            )
+        elif not record.get("supports_tools"):
             candidate.blockers.append("no verified tool calling, so it cannot drive `opencode`")
         out.append(candidate)
 
@@ -314,7 +320,11 @@ def _self_candidate(task: Task, snapshot: quota.Quota) -> Candidate:
     return candidate
 
 
-def rank(task: Task, snapshot: quota.Quota | None = None) -> dict[str, Any]:
+def rank(task: Task, snapshot: quota.Quota | None = None, *,
+         record: bool = True) -> dict[str, Any]:
+    """Rank every executor for `task`. `record=False` is `route --probe`: the ranking
+    is not logged, so it is neither counted as advice nor chased by the prompt hook's
+    "nothing has been delegated" reminder."""
     snapshot = snapshot or quota.load()
     needed = task.estimated_tokens + (OPENCODE_PROMPT_TOKENS if task.needs_tools else 0)
     session_modes = modes.current(sessions.current_session_id())
@@ -400,15 +410,23 @@ def rank(task: Task, snapshot: quota.Quota | None = None) -> dict[str, Any]:
 
     # Recorded so the report can later say whether the ranking was actually followed.
     # A router whose advice is routinely ignored is worth knowing about.
-    from . import ledger
+    if record:
+        from . import ledger
 
-    ledger.record(
-        "route",
-        kind=task.kind, files=task.files, loc=task.loc,
-        band=snapshot.band,
-        recommended=eligible[0].name if eligible else None,
-        eligible=len(eligible),
-    )
+        ledger.record(
+            "route",
+            kind=task.kind, files=task.files, loc=task.loc,
+            band=snapshot.band,
+            recommended=eligible[0].name if eligible else None,
+            eligible=len(eligible),
+            # What the decision looked like, for `report --routes`: the runners-up, and
+            # every executor ruled out with the first reason. Without them the ledger
+            # could say what was recommended but never why anything else was not.
+            ranked=[{"executor": c.name, "score": c.score} for c in eligible[:3]],
+            rejected=[{"executor": c.name, "reason": c.blockers[0][:160]}
+                      for c in rejected],
+            modes=session_modes,
+        )
 
     return {
         "quota": {
@@ -425,6 +443,7 @@ def rank(task: Task, snapshot: quota.Quota | None = None) -> dict[str, Any]:
             "trivial": task.trivial,
         },
         "modes": session_modes,
+        "probe": not record,
         "ranked": [_render(c) for c in eligible],
         "rejected": [_render(c) for c in rejected],
         "advice": _advice(task, snapshot, eligible),

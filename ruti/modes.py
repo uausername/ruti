@@ -84,3 +84,61 @@ def active_summary(modes: dict[str, Any]) -> str:
     if modes.get("free", "off") != "off":
         parts.append(f"free:{modes['free']}")
     return ", ".join(parts)
+
+
+def coding_aliases() -> list[tuple[str, bool | None]]:
+    """(alias, free) for every enabled registered alias that is tuned for code."""
+    from . import openrouter, providers
+
+    try:
+        records = providers.load_registry()["providers"]
+    except Exception:  # the prompt hook calls this: a bad registry must not break it
+        return []
+    out: list[tuple[str, bool | None]] = []
+    seen: set[str] = set()
+    for record in records:
+        alias = record.get("alias")
+        if not alias or alias in seen or not record.get("enabled", True):
+            continue
+        seen.add(alias)
+        # route rules out an alias without verified tool calling; naming it here would
+        # point the manager at an executor it cannot use.
+        if openrouter.is_coding_record(record) and record.get("supports_tools"):
+            out.append((alias, record.get("free")))
+    return out
+
+
+def coding_note(free_level: str, aliases: list[tuple[str, bool | None]] | None = None) -> str:
+    """What coding mode tells the manager -- never contradicting the free mode.
+
+    It used to name `pareto-code` unconditionally, which free mode (hard) refuses: the
+    hint pointed at the one executor `route` had just ruled out. So the aliases come
+    from the registry, split by price, and a paid one is only named where the free
+    level permits it.
+    """
+    aliases = coding_aliases() if aliases is None else aliases
+    free = ", ".join(f"`{a}`" for a, is_free in aliases if is_free is True)
+    paid = ", ".join(f"`{a}`" for a, is_free in aliases if is_free is not True)
+    lead = "ruti coding mode is ON: when you delegate implementation, prefer"
+
+    if free_level == "hard":
+        if not free:
+            return ("ruti coding mode is ON, but no zero-cost coding alias is registered and "
+                    "free mode (hard) refuses paid ones -- use general `*:free` aliases, or "
+                    "register a free coding model with `ruti openrouter setup`.")
+        # The metered ones are not named at all: this mode refuses them.
+        return f"{lead} the zero-cost coding aliases ({free}) over general-purpose ones."
+    if free_level == "soft":
+        if not free and not paid:
+            return ("ruti coding mode is ON, but no coding alias is registered -- "
+                    "`ruti openrouter setup` registers free coding models.")
+        if not free:
+            return (f"{lead} the coding aliases ({paid}), but they are metered: warn the "
+                    "user before using one (free mode is soft).")
+        return (f"{lead} the zero-cost coding aliases ({free}) over general-purpose ones"
+                + (f"; the metered ones ({paid}) only after warning the user." if paid else "."))
+    if not free and not paid:
+        return ("ruti coding mode is ON, but no coding alias is registered -- "
+                "`ruti openrouter setup` registers `pareto-code` and free coding models.")
+    listed = ", ".join(part for part in (paid, free) if part)
+    return f"{lead} the coding-tuned aliases ({listed}) over general-purpose ones."

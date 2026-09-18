@@ -91,11 +91,7 @@ def _mode_notes(session_id: str | None) -> list[str]:
     state = modes.current(session_id)
     notes: list[str] = []
     if state["coding"]:
-        notes.append(
-            "ruti coding mode is ON: when you delegate implementation to subagents, "
-            "prefer the `pareto-code` alias (OpenRouter's Pareto coding router) and "
-            "other coding-tuned models over general-purpose ones."
-        )
+        notes.append(modes.coding_note(state["free"]))
     if state["free"] == "soft":
         notes.append(
             "ruti free mode is ON (soft): prefer zero-cost models (`free` router, "

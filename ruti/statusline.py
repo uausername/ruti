@@ -123,6 +123,41 @@ def _running_delegate() -> dict[str, Any] | None:
     return entry
 
 
+def _short(executor: str) -> str:
+    """`ruti-router/north-mini-code` -> `north-mini-code`; `claude:self` -> `self`."""
+    return executor.split("/")[-1].split(":")[-1]
+
+
+def _route_segment(session_id: str | None) -> tuple[str | None, dict[str, Any] | None]:
+    """`-> north-mini-code ✓` for the session's latest ranking, and the delegation it
+    shows (so the `last:` segment need not repeat it). Never raises."""
+    try:
+        if not session_id:
+            return None, None
+        from . import ledger
+
+        route = ledger.last_route(session_id)
+        if not route:
+            return None, None
+        target = _short(route.get("recommended") or "") or "none"
+        outcome = route["outcome"]
+        if outcome == "followed":
+            run = route["delegation"]
+            if run.get("substituted"):
+                return _colour(f"→ {target} SUBST", "31"), run
+            if not run.get("ok"):
+                return _colour(f"→ {target} ✗", "31"), run
+            return _colour(f"→ {target} ✓", "32"), run
+        if outcome == "in_session":
+            return _colour(f"→ {target}", "90"), None
+        if outcome == "instead":
+            used = _short(str(route["instead"][-1].get("model") or "?"))
+            return _colour(f"→ {target} ≠ {used}", "33"), None
+        return _colour(f"→ {target} …", "33"), None
+    except Exception:
+        return None, None
+
+
 def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
     segments: list[str] = []
 
@@ -187,7 +222,16 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
         model = str(running.get("model", "?")).split("/")[-1]
         segments.append(_colour(f"running:{model} {elapsed}s", "33"))
 
+    # The session's latest ranking and what came of it. Read live, like `running`: the
+    # point is to see the decision the moment it is made.
+    route_text, route_run = _route_segment(payload.get("session_id"))
+    if route_text:
+        segments.append(route_text)
+
     last = facts.get("last_delegation")
+    # Not repeated when the route segment already shows this very run.
+    if route_run and last and route_run.get("at") == last.get("at"):
+        last = None
     if last and not running:
         # The model that actually answered, not just the one asked for -- a mismatch
         # here is the fallback substitution delegate.py checks for on every run.

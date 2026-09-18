@@ -29,7 +29,9 @@ ruti route --kind implement --files 12 --loc 800 --repo-context large --json
 
 `--kind` is one of `boilerplate`, `implement`, `refactor`, `debug`, `analyze`,
 `review`, `security`. The output ranks eligible executors, states why each was ruled
-out, and gives the exact command to run.
+out, and gives the exact command to run. A ranking is recorded as advice, and the
+prompt hook reminds you while it goes unfollowed; add `--probe` when you only want to
+see what route would say, not start a task.
 
 Skip the call when the task is obviously small — under ~40 lines in one or two files.
 Routing that costs a tool call to be told "just write it" is itself a waste.
@@ -77,11 +79,11 @@ worth it — `ruti status` shows whether it is currently off.
 Two session-scoped modes, set the same way `ruti off` is and shown in the status line
 (`code`, `free`):
 
-* `ruti mode coding on` — a hint, not a gate. While it is on, the prompt hook tells
-  you to reach for the `pareto-code` alias (OpenRouter's Pareto coding router) and
-  other coding-tuned models when you delegate, instead of a general-purpose one. Turn
-  it on when the session's work is programming; leave it off for everything else ruti
-  is used for.
+* `ruti mode coding on` — a hint, not a gate. While it is on, `route` ranks
+  coding-tuned aliases up and the prompt hook names the registered ones to reach for
+  when you delegate — only the zero-cost ones under `free hard`, which refuses
+  `pareto-code`. Turn it on when the session's work is programming; leave it off for
+  everything else ruti is used for.
 * `ruti mode free soft|hard` — keep delegation on zero-cost models. `soft`
   deprioritises paid metered APIs in `ruti route` and warns before `ruti delegate`
   uses one; `hard` makes `route` rule them out and `delegate` refuse them outright.

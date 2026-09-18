@@ -121,14 +121,53 @@ def _alias_of(executor: str) -> str:
     return executor.split("/")[-1] if "/" in executor else executor
 
 
-def _route_followed(entries: list[dict[str, Any]], index: int) -> bool:
-    """Did a later delegation in this session use what the ranking recommended?"""
-    alias = _alias_of(entries[index].get("recommended") or "")
-    return any(
-        later.get("event") == "delegation"
-        and _alias_of(later.get("model") or "") == alias
-        for later in entries[index + 1:]
-    )
+def _outcome(entries: list[dict[str, Any]], index: int) -> dict[str, Any]:
+    """What came of the ranking at `entries[index]`, one session's events in order.
+
+    The ledger is append-only, so a route event cannot be marked after the fact; its
+    outcome is read back by pairing instead:
+
+    * `followed` -- a later delegation in the session used the recommended alias.
+      `delegation` is the latest attempt before the next ranking (or the first one
+      after it, if none came before), `attempts` how many there were: a retry that
+      succeeded after `ruti doctor --fix` must not stay shown as the failure;
+    * `in_session` -- the ranking recommended the session itself, so writing the code
+      here *is* following it;
+    * `instead` -- no delegation to the recommended alias, but delegations to others
+      before the next ranking (`instead` lists them);
+    * `not_delegated` -- nothing was delegated before the next ranking.
+
+    `route_compliance`, the prompt hook's reminder, `report --routes` and the status
+    line all read this one function, so their counts cannot drift apart.
+    """
+    recommended = entries[index].get("recommended") or ""
+    later = entries[index + 1:]
+
+    if recommended and not recommended.startswith("claude:"):
+        alias = _alias_of(recommended)
+        matches: list[dict[str, Any]] = []
+        before_next = True
+        for entry in later:
+            if entry.get("event") == "route":
+                before_next = False
+            elif (entry.get("event") == "delegation"
+                    and _alias_of(entry.get("model") or "") == alias):
+                matches.append({"before": before_next, "entry": entry})
+        if matches:
+            ours = [m["entry"] for m in matches if m["before"]]
+            return {"outcome": "followed", "delegation": ours[-1] if ours
+                    else matches[0]["entry"], "attempts": len(ours) or 1, "instead": []}
+
+    instead: list[dict[str, Any]] = []
+    for entry in later:
+        if entry.get("event") == "route":
+            break
+        if entry.get("event") == "delegation":
+            instead.append(entry)
+    if not recommended or recommended.startswith("claude:"):
+        return {"outcome": "in_session", "delegation": None, "instead": instead}
+    return {"outcome": "instead" if instead else "not_delegated",
+            "delegation": None, "instead": instead}
 
 
 def _by_session(events: list[dict[str, Any]]) -> dict[str | None, list[dict[str, Any]]]:
@@ -141,67 +180,79 @@ def _by_session(events: list[dict[str, Any]]) -> dict[str | None, list[dict[str,
 def route_compliance(events: list[dict[str, Any]]) -> dict[str, Any]:
     """Whether rankings were acted on, derived by pairing rather than stored.
 
-    The ledger is append-only, so a route event cannot be marked after the fact.
-    Compliance is read back instead: a ranking counts as followed when a later
-    delegation in the same session used the alias it recommended. A ranking that
-    recommended the session itself is not a violation -- writing the code here *is*
-    following that advice -- so it is counted separately rather than as ignored.
+    A ranking that recommended the session itself is not a violation -- writing the
+    code here *is* following that advice -- so it is counted separately rather than
+    as ignored.
     """
-    total = followed = ignored = recommended_self = 0
-    for entries in _by_session(events).values():
-        for index, entry in enumerate(entries):
-            if entry.get("event") != "route":
-                continue
-            total += 1
-            recommended = entry.get("recommended") or ""
-            if not recommended or recommended.startswith("claude:"):
-                recommended_self += 1
-            elif _route_followed(entries, index):
-                followed += 1
-            else:
-                ignored += 1
+    outcomes = [row["outcome"] for row in route_history(events)]
     return {
-        "total": total,
-        "followed": followed,
-        "ignored": ignored,
-        "recommended_self": recommended_self,
+        "total": len(outcomes),
+        "followed": outcomes.count("followed"),
+        "ignored": outcomes.count("instead") + outcomes.count("not_delegated"),
+        "recommended_self": outcomes.count("in_session"),
     }
 
 
-def unfollowed_route(session_id: str | None) -> dict[str, Any] | None:
-    """The latest ranking in this session that named a delegate and was not acted on.
+def _session_tail(session_id: str, max_bytes: int = 131072) -> list[dict[str, Any]]:
+    """This session's events among the ledger's last `max_bytes`, oldest first.
 
-    Read from the tail like `last_delegation`, because the prompt hook calls this on
-    every prompt and must not scan a ledger that grows all day.
+    Read from the tail because the prompt hook and the status line call this on every
+    prompt and every repaint, and must not scan a ledger that grows all day. Lines
+    that do not mention the session are skipped before they are parsed.
     """
-    if not session_id or not LEDGER.exists():
-        return None
+    if not LEDGER.exists():
+        return []
     try:
         with LEDGER.open("rb") as handle:
             handle.seek(0, os.SEEK_END)
             size = handle.tell()
-            handle.seek(max(0, size - 131072))
+            handle.seek(max(0, size - max_bytes))
             data = handle.read().decode("utf-8", errors="replace")
     except OSError:
-        return None
+        return []
 
     entries: list[dict[str, Any]] = []
     for line in data.splitlines():
+        if session_id not in line:
+            continue
         try:
             entry = json.loads(line)
         except json.JSONDecodeError:
             continue
         if entry.get("session") == session_id:
             entries.append(entry)
+    return entries
 
+
+def unfollowed_route(session_id: str | None) -> dict[str, Any] | None:
+    """The latest ranking in this session that named a delegate and was not acted on."""
+    route = last_route(session_id)
+    if not route or route["outcome"] in ("followed", "in_session"):
+        return None
+    return route
+
+
+def last_route(session_id: str | None) -> dict[str, Any] | None:
+    """The latest ranking in this session, with what came of it (see `_outcome`)."""
+    if not session_id:
+        return None
+    entries = _session_tail(session_id)
     for index in range(len(entries) - 1, -1, -1):
-        if entries[index].get("event") != "route":
-            continue
-        recommended = entries[index].get("recommended") or ""
-        if not recommended or recommended.startswith("claude:"):
-            return None
-        return None if _route_followed(entries, index) else entries[index]
+        if entries[index].get("event") == "route":
+            return {**entries[index], **_outcome(entries, index)}
     return None
+
+
+def route_history(events: list[dict[str, Any]], *, limit: int | None = None
+                  ) -> list[dict[str, Any]]:
+    """Every ranking with what came of it, oldest first; the last `limit` if given."""
+    rows: list[dict[str, Any]] = []
+    for entries in _by_session(events).values():
+        for index, entry in enumerate(entries):
+            if entry.get("event") == "route":
+                rows.append({**entry, **_outcome(entries, index)})
+    rows.sort(key=lambda row: row.get("at", 0))
+    return rows[-limit:] if limit else rows
 
 
 def _sessions(events: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:

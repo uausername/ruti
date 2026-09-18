@@ -56,6 +56,9 @@ _PROBE_TOOL = [
 ]
 
 PASS, FAIL, SKIP = "pass", "fail", "skip"
+# The probe never got an answer to judge -- rate limited, timed out, unreachable.
+# Not a failure: a free model at its limit says nothing about what it supports.
+UNVERIFIED = "unverified"
 
 # Reasoning models spend their output budget on thinking before emitting anything, so
 # a tight cap makes them return an empty response -- which looks like "this model
@@ -75,7 +78,8 @@ class Stage:
 @dataclass
 class Verdict:
     stages: list[Stage] = field(default_factory=list)
-    supports_tools: bool = False
+    # None: the tools probe got no answer to judge (see UNVERIFIED), so it is unknown.
+    supports_tools: bool | None = False
     models_seen: list[str] = field(default_factory=list)
 
     @property
@@ -146,6 +150,18 @@ def _classify(exc: Exception) -> tuple[str, str]:
     if isinstance(exc, litellm.APIConnectionError):
         return ("could not reach the provider", "check the network and any api_base override")
     return (f"{type(exc).__name__}", text[:200])
+
+
+def _is_transient(exc: Exception) -> bool:
+    """Whether the call failed before the provider judged it: rate limit, timeout,
+    no connection, or the upstream erroring (5xx -- OpenRouter's free models return
+    them when overloaded). Such a failure says nothing about the model's capabilities."""
+    import litellm
+
+    names = ("RateLimitError", "Timeout", "APIConnectionError", "ServiceUnavailableError",
+             "BadGatewayError", "InternalServerError")
+    kinds = tuple(k for k in (getattr(litellm, n, None) for n in names) if isinstance(k, type))
+    return isinstance(exc, kinds)
 
 
 def test_key(provider: str, model: str, api_key: str, *, api_base: str | None = None,
@@ -255,7 +271,17 @@ def test_key(provider: str, model: str, api_key: str, *, api_base: str | None = 
         verdict.stages.append(Stage("tools", FAIL, "the provider returned no usable response"))
     except Exception as exc:
         diagnosis, _ = _classify(exc)
-        verdict.stages.append(Stage("tools", FAIL, f"tool calling unsupported ({diagnosis})"))
+        if _is_transient(exc):
+            # Found live: an OpenRouter free model at its rate limit was reported as
+            # "tool calling unsupported (rate limited)", and passed on the next run.
+            verdict.supports_tools = None
+            verdict.stages.append(Stage(
+                "tools", UNVERIFIED,
+                f"not verified ({diagnosis}) -- the probe got no answer to judge; "
+                "run it again later",
+            ))
+        else:
+            verdict.stages.append(Stage("tools", FAIL, f"tool calling unsupported ({diagnosis})"))
 
     return verdict
 

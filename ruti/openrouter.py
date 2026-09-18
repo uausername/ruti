@@ -38,16 +38,30 @@ PARETO_CODE = "openrouter/pareto-code"
 FREE_ROUTER = "openrouter/free"
 ROUTERS: tuple[str, ...] = (PARETO_CODE, FREE_ROUTER)
 
+# Endpoints built for code, by their publishers' own description in the catalogue --
+# which carries no machine-readable coding flag, so this is kept by hand. A model's
+# name is not evidence: `north-mini-code` qualifies because Cohere ships it as an
+# agentic coding model, not because of the suffix. Checked 2026-09-18.
+CODING_MODELS: frozenset[str] = frozenset({
+    PARETO_CODE,
+    "cohere/north-mini-code:free",
+    "poolside/laguna-s-2.1:free",
+    "poolside/laguna-xs-2.1:free",
+})
+
 # Confirmed present in the catalogue at the time of writing (2026-09) and
 # tool-capable. `recommended()` drops any that have since disappeared upstream;
-# this is the floor, not the ceiling.
+# this is the floor, not the ceiling. The free coding models come first: before
+# 2026-09-18 the free part held none at all -- one was a finance-tuned model -- so
+# coding mode had nothing zero-cost to prefer.
 DEFAULT_SHORTLIST: tuple[str, ...] = (
     PARETO_CODE,
     FREE_ROUTER,
+    "cohere/north-mini-code:free",
+    "poolside/laguna-s-2.1:free",
     "thinkingmachines/inkling-small:free",
-    "dots-studio/dots-3-note-preview:free",
-    "inclusionai/ling-3.0-flash-fin:free",
     "nvidia/nemotron-3.5-lightning:free",
+    "dots-studio/dots-3-note-preview:free",
 )
 
 # Below this an OpenCode delegation cannot even hold its own 8k-token system prompt
@@ -107,13 +121,25 @@ def is_router_record(record: dict[str, Any]) -> bool:
 
 
 def is_coding(slug: str) -> bool:
-    """Whether this endpoint is specifically for code.
+    """Whether this endpoint is specifically for code: one of `CODING_MODELS`.
 
-    Only `pareto-code` qualifies by construction: it is OpenRouter's coding router.
-    The catalogue advertises no coding flag, and a model's name is not evidence, so
-    nothing else is guessed at -- a record in providers.json can be marked by hand.
+    Anything else is marked at registration (`ruti openrouter setup --coding`) or by
+    hand in providers.json -- nothing is guessed from a name.
     """
-    return slug == PARETO_CODE
+    return slug in CODING_MODELS
+
+
+def is_coding_record(record: dict[str, Any]) -> bool:
+    """Whether a registered alias is tuned for code.
+
+    The record's own flag, or the model being a known coding one. Records written
+    before `CODING_MODELS` existed carry `coding: false` for every model except
+    pareto-code, so the flag alone would keep coding mode inert for them.
+    """
+    if record.get("coding"):
+        return True
+    model = str(record.get("model") or "")
+    return model.startswith("openrouter/") and is_coding(slug_of(model))
 
 
 def generation(gen_id: str, api_key: str, *, timeout: float = 15.0) -> dict[str, Any] | None:
@@ -168,6 +194,7 @@ def _row(slug: str, entry: dict[str, Any] | None, *, shortlisted: bool) -> dict[
         "shortlisted": shortlisted,
         "router": router,
         "free": is_free(slug),
+        "coding": is_coding(slug),
         "context_length": _context(entry),
         # The routing endpoints exist to drive agentic/coding work; the catalogue
         # entry for them does not always advertise `tools`, but they do support it.
