@@ -9,6 +9,9 @@
         "apiKey": "not-used-locally"
       },
       "models": {
+        "deepseek-v4-flash-0731": {
+          "name": "Deepseek V4 Flash 0731"
+        },
         "dots-3-note-preview": {
           "name": "Dots 3 Note Preview"
         },
@@ -27,6 +30,9 @@
         "kimi": {
           "name": "Kimi"
         },
+        "laguna-s-2.1": {
+          "name": "Laguna S 2.1"
+        },
         "ling-3.0-flash-fin": {
           "name": "Ling 3.0 Flash Fin"
         },
@@ -42,8 +48,14 @@
         "nemotron-3.5-lightning": {
           "name": "Nemotron 3.5 Lightning"
         },
+        "north-mini-code": {
+          "name": "North Mini Code"
+        },
         "pareto-code": {
           "name": "Pareto Code"
+        },
+        "qwen3.8-27b": {
+          "name": "Qwen3.8 27B"
         }
       }
     }
