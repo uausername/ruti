@@ -15,6 +15,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -122,20 +123,76 @@ def _listening_pids(port: int = 4000) -> list[int]:
     return pids
 
 
+def _process_table() -> dict[int, tuple[int, str]]:
+    """pid -> (parent pid, lower-cased image name), from a Toolhelp snapshot.
+
+    ctypes rather than PowerShell or WMI: cheap, and nothing an antivirus reads as a
+    script launching processes. {} where it cannot be taken.
+    """
+    if sys.platform != "win32":
+        return {}
+    import ctypes
+    from ctypes import wintypes
+
+    class ProcessEntry(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry)]
+    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+    if not snapshot or snapshot == wintypes.HANDLE(-1).value:
+        return {}
+    table: dict[int, tuple[int, str]] = {}
+    try:
+        entry = ProcessEntry()
+        entry.dwSize = ctypes.sizeof(ProcessEntry)
+        ok = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while ok:
+            table[entry.th32ProcessID] = (entry.th32ParentProcessID, entry.szExeFile.lower())
+            ok = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    return table
+
+
+def _is_litellm(pid: int, table: dict[int, tuple[int, str]]) -> bool:
+    """Whether `pid` is a LiteLLM proxy: litellm.exe itself, or the interpreter that
+    pip's `litellm.exe` console-script launcher started."""
+    parent, image = table.get(pid, (0, ""))
+    if image == "litellm.exe":
+        return True
+    return image.startswith("python") and table.get(parent, (0, ""))[1] == "litellm.exe"
+
+
 # How long a killed proxy gets to let go of :4000 before it counts as still running.
 PORT_RELEASE_SECONDS = 5.0
-# How long a started proxy gets to answer /health/liveliness.
-PROXY_START_SECONDS = 45.0
+# How long a started proxy gets to answer /health/liveliness. 45 s was not enough on
+# 2026-09-18: a start after hours of uptime answered at about a minute, and the fix
+# reported a start that then succeeded as a failure.
+PROXY_START_SECONDS = 90.0
 
 
 def _fix_proxy_restart() -> str:
     """Replace a proxy that is alive but serving the config it started with.
 
     Stopping the scheduled task is not enough, and the failure looks like success:
-    the task's action is a PowerShell wrapper that launches litellm through `cmd`,
-    so stopping the task kills the wrapper while the grandchild keeps :4000. The
-    replacement instance then cannot bind, dies, and the stale process carries on
-    answering -- `schtasks` having reported exit 0 throughout.
+    the listener is a grandchild of the task's process (pythonw -> litellm.exe ->
+    python.exe), and the scheduler ends only the process it started, so the old
+    proxy keeps :4000. The replacement then does not even fail -- LiteLLM moves to a
+    random port -- and the stale process carries on answering, `schtasks` having
+    reported exit 0 throughout. start_litellm.pyw now guards against both (a job
+    object, a port check), but a launcher started before that still needs this.
 
     Killing it has the same trap one level down, so the kill is confirmed rather
     than assumed. A proxy started by a task registered with highest privileges runs
@@ -155,7 +212,20 @@ def _fix_proxy_restart() -> str:
 
     killed: list[int] = []
     refused: dict[int, str] = {}
-    for pid in _listening_pids():
+    listeners = _listening_pids()
+    # Only ever a LiteLLM. This used to kill whatever held :4000, which was safe only
+    # while it ran after liveliness had answered; it now also runs when nothing
+    # answers, and from `openrouter setup` -- where :4000 could be any other server.
+    table = _process_table() if listeners else {}
+    foreign = [pid for pid in listeners if table and not _is_litellm(pid, table)]
+    if foreign:
+        pid = foreign[0]
+        image = table.get(pid, (0, "?"))[1]
+        raise RuntimeError(
+            f"PID {pid} ({image}) holds :4000 and is not a LiteLLM proxy, so ruti will "
+            "not kill it and the proxy cannot bind there. Stop it, then `ruti doctor --fix`"
+        )
+    for pid in listeners:
         try:
             result = proc.run(["taskkill", "/PID", str(pid), "/T", "/F"], timeout=15.0)
         except (proc.ToolNotFound, proc.ToolTimeout) as exc:
@@ -262,6 +332,77 @@ def _task_run_level() -> str | None:
     match = re.search(r"<RunLevel>\s*(\w+)\s*</RunLevel>", xml)
     # No element is the scheduler's default, which is least privilege.
     return match.group(1) if match else "LeastPrivilege"
+
+
+# The scheduler's defaults, which apply when the element is absent, all stop the proxy:
+# not started on battery, stopped when the laptop is unplugged, stopped after 72 hours.
+# Before start_litellm.pyw joined a job object that went unnoticed -- stopping the task
+# ended only the launcher, and the proxy it had started carried on as an orphan. Now
+# the proxy goes with the task, so these have to say what is meant.
+PROXY_TASK_SETTINGS = {
+    "DisallowStartIfOnBatteries": "false",
+    "StopIfGoingOnBatteries": "false",
+    "ExecutionTimeLimit": "PT0S",
+}
+
+
+def _task_settings_problems(xml: str) -> list[str]:
+    settings = re.search(r"<Settings>(.*?)</Settings>", xml, re.S)
+    body = settings.group(1) if settings else ""
+    problems = []
+    for name, wanted in PROXY_TASK_SETTINGS.items():
+        found = re.search(rf"<{name}>\s*(.*?)\s*</{name}>", body)
+        if (found.group(1) if found else None) != wanted:
+            problems.append(name)
+    return problems
+
+
+def _with_proxy_task_settings(xml: str) -> str:
+    """The task definition with PROXY_TASK_SETTINGS set, everything else untouched."""
+    def fix(match: re.Match[str]) -> str:
+        body = match.group(2)
+        for name, wanted in PROXY_TASK_SETTINGS.items():
+            element = f"<{name}>{wanted}</{name}>"
+            body, count = re.subn(rf"<{name}>.*?</{name}>", element, body, flags=re.S)
+            if not count:
+                body = f"\n    {element}" + body
+        return match.group(1) + body + match.group(3)
+
+    return re.sub(r"(<Settings>)(.*?)(</Settings>)", fix, xml, count=1, flags=re.S)
+
+
+def _fix_proxy_task_settings() -> str:
+    """Re-register the task with settings that keep the proxy running.
+
+    Through `schtasks /Create /XML`, not PowerShell: nothing encoded, nothing for the
+    antivirus to read as a script. The previous definition is kept next to ruti's state.
+    """
+    from . import proc
+    from .config import STATE_ROOT
+
+    xml = _task_xml()
+    if xml is None:
+        raise RuntimeError(f"the {SCHEDULED_TASK} task is not registered")
+    STATE_ROOT.mkdir(parents=True, exist_ok=True)
+    backup = STATE_ROOT / f"{SCHEDULED_TASK}.task-backup.xml"
+    staged = STATE_ROOT / f"{SCHEDULED_TASK}.task.xml"
+    # schtasks reads the file as the encoding its declaration names: UTF-16.
+    backup.write_text(xml, encoding="utf-16")
+    staged.write_text(_with_proxy_task_settings(xml), encoding="utf-16")
+    try:
+        result = proc.run(["schtasks", "/Create", "/TN", SCHEDULED_TASK, "/XML", str(staged),
+                           "/F"], timeout=30.0)
+    finally:
+        staged.unlink(missing_ok=True)
+    if not result.ok:
+        raise RuntimeError(f"schtasks /Create exited {result.returncode}; the task is "
+                           f"unchanged (its definition is saved in {backup})")
+    left = _task_settings_problems(_task_xml() or "")
+    if left:
+        raise RuntimeError(f"re-registered, but still set: {', '.join(left)}")
+    started = "" if litellm_cfg.liveliness(timeout=2.0) else f"; {_fix_proxy_start()}"
+    return (f"the task now keeps the proxy running on battery and past 72 hours "
+            f"(previous definition: {backup}){started}")
 
 
 def _task_command() -> str:
@@ -387,14 +528,20 @@ def _check_proxy_alive() -> Check:
             )
         return Check("proxy", OK, f"alive, serving {len(served)} model(s)",
                      detail=", ".join(served))
+    # Not responding does not mean not running. Python 3.12's proactor loop closes the
+    # listening socket for good when one accept fails (WinError 64, a client gone
+    # mid-accept -- asyncio/proactor_events.py), and the process lives on with nothing
+    # on :4000. The task then still counts as running, `schtasks /Run` is ignored, and
+    # a plain start could never bring it back. Found live on 2026-09-18 after ~7 hours
+    # of uptime. So the fix is the full restart, which ends the task first.
     return Check(
         "proxy", BAD, "not responding on /health/liveliness",
         detail=(
-            f"the {SCHEDULED_TASK} scheduled task should start it at logon; "
-            "`--fix` runs the task again, and says what to do by hand if that does "
-            "not bring it up"
+            f"the {SCHEDULED_TASK} scheduled task should start it at logon; a proxy "
+            "can also be running but no longer listening. `--fix` ends the task and "
+            "starts it again, and says what to do by hand if that does not bring it up"
         ),
-        fix=_fix_proxy_start, fix_label="start the proxy",
+        fix=_fix_proxy_restart, fix_label="restart the proxy",
     )
 
 
@@ -448,6 +595,17 @@ def _check_proxy_task() -> Check:
                 "proxy. Re-register the task as in step 5 of the README, which runs "
                 "litellm/start_litellm.pyw with pythonw.exe and opens no window"
             ),
+        )
+    problems = _task_settings_problems(_task_xml() or "")
+    if problems:
+        return Check(
+            "proxy-task", WARN,
+            f"the {SCHEDULED_TASK} task stops the proxy on battery or after 72 hours",
+            detail=(
+                f"set by the scheduler's defaults: {', '.join(problems)}. Stopping the "
+                "task stops the proxy with it, and on battery it would not start again"
+            ),
+            fix=_fix_proxy_task_settings, fix_label="keep the proxy running on battery",
         )
     return Check("proxy-task", OK, f"{SCHEDULED_TASK} runs the proxy without elevation "
                                    "or a console window")

@@ -191,7 +191,11 @@ $action    = New-ScheduledTaskAction -Execute $pythonw `
   -Argument '"C:\mycode\ruti\litellm\start_litellm.pyw"' -WorkingDirectory "C:\mycode\ruti\litellm"
 $trigger   = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-Register-ScheduledTask -TaskName "RutiLiteLLM" -Action $action -Trigger $trigger -Principal $principal -Force
+# The defaults would stop the proxy when the laptop is unplugged and after 72 hours.
+$settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+  -ExecutionTimeLimit 0
+Register-ScheduledTask -TaskName "RutiLiteLLM" -Action $action -Trigger $trigger -Principal $principal `
+  -Settings $settings -Force
 Start-ScheduledTask -TaskName "RutiLiteLLM"
 
 # 6. Wire it into Claude Code (previews the diff; --apply writes it, keeping backups)
