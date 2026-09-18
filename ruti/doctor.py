@@ -336,6 +336,15 @@ def _check_lmstudio() -> Check:
     )
 
 
+def _declared_local_models() -> set[str]:
+    """Model names the generated include declares -- the ones LM Studio has to back."""
+    if not LITELLM_GENERATED.exists():
+        return set()
+    text = LITELLM_GENERATED.read_text(encoding="utf-8")
+    return {line.split(":", 1)[1].strip() for line in text.splitlines()
+            if line.strip().startswith("- model_name:")}
+
+
 def _check_generated_sync() -> Check:
     if not litellm_cfg.include_is_wired():
         return Check(
@@ -349,9 +358,7 @@ def _check_generated_sync() -> Check:
                      fix=_fix_sync, fix_label="regenerate it")
 
     on_disk = {planner.identifier_for(m.key) for m in lmstudio.list_models() if m.kind == "llm"}
-    text = LITELLM_GENERATED.read_text(encoding="utf-8")
-    declared = {line.split(":", 1)[1].strip() for line in text.splitlines()
-                if line.strip().startswith("- model_name:")}
+    declared = _declared_local_models()
     missing, stale = on_disk - declared, declared - on_disk
     if missing or stale:
         parts = []
@@ -364,30 +371,52 @@ def _check_generated_sync() -> Check:
     return Check("model-list", OK, f"{len(on_disk)} local model(s) declared and present")
 
 
-def _check_route_reachable() -> Check:
-    """Is the model that is actually loaded also the one the proxy can route to?
+def _check_local_route() -> Check:
+    """Do the local models the proxy advertises and the ones LM Studio holds agree?
 
-    The classic silent failure: the proxy advertises a local model that LM Studio no
-    longer has resident, the request fails, the fallback answers from a remote
-    provider, and nothing anywhere says the work left the machine.
+    Both directions break silently. A model the proxy serves without LM Studio behind
+    it fails the request, `default_fallbacks` answers from gemini-flash, and nothing
+    anywhere says the work left the machine -- so this is worth naming loudest exactly
+    when LM Studio is down, which is when it used to skip. A model that is resident but
+    unserved is the cheaper mirror image: paid for in VRAM, reachable by nothing.
     """
-    if not litellm_cfg.liveliness() or not lmstudio.server_running():
-        return Check("routing", WARN, "skipped -- proxy or LM Studio is down")
+    if not litellm_cfg.liveliness():
+        return Check("local-route", WARN, "skipped -- the proxy is down",
+                     detail="nothing serves a local model without it")
 
     served = set(litellm_cfg.served_models())
+    advertised = sorted(_declared_local_models() & served)
+
+    # The `lmstudio` check already reports the stopped server and owns the fix for it;
+    # this one adds what that check cannot know -- which models the proxy still offers,
+    # and hence which requests will be answered by a provider nobody asked for.
+    if not lmstudio.server_running():
+        if not advertised:
+            return Check("local-route", OK,
+                         "LM Studio is down, but the proxy advertises no local model")
+        return Check(
+            "local-route", WARN,
+            f"{len(advertised)} advertised local model(s) cannot answer",
+            detail=("LM Studio is down, so a request for " + ", ".join(advertised) +
+                    " does not error -- it falls back to gemini-flash. Start the "
+                    "server (`ruti doctor --fix`) or stop serving them."),
+        )
+
     resident = {m.identifier for m in lmstudio.loaded_models() if m.identifier}
     if not resident:
-        return Check("routing", WARN, "no local model is resident to route to")
+        return Check("local-route", WARN, "no local model is resident to route to",
+                     detail="run `ruti model use <key>`")
 
     unreachable = resident - served
     if unreachable:
         return Check(
-            "routing", WARN,
+            "local-route", WARN,
             "loaded but not served: " + ", ".join(sorted(unreachable)),
             detail="run `ruti models sync` and restart the proxy",
             fix=_fix_sync, fix_label="regenerate the model list",
         )
-    return Check("routing", OK, "resident models are routable: " + ", ".join(sorted(resident)))
+    return Check("local-route", OK,
+                 "resident models are routable: " + ", ".join(sorted(resident)))
 
 
 def _check_opencode_drift() -> Check:
@@ -623,7 +652,7 @@ CHECKS = (
     _check_proxy_alive,
     _check_lmstudio,
     _check_generated_sync,
-    _check_route_reachable,
+    _check_local_route,
     _check_opencode_drift,
     _check_env_permissions,
 )

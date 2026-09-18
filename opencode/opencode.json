@@ -9,14 +9,26 @@
         "apiKey": "not-used-locally"
       },
       "models": {
+        "dots-3-note-preview": {
+          "name": "Dots 3 Note Preview"
+        },
+        "free": {
+          "name": "Free"
+        },
         "gemini-flash": {
           "name": "Gemini Flash"
         },
         "gemini-flash-lite": {
           "name": "Gemini Flash Lite"
         },
+        "inkling-small": {
+          "name": "Inkling Small"
+        },
         "kimi": {
           "name": "Kimi"
+        },
+        "ling-3.0-flash-fin": {
+          "name": "Ling 3.0 Flash Fin"
         },
         "local-llama-31-8b": {
           "name": "Llama 31 8B (local)"
@@ -26,6 +38,12 @@
         },
         "local-qwen3-4b": {
           "name": "Qwen3 4B (local)"
+        },
+        "nemotron-3.5-lightning": {
+          "name": "Nemotron 3.5 Lightning"
+        },
+        "pareto-code": {
+          "name": "Pareto Code"
         }
       }
     }
