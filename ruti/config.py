@@ -79,11 +79,59 @@ def read_json(path: Path, default: Any = None) -> Any:
         return default
 
 
+# A Windows sharing violation on the target lasts as long as someone else's read of
+# it -- milliseconds. Six attempts with doubling pauses wait out ~0.6 s in total.
+REPLACE_ATTEMPTS = 6
+
+# A temp file this old belongs to a writer that is gone: one that failed before this
+# fix existed, or was killed between writing and replacing.
+STALE_TMP_SECONDS = 60.0
+
+
 def write_json(path: Path, payload: Any) -> None:
+    """Atomically replace `path` with `payload`, never leaving the temp file behind.
+
+    On Windows `os.replace` fails while any other process has the target open: Python
+    opens files without FILE_SHARE_DELETE, so one status line reading quota.json at the
+    wrong moment makes another one's write fail with PermissionError. The callers
+    swallow that on purpose -- bookkeeping must not break what it describes -- and the
+    temp file used to stay behind every time; 99 had piled up before anyone looked,
+    every one a complete JSON document whose replace had been refused. So the
+    violation is waited out, anything that still fails is cleaned up before the error
+    propagates, and a successful write clears what earlier writers abandoned.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    # pid for tracing a leftover back to its writer; the random part so two threads of
+    # one process can never share (and delete) each other's temp file.
+    tmp = path.with_name(f"{path.name}.{os.getpid()}-{os.urandom(4).hex()}.tmp")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+                       encoding="utf-8")
+        for attempt in range(REPLACE_ATTEMPTS):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == REPLACE_ATTEMPTS - 1:
+                    raise
+                time.sleep(0.01 * 2 ** attempt)
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)  # already gone after a successful replace
+    _sweep_stale_tmp(path)
+
+
+def _sweep_stale_tmp(path: Path) -> None:
+    """Delete this file's temp siblings that no live write can still be using."""
+    import glob
+
+    cutoff = time.time() - STALE_TMP_SECONDS
+    for leftover in path.parent.glob(f"{glob.escape(path.name)}.*.tmp"):
+        try:
+            if leftover.stat().st_mtime < cutoff:
+                leftover.unlink()
+        except OSError:
+            continue
 
 
 @contextlib.contextmanager
