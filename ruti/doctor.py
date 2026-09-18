@@ -120,6 +120,10 @@ def _listening_pids(port: int = 4000) -> list[int]:
     return pids
 
 
+# How long a killed proxy gets to let go of :4000 before it counts as still running.
+PORT_RELEASE_SECONDS = 5.0
+
+
 def _fix_proxy_restart() -> str:
     """Replace a proxy that is alive but serving the config it started with.
 
@@ -128,20 +132,68 @@ def _fix_proxy_restart() -> str:
     so stopping the task kills the wrapper while the grandchild keeps :4000. The
     replacement instance then cannot bind, dies, and the stale process carries on
     answering -- `schtasks` having reported exit 0 throughout.
+
+    Killing it has the same trap one level down, so the kill is confirmed rather
+    than assumed. The task runs with highest privileges, and from a shell that is not
+    elevated `taskkill` is refused. This used to carry on regardless: it started the
+    task, the old process answered the liveliness probe, and the fix reported
+    "started via the RutiLiteLLM scheduled task" while the proxy was exactly as stale
+    as before. Found live when a config change needed a restart and never got one.
     """
     from . import proc
 
     killed: list[int] = []
+    refused: dict[int, str] = {}
     for pid in _listening_pids():
         try:
-            if proc.run(["taskkill", "/PID", str(pid), "/T", "/F"], timeout=15.0).ok:
-                killed.append(pid)
-        except (proc.ToolNotFound, proc.ToolTimeout):
+            result = proc.run(["taskkill", "/PID", str(pid), "/T", "/F"], timeout=15.0)
+        except (proc.ToolNotFound, proc.ToolTimeout) as exc:
+            refused[pid] = str(exc)
             continue
+        # taskkill's own message is localised and arrives in the OEM code page, which
+        # proc cannot always tell apart from cp1251 -- the exit code is what is reliable.
+        if result.ok:
+            killed.append(pid)
+        else:
+            refused[pid] = f"taskkill exited {result.returncode}"
+
+    survivors = _wait_for_port_release(PORT_RELEASE_SECONDS)
+    if survivors:
+        pid = survivors[0]
+        why = refused.get(pid) or "it was still listening after taskkill reported success"
+        cause = (
+            "this shell is not elevated and the proxy runs with highest privileges"
+            if not _is_elevated() else "the process would not exit"
+        )
+        raise RuntimeError(
+            f"could not stop the running proxy (PID {pid}: {why}; {cause}). It keeps "
+            "serving the config it started with, so nothing new was started. From an "
+            f"administrator PowerShell: taskkill /PID {pid} /T /F; "
+            f"Start-ScheduledTask -TaskName {SCHEDULED_TASK}"
+        )
 
     started = _fix_proxy_start()
     freed = ", ".join(str(pid) for pid in killed) or "nothing"
     return f"killed {freed}, then {started}"
+
+
+def _wait_for_port_release(budget_s: float, *, interval_s: float = 0.5) -> list[int]:
+    """PIDs still listening on :4000 once `budget_s` is up, or [] as soon as none are."""
+    deadline = time.monotonic() + budget_s
+    while True:
+        pids = _listening_pids()
+        if not pids or time.monotonic() >= deadline:
+            return pids
+        time.sleep(interval_s)
+
+
+def _is_elevated() -> bool:
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except (AttributeError, OSError):
+        return False
 
 
 def _fix_proxy_start() -> str:
