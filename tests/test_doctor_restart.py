@@ -16,6 +16,8 @@ def fake(monkeypatch):
             if state["taskkill_ok"]:
                 state["listening"] = []
             return proc.Result(argv, 0 if state["taskkill_ok"] else 1, "", "", 0.0)
+        if argv[:2] == ["schtasks", "/End"]:
+            return proc.Result(argv, 0, "", "", 0.0)
         raise AssertionError(f"unexpected command {argv}")
 
     def start():

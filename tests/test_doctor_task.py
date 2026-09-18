@@ -51,6 +51,7 @@ def test_an_elevated_task_is_flagged_with_the_commands_to_undo_it(monkeypatch):
     assert "-RunLevel Limited" in check.detail
 
     monkeypatch.setattr(doctor, "_task_run_level", lambda: "LeastPrivilege")
+    monkeypatch.setattr(doctor, "_task_command", lambda: r"C:\Python312\pythonw.exe")
     check = doctor._check_proxy_task()
     assert check.status == doctor.OK and check.fix is None
 

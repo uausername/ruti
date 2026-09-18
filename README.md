@@ -182,8 +182,13 @@ cp opencode\opencode.json "$env:USERPROFILE\.config\opencode\opencode.json"
 # proxy is worse on every count: ruti cannot restart it, the task can hang Queued,
 # and it serves unauthenticated local requests as administrator. An older setup
 # registered it with Highest; `ruti doctor` prints the admin commands to change it.
-$action    = New-ScheduledTaskAction -Execute "powershell.exe" `
-  -Argument '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\mycode\ruti\litellm\start-litellm.ps1"'
+# pythonw.exe, not powershell.exe: Windows 11 hands a non-elevated console to Windows
+# Terminal, which ignores -WindowStyle Hidden and leaves an empty window whose closing
+# stops the proxy. start_litellm.pyw never creates a console at all.
+# (litellm\start-litellm.ps1 does the same job in the foreground, for a start by hand.)
+$pythonw   = python -c "import sys, pathlib; print(pathlib.Path(sys.executable).with_name('pythonw.exe'))"
+$action    = New-ScheduledTaskAction -Execute $pythonw `
+  -Argument '"C:\mycode\ruti\litellm\start_litellm.pyw"' -WorkingDirectory "C:\mycode\ruti\litellm"
 $trigger   = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
 Register-ScheduledTask -TaskName "RutiLiteLLM" -Action $action -Trigger $trigger -Principal $principal -Force

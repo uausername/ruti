@@ -10,6 +10,7 @@ Fixes are opt-in (`--fix`) and each one names what it will change before doing i
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import shutil
@@ -123,6 +124,8 @@ def _listening_pids(port: int = 4000) -> list[int]:
 
 # How long a killed proxy gets to let go of :4000 before it counts as still running.
 PORT_RELEASE_SECONDS = 5.0
+# How long a started proxy gets to answer /health/liveliness.
+PROXY_START_SECONDS = 45.0
 
 
 def _fix_proxy_restart() -> str:
@@ -143,6 +146,12 @@ def _fix_proxy_restart() -> str:
     a restart and never got one. `_check_proxy_task` removes the elevation itself.
     """
     from . import proc
+
+    # End the task's own instance first. The listener is a grandchild of it, and
+    # killing only that leaves the launcher alive for a moment -- long enough for the
+    # scheduler to count the task as running and silently ignore the /Run below.
+    with contextlib.suppress(proc.ToolNotFound, proc.ToolTimeout):
+        proc.run(["schtasks", "/End", "/TN", SCHEDULED_TASK], timeout=15.0)
 
     killed: list[int] = []
     refused: dict[int, str] = {}
@@ -219,7 +228,9 @@ def _fix_proxy_start() -> str:
     from . import proc
 
     proc.run(["schtasks", "/Run", "/TN", SCHEDULED_TASK], timeout=15.0)
-    if _wait_for_liveliness(20.0):
+    # LiteLLM takes 14-25 s to import and bind on this machine; 20 s was measured
+    # to be too short, and reported a start that then succeeded as a failure.
+    if _wait_for_liveliness(PROXY_START_SECONDS):
         return f"started via the {SCHEDULED_TASK} scheduled task"
     raise RuntimeError(
         f"the {SCHEDULED_TASK} task did not bring the proxy up -- check that it exists "
@@ -228,9 +239,8 @@ def _fix_proxy_start() -> str:
     )
 
 
-def _task_run_level() -> str | None:
-    """The proxy task's RunLevel ("HighestAvailable" / "LeastPrivilege"), or None if
-    the task is not registered."""
+def _task_xml() -> str | None:
+    """The proxy task's definition, or None if it is not registered."""
     from . import proc
 
     try:
@@ -240,11 +250,24 @@ def _task_run_level() -> str | None:
                           timeout=15.0, strip_progress=False)
     except (proc.ToolNotFound, proc.ToolTimeout):
         return None
-    if not result.ok:
+    return result.stdout if result.ok else None
+
+
+def _task_run_level() -> str | None:
+    """The proxy task's RunLevel ("HighestAvailable" / "LeastPrivilege"), or None if
+    the task is not registered."""
+    xml = _task_xml()
+    if xml is None:
         return None
-    match = re.search(r"<RunLevel>\s*(\w+)\s*</RunLevel>", result.stdout)
+    match = re.search(r"<RunLevel>\s*(\w+)\s*</RunLevel>", xml)
     # No element is the scheduler's default, which is least privilege.
     return match.group(1) if match else "LeastPrivilege"
+
+
+def _task_command() -> str:
+    """The program the proxy task runs, or "" if it cannot be read."""
+    match = re.search(r"<Command>\s*(.*?)\s*</Command>", _task_xml() or "", re.S)
+    return match.group(1).strip('"') if match else ""
 
 
 def _fix_lmstudio_server() -> str:
@@ -412,7 +435,22 @@ def _check_proxy_task() -> Check:
                 f"Start-ScheduledTask {SCHEDULED_TASK}"
             ),
         )
-    return Check("proxy-task", OK, f"{SCHEDULED_TASK} runs the proxy without elevation")
+    program = Path(_task_command()).name.lower()
+    if program and program != "pythonw.exe":
+        # A console program started by a non-elevated task gets its console taken over
+        # by Windows Terminal, which cannot hide it: an empty window at every logon,
+        # and closing it kills the proxy. pythonw.exe never creates a console.
+        return Check(
+            "proxy-task", WARN,
+            f"the {SCHEDULED_TASK} task starts the proxy through {program}",
+            detail=(
+                "that leaves an empty console window open, and closing it stops the "
+                "proxy. Re-register the task as in step 5 of the README, which runs "
+                "litellm/start_litellm.pyw with pythonw.exe and opens no window"
+            ),
+        )
+    return Check("proxy-task", OK, f"{SCHEDULED_TASK} runs the proxy without elevation "
+                                   "or a console window")
 
 
 def _check_lmstudio() -> Check:
