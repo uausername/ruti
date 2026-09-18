@@ -127,7 +127,7 @@ commands makes the output machine-parseable for scripting.
 | Command | What it does | Why it earns a place in your workflow |
 |---|---|---|
 | `ruti status [--json]` | One screen: subscription budget and band, GPU memory, which local models are loaded, proxy health. | The fastest way to answer "can I delegate right now, and to what" without piecing it together from four other commands. |
-| `ruti doctor [--fix]` | Checks the failures that would otherwise stay completely silent: TLS interception, a stopped LM Studio server, a model list that's drifted from disk, a proxy bound to every network interface, a "local" request quietly answered by a remote fallback. `--fix` repairs what it safely can. | Every one of these failure modes was discovered the hard way, because none of them throw an error — they just quietly produce a worse answer from a different place than you asked. This is the single command that surfaces all of them at once. |
+| `ruti doctor [--fix]` | Checks the failures that would otherwise stay completely silent: TLS interception, a stopped LM Studio server, a model list that's drifted from disk, a proxy bound to every network interface or running with administrator rights it does not need, a "local" request quietly answered by a remote fallback. `--fix` repairs what it safely can. | Every one of these failure modes was discovered the hard way, because none of them throw an error — they just quietly produce a worse answer from a different place than you asked. This is the single command that surfaces all of them at once. |
 | `ruti report [--days N] [--json]` | Shows what delegation has actually bought you — lines written by delegates and their approximate token cost, how much delegate transcript stayed in logs instead of your context, and money spent per provider and per model that actually answered (only prices the provider itself stated; anything else is labelled as not counted) — from a ledger `ruti` keeps as it goes. | Built to be falsifiable on purpose: it already caught its own bad assumptions twice (verbose output turned out to be terse; "successful" delegations turned out to include code that never should have been counted). It only claims what it can actually measure. |
 
 ### Status line and prompt hook — always on, nothing to run
@@ -176,16 +176,16 @@ mkdir "$env:USERPROFILE\.config\opencode"
 cp opencode\opencode.json "$env:USERPROFILE\.config\opencode\opencode.json"
 
 # 5. Proxy at logon
-# RunLevel Highest matters: litellm/.env is locked down to SYSTEM/Administrators
-# (see `ruti doctor`'s secrets check), and a task registered without it can never
-# read its own keys. Some machines block elevated token duplication for a plain
-# user account outright, even with this set correctly -- if `ruti doctor` still
-# shows the proxy down after logon, `ruti doctor --fix` falls back to a direct
-# elevated launch (one UAC prompt) instead of requiring a rebuild of this task.
+# RunLevel Limited: the proxy needs no administrator rights -- :4000 is not a
+# privileged port, and litellm/.env only has to be readable by your own account
+# (`ruti doctor`'s secrets check makes sure no *other* user can read it). An elevated
+# proxy is worse on every count: ruti cannot restart it, the task can hang Queued,
+# and it serves unauthenticated local requests as administrator. An older setup
+# registered it with Highest; `ruti doctor` prints the admin commands to change it.
 $action    = New-ScheduledTaskAction -Execute "powershell.exe" `
   -Argument '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\mycode\ruti\litellm\start-litellm.ps1"'
 $trigger   = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
+$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
 Register-ScheduledTask -TaskName "RutiLiteLLM" -Action $action -Trigger $trigger -Principal $principal -Force
 Start-ScheduledTask -TaskName "RutiLiteLLM"
 

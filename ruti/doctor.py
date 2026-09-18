@@ -11,6 +11,7 @@ Fixes are opt-in (`--fix`) and each one names what it will change before doing i
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -134,11 +135,12 @@ def _fix_proxy_restart() -> str:
     answering -- `schtasks` having reported exit 0 throughout.
 
     Killing it has the same trap one level down, so the kill is confirmed rather
-    than assumed. The task runs with highest privileges, and from a shell that is not
-    elevated `taskkill` is refused. This used to carry on regardless: it started the
-    task, the old process answered the liveliness probe, and the fix reported
-    "started via the RutiLiteLLM scheduled task" while the proxy was exactly as stale
-    as before. Found live when a config change needed a restart and never got one.
+    than assumed. A proxy started by a task registered with highest privileges runs
+    elevated, and from a shell that is not, `taskkill` is refused. This used to carry
+    on regardless: it started the task, the old process answered the liveliness
+    probe, and the fix reported "started via the RutiLiteLLM scheduled task" while
+    the proxy was exactly as stale as before. Found live when a config change needed
+    a restart and never got one. `_check_proxy_task` removes the elevation itself.
     """
     from . import proc
 
@@ -162,7 +164,8 @@ def _fix_proxy_restart() -> str:
         pid = survivors[0]
         why = refused.get(pid) or "it was still listening after taskkill reported success"
         cause = (
-            "this shell is not elevated and the proxy runs with highest privileges"
+            "this shell is not elevated, so the proxy most likely is -- the proxy-task "
+            "check says how to stop that for good"
             if not _is_elevated() else "the process would not exit"
         )
         raise RuntimeError(
@@ -197,43 +200,51 @@ def _is_elevated() -> bool:
 
 
 def _fix_proxy_start() -> str:
-    """Bring the proxy up, trying the quiet path before the interactive one.
+    """Bring the proxy up through the scheduled task.
 
-    `schtasks /Run` reports exit code 0 whether or not the triggered instance
-    ever actually launches the action -- on a machine where something blocks
-    elevated token duplication for a plain user account, the instance sits in
-    the Queued state forever and the exit code says nothing about that (found by
-    checking the Task Scheduler operational log: every *other* elevated task on
-    that machine ran as SYSTEM or through a signed Group trigger, never as a
-    plain user account, which is what actually gave the game away). Liveliness
-    is therefore the only trustworthy signal, and a direct elevated launch --
-    the same one the "run this by hand" instructions describe -- is the fallback
-    when the task does not deliver within a few seconds.
+    `schtasks /Run` reports exit code 0 whether or not the triggered instance ever
+    actually launches the action. When the task ran elevated, on this machine the
+    instance could sit in the Queued state forever -- something blocked elevated
+    token duplication for a plain user account -- and the exit code said nothing
+    about it. Liveliness is therefore the only trustworthy signal, and a direct
+    launch of the same script is the fallback when the task does not deliver.
+
+    There is deliberately no automatic direct launch any more. The last one started a
+    hidden PowerShell through WMI with a base64 `-EncodedCommand` -- which is also how
+    malware hides what it runs, and the antivirus on this machine read it that way:
+    it flagged powershell.exe itself (IDP.HELU.PSE90%s_cmd) and removed the
+    RutiLiteLLM task. Starting the script by hand is a one-line instruction; a
+    quarantined system binary is not.
     """
     from . import proc
 
     proc.run(["schtasks", "/Run", "/TN", SCHEDULED_TASK], timeout=15.0)
-    if _wait_for_liveliness(12.0):
-        return f"started via the {SCHEDULED_TASK} scheduled task"
-
-    # .env is only readable by SYSTEM/Administrators (see the secrets check
-    # below), so this still needs a real elevated token -- it prompts UAC once
-    # rather than running silently.
-    subprocess.Popen(
-        [
-            "powershell.exe", "-NoProfile", "-WindowStyle", "Hidden", "-Command",
-            "Start-Process powershell -Verb RunAs -ArgumentList "
-            "'-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass',"
-            f"'-File','{LITELLM_START_SCRIPT}'",
-        ],
-        stdin=subprocess.DEVNULL,
-    )
     if _wait_for_liveliness(20.0):
-        return "the scheduled task never left Queued; launched directly instead (UAC approved)"
-    return (
-        "the scheduled task did not come up, and a direct elevated launch is "
-        "pending -- approve the UAC prompt if one is waiting, then re-run `ruti doctor`"
+        return f"started via the {SCHEDULED_TASK} scheduled task"
+    raise RuntimeError(
+        f"the {SCHEDULED_TASK} task did not bring the proxy up -- check that it exists "
+        f"(`ruti doctor`'s proxy-task check), or run {LITELLM_START_SCRIPT} by hand "
+        "and read litellm/litellm.log"
     )
+
+
+def _task_run_level() -> str | None:
+    """The proxy task's RunLevel ("HighestAvailable" / "LeastPrivilege"), or None if
+    the task is not registered."""
+    from . import proc
+
+    try:
+        # schtasks ends its XML lines with \r\r\n, which progress stripping reads as
+        # a line being overwritten -- and erases the whole document.
+        result = proc.run(["schtasks", "/Query", "/TN", SCHEDULED_TASK, "/XML"],
+                          timeout=15.0, strip_progress=False)
+    except (proc.ToolNotFound, proc.ToolTimeout):
+        return None
+    if not result.ok:
+        return None
+    match = re.search(r"<RunLevel>\s*(\w+)\s*</RunLevel>", result.stdout)
+    # No element is the scheduler's default, which is least privilege.
+    return match.group(1) if match else "LeastPrivilege"
 
 
 def _fix_lmstudio_server() -> str:
@@ -357,11 +368,51 @@ def _check_proxy_alive() -> Check:
         "proxy", BAD, "not responding on /health/liveliness",
         detail=(
             f"the {SCHEDULED_TASK} scheduled task should start it at logon; "
-            "`--fix` retries that and falls back to a direct elevated launch "
-            "(one UAC prompt) if the task never leaves the Queued state"
+            "`--fix` runs the task again, and says what to do by hand if that does "
+            "not bring it up"
         ),
         fix=_fix_proxy_start, fix_label="start the proxy",
     )
+
+
+def _check_proxy_task() -> Check:
+    """The proxy must not run elevated.
+
+    It used to, on purpose: .env was meant to be readable only by administrators, so
+    the task that starts the proxy was registered with highest privileges to read
+    its own keys. That protection never took hold -- the user's own account kept
+    full control of the file, so any process it runs can read the keys anyway -- and
+    the elevation cost three real problems. ruti cannot restart an elevated proxy
+    (`taskkill` is refused from an ordinary shell). The elevated task could sit
+    Queued forever on this machine, which is what the UAC fallback in
+    `_fix_proxy_start` was for. And a server that accepts unauthenticated requests
+    from every local process, running as administrator, makes any LiteLLM bug an
+    administrator one. Nothing in the proxy needs the rights: :4000 is not a
+    privileged port.
+    """
+    level = _task_run_level()
+    if level is None:
+        return Check(
+            "proxy-task", WARN, f"the {SCHEDULED_TASK} scheduled task is not registered",
+            detail="the proxy will not start at logon -- see step 5 of the README",
+        )
+    if level == "HighestAvailable":
+        return Check(
+            "proxy-task", WARN, f"the {SCHEDULED_TASK} task runs the proxy elevated",
+            # No automatic fix: changing an elevated task takes an elevated shell, and
+            # the scripted route there (an encoded command through UAC) is what the
+            # antivirus on this machine quarantined powershell.exe over.
+            detail=(
+                "nothing in the proxy needs administrator rights, and while it has them "
+                "ruti cannot restart it. From an administrator PowerShell: "
+                f"$t = Get-ScheduledTask {SCHEDULED_TASK}; Set-ScheduledTask "
+                f"{SCHEDULED_TASK} -Principal (New-ScheduledTaskPrincipal -UserId "
+                "$t.Principal.UserId -LogonType Interactive -RunLevel Limited); "
+                f"Stop-ScheduledTask {SCHEDULED_TASK}; taskkill /PID <proxy pid> /T /F; "
+                f"Start-ScheduledTask {SCHEDULED_TASK}"
+            ),
+        )
+    return Check("proxy-task", OK, f"{SCHEDULED_TASK} runs the proxy without elevation")
 
 
 def _check_lmstudio() -> Check:
@@ -559,7 +610,10 @@ def _check_env_permissions() -> Check:
                 "\"*S-1-5-32-545\" \"*S-1-5-11\""
             ),
         )
-    return Check("secrets", OK, f".env restricted to {len(sids)} privileged principal(s)")
+    # Your own account is among these, so any process you run can read the keys --
+    # what this check guarantees is that no other local user's processes can.
+    return Check("secrets", OK, f".env not readable by other local users "
+                                f"({len(sids)} principal(s) listed)")
 
 
 def _git_ssl_backend() -> str | None:
@@ -702,6 +756,7 @@ CHECKS = (
     _check_git_tls,
     _check_proxy_bind,
     _check_proxy_alive,
+    _check_proxy_task,
     _check_lmstudio,
     _check_generated_sync,
     _check_local_route,
