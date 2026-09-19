@@ -36,6 +36,12 @@ see what route would say, not start a task.
 Skip the call when the task is obviously small — under ~40 lines in one or two files.
 Routing that costs a tool call to be told "just write it" is itself a waste.
 
+That size test is the *only* reason to skip `route`, and it is rechecked per task, not
+once per session. Already holding context on this codebase, or being several tasks
+into a queue of similarly-shaped work, is not a reason to skip it — task five gets the
+same check as task one; momentum is not judgement. If several tasks have gone by with
+no `route` call, that gap is itself the signal to stop and call it before the next one.
+
 ### Delegating
 
 Never call `opencode` directly. Use:
@@ -127,6 +133,15 @@ task text, so a model with a smaller window cannot run it at all — it fails, a
 the way it may claim to have written files it never touched. And a model that cannot
 emit structured tool calls cannot drive `opencode` regardless of how good it is at
 code; `ruti route` gates on both.
+
+A local model being down or unloaded is not a reason to skip delegation, or to fall
+back to doing the work in-session — it means only that a `local-*` alias specifically
+is not ready. Remote executors need internet, not a working local model. `ruti doctor`
+flagging `lmstudio` or `local-route`, or `substituted: true` in a `delegate` report,
+means "this local alias isn't ready — delegate elsewhere, or run `ruti doctor --fix`",
+not "delegation is blocked." Local models exist for the case of no internet connection
+on this machine; do not generalise that into "the local model must be fixed before
+delegating."
 
 ### When something is wrong
 
