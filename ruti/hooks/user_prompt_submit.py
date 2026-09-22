@@ -162,6 +162,20 @@ def _mode_notes(session_id: str | None) -> list[str]:
             "router, `*:free` aliases). `ruti route` rules out paid metered APIs and "
             "`ruti delegate` refuses them."
         )
+    if state.get("council") == "on":
+        notes.append(
+            "ruti council mode is ON: before settling a genuinely ambiguous or hard to "
+            "reverse call -- an architecture choice, a product judgement, a tradeoff "
+            "with no obviously right side -- run `ruti council \"<question>\"` and read "
+            "the raw answers. Not for mechanical work: `ruti route` is for that."
+        )
+    elif state.get("council") == "auto":
+        notes.append(
+            "ruti council mode is AUTO: pass hard calls to `ruti council \"<question>\"` "
+            "and let it decide -- it checks whether the question is ambiguous and "
+            "consequential enough first, and declines cheaply when it is not, so a "
+            "question that turns out not to need a council costs one small call."
+        )
     return notes
 
 
