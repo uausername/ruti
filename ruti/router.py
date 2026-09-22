@@ -24,10 +24,11 @@ bill -- a router such as `pareto-code` spends no quota at all and may still hand
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
-from . import litellm_cfg, lmstudio, modes, openrouter, planner, providers, quota, sessions, vram
+from . import (jev, litellm_cfg, lmstudio, modes, openrouter, planner, providers, quota,
+               sessions, vram)
 
 # Measured, not guessed: `opencode run` sends an 8095-token system prompt before any
 # task text. A model whose window cannot hold it will not run slowly, it will fail --
@@ -55,6 +56,14 @@ Kind = Literal["boilerplate", "implement", "refactor", "debug", "analyze", "revi
 # Kinds that need judgement about code the delegate cannot see, or that carry
 # consequences a cheap model should not be trusted with.
 KEEP_IN_HOUSE = {"security", "review"}
+
+# How much judgement each kind is assumed to demand before anything else is known.
+# Doubles as the ordering used to decide whether a classifier's guess would make
+# routing more cautious or less.
+KIND_DIFFICULTY: dict[str, float] = {
+    "boilerplate": 0.2, "implement": 0.5, "refactor": 0.45,
+    "debug": 0.8, "analyze": 0.7, "review": 0.8, "security": 0.95,
+}
 
 
 @dataclass
@@ -123,6 +132,12 @@ class Task:
     risk: str = "low"  # low | medium | high
     latency: str = "background"  # interactive | background
 
+    # Set when a classifier has read the task description (see `jev.py`). A floor can
+    # only raise the difficulty, never lower it, so the "tighten only" rule is a
+    # property of the type rather than something every caller has to remember.
+    difficulty_floor: float | None = None
+    trivial_override: bool | None = None
+
     @property
     def estimated_tokens(self) -> int:
         base = self.loc * TOKENS_PER_LINE + self.files * TOKENS_PER_FILE
@@ -131,22 +146,103 @@ class Task:
 
     @property
     def difficulty(self) -> float:
-        by_kind = {
-            "boilerplate": 0.2, "implement": 0.5, "refactor": 0.45,
-            "debug": 0.8, "analyze": 0.7, "review": 0.8, "security": 0.95,
-        }
-        score = by_kind.get(self.kind, 0.5)
+        score = KIND_DIFFICULTY.get(self.kind, 0.5)
         if self.files > 8:
             score += 0.1
         if self.repo_context == "large":
             score += 0.15
         if self.risk == "high":
             score += 0.2
+        if self.difficulty_floor is not None:
+            score = max(score, self.difficulty_floor)
         return min(1.0, score)
 
     @property
     def trivial(self) -> bool:
+        if self.trivial_override is not None:
+            return self.trivial_override
         return self.loc <= TRIVIAL_LOC and self.files <= TRIVIAL_FILES
+
+
+def apply_classification(task: Task, guess: "jev.Classification") -> tuple[Task, list[str]]:
+    """Fold a classifier's guess into a task, but only where it makes routing safer.
+
+    Returns the adjusted task and the notes to show the caller, including the guesses
+    that were declined -- a classifier that silently overrules an explicit flag would
+    be worse than none, so every decision it makes is stated.
+
+    The asymmetry is the whole point. Moving a task towards *more* caution (a harder
+    kind, a higher difficulty, "not trivial after all") is accepted on ordinary
+    confidence, because the cost of being wrong is one delegation that did not need to
+    happen. Moving it towards *less* caution needs `HIGH_CONFIDENCE`, because the cost
+    of being wrong there is security work handed to a cheap remote model.
+    """
+    notes: list[str] = []
+    adjusted = replace(task)
+
+    asserted = KIND_DIFFICULTY.get(task.kind, 0.5)
+    guessed = KIND_DIFFICULTY.get(guess.kind, 0.5)
+    if guess.kind == task.kind:
+        notes.append(f"kind: agrees on {task.kind} ({guess.kind_confidence:.2f})")
+    elif guessed >= asserted and guess.kind_confidence >= jev.MIN_CONFIDENCE:
+        adjusted.kind = guess.kind
+        notes.append(
+            f"kind: {task.kind} -> {guess.kind} ({guess.kind_confidence:.2f}); "
+            "a more cautious kind is taken on ordinary confidence"
+        )
+    elif guess.kind_confidence >= jev.HIGH_CONFIDENCE:
+        adjusted.kind = guess.kind
+        notes.append(
+            f"kind: {task.kind} -> {guess.kind} ({guess.kind_confidence:.2f}); "
+            "a less cautious kind needs high confidence, and has it"
+        )
+    else:
+        notes.append(
+            f"kind: kept {task.kind}; the guess {guess.kind} "
+            f"({guess.kind_confidence:.2f}) would relax routing without the "
+            f"confidence to justify it"
+        )
+
+    if guess.difficulty_confidence >= jev.MIN_CONFIDENCE:
+        adjusted.difficulty_floor = guess.difficulty
+        if guess.difficulty > task.difficulty:
+            notes.append(
+                f"difficulty: raised to {guess.difficulty:.2f} "
+                f"({guess.difficulty_confidence:.2f})"
+            )
+        else:
+            notes.append(
+                f"difficulty: guess {guess.difficulty:.2f} is at or below the "
+                f"{task.difficulty:.2f} already assumed, so it changes nothing"
+            )
+    else:
+        notes.append(
+            f"difficulty: ignored, confidence {guess.difficulty_confidence:.2f} "
+            f"is under {jev.MIN_CONFIDENCE}"
+        )
+
+    # A Noul has no confidence field: the probability is the answer, and its distance
+    # from 0.5 is the certainty. "Not trivial" forces a routing decision that would
+    # otherwise be skipped, so it is the cautious direction.
+    if (1.0 - guess.trivial_probability) >= jev.MIN_CONFIDENCE:
+        adjusted.trivial_override = False
+        notes.append(
+            f"trivial: no ({guess.trivial_probability:.2f}); route it rather than "
+            "write it straight off"
+        )
+    elif guess.trivial_probability >= jev.HIGH_CONFIDENCE:
+        adjusted.trivial_override = True
+        notes.append(
+            f"trivial: yes ({guess.trivial_probability:.2f}); small enough that "
+            "routing costs more than it saves"
+        )
+    else:
+        notes.append(
+            f"trivial: undecided ({guess.trivial_probability:.2f}), left to the "
+            "line and file counts"
+        )
+
+    return adjusted, notes
 
 
 def _local_candidates(task: Task) -> list[Candidate]:
@@ -321,10 +417,16 @@ def _self_candidate(task: Task, snapshot: quota.Quota) -> Candidate:
 
 
 def rank(task: Task, snapshot: quota.Quota | None = None, *,
-         record: bool = True) -> dict[str, Any]:
+         record: bool = True, described: str | None = None,
+         guess: "jev.Classification | None" = None) -> dict[str, Any]:
     """Rank every executor for `task`. `record=False` is `route --probe`: the ranking
     is not logged, so it is neither counted as advice nor chased by the prompt hook's
-    "nothing has been delegated" reminder."""
+    "nothing has been delegated" reminder.
+
+    `described` and `guess` are kept only so the ledger can hold what the classifier
+    was shown and what it made of it. Without the description stored beside the guess
+    there is no way to ever check the classifier against the kinds actually worked, so
+    routing history that predates `--describe` cannot be replayed at all."""
     snapshot = snapshot or quota.load()
     needed = task.estimated_tokens + (OPENCODE_PROMPT_TOKENS if task.needs_tools else 0)
     session_modes = modes.current(sessions.current_session_id())
@@ -426,6 +528,8 @@ def rank(task: Task, snapshot: quota.Quota | None = None, *,
             rejected=[{"executor": c.name, "reason": c.blockers[0][:160]}
                       for c in rejected],
             modes=session_modes,
+            **({"described": described[:400]} if described else {}),
+            **({"classifier": guess.summary()} if guess is not None else {}),
         )
 
     return {

@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import litellm_cfg, lmstudio, planner, tls
+from . import jev, litellm_cfg, lmstudio, planner, tls
 from .config import (
     CA_BUNDLE, LITELLM_ENV, LITELLM_GENERATED, LITELLM_START_SCRIPT, REPO_ROOT,
     SCHEDULED_TASK, load_dotenv,
@@ -946,6 +946,39 @@ def _fix_install() -> bool:
     return True
 
 
+def _check_jev() -> Check:
+    """Does the task classifier answer, and how fast?
+
+    An unconfigured classifier is not a fault: `route` works exactly as it always did
+    without one, which is why this reports `off` rather than a problem. A *configured*
+    one that cannot answer is worth naming, because the failure is silent by design --
+    `jev.classify` swallows every error and returns None so that a dead endpoint can
+    never block a task, and the only visible symptom would be `--describe` quietly
+    doing nothing.
+    """
+    transport = jev.DEFAULT_TRANSPORT
+    result = jev.probe(transport=transport)
+    if result is None:
+        return Check("jev", OK, "off -- no key, so route takes your flags as given",
+                     detail=(f"set {jev.TRANSPORTS[transport]['key_env']} to let "
+                             "`ruti route --describe` classify a task for you"))
+
+    if not result.get("ok"):
+        return Check(
+            "jev", WARN, f"configured, but the {transport} endpoint did not answer",
+            detail=("`route --describe` will silently fall back to the flags you pass. "
+                    "The endpoint is alpha and may have moved; `ruti classify` shows "
+                    "the raw failure."),
+        )
+
+    age = result.get("age_seconds", 0)
+    when = "just now" if not result.get("cached") else f"checked {age // 60} min ago"
+    return Check("jev", OK,
+                 f"{result['model']} answers in {result['latency_ms']:.0f} ms "
+                 f"via {transport}",
+                 detail=f"{when}; ${result['cost_usd']:.6f} for that probe")
+
+
 CHECKS = (
     _check_statusline,
     _check_tls,
@@ -958,6 +991,7 @@ CHECKS = (
     _check_local_route,
     _check_opencode_drift,
     _check_env_permissions,
+    _check_jev,
 )
 
 
