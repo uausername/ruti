@@ -13,9 +13,11 @@ concurrency:
 
 jobs:
   test:
+    # ruti drives Windows Scheduled Tasks and pythonw.exe, and part of the
+    # suite asserts on that behaviour, so Windows is the honest target here.
     name: pytest (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: windows-latest
+    timeout-minutes: 20
 
     strategy:
       fail-fast: false
@@ -24,10 +26,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
