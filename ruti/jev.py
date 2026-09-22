@@ -222,14 +222,16 @@ def _normalise_score(answer: dict[str, Any]) -> float:
         return 0.0
 
 
-def classify(description: str, *, transport: str = DEFAULT_TRANSPORT,
-             timeout: float = DEFAULT_TIMEOUT) -> Classification | None:
-    """Classify a task description, or return None if that could not be done.
+def ask(state: str, questions: dict[str, Any], *, transport: str = DEFAULT_TRANSPORT,
+        timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any] | None:
+    """Put a map of typed questions to the model. `None` on any failure at all.
 
-    Every failure path is `None` on purpose -- see the module docstring.
+    The low-level primitive: `classify` is this with the task questions baked in, and
+    the council uses it for its own. Answers come back under `answers`, cost under
+    `usage`, and the measured round trip under `latency_ms`.
     """
-    description = (description or "").strip()
-    if not description:
+    state = (state or "").strip()
+    if not state or not questions:
         return None
     spec = TRANSPORTS.get(transport)
     if not spec:
@@ -238,36 +240,54 @@ def classify(description: str, *, transport: str = DEFAULT_TRANSPORT,
     if not key:
         return None
 
-    body = {"model": MODEL, "state": description, "questions": _questions()}
+    body = {"model": MODEL, "state": state, "questions": questions}
     started = time.monotonic()
     payload = _post(body, spec["url"], key, timeout)
-    latency_ms = (time.monotonic() - started) * 1000
-    if not isinstance(payload, dict):
+    if not isinstance(payload, dict) or not isinstance(payload.get("answers"), dict):
         return None
+    payload["latency_ms"] = (time.monotonic() - started) * 1000
+    return payload
 
-    answers = payload.get("answers")
-    if not isinstance(answers, dict):
+
+def answer_cost(payload: dict[str, Any]) -> float:
+    try:
+        return float((payload.get("usage") or {}).get("cost", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def noul_of(answers: dict[str, Any], name: str) -> float:
+    """A Noul's probability, or 0.0 when it is missing or malformed.
+
+    A Noul carries no confidence of its own: the probability *is* the answer, and its
+    distance from 0.5 is how sure the model is.
+    """
+    try:
+        return float((answers.get(name) or {}).get("noul", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def classify(description: str, *, transport: str = DEFAULT_TRANSPORT,
+             timeout: float = DEFAULT_TIMEOUT) -> Classification | None:
+    """Classify a task description, or return None if that could not be done.
+
+    Every failure path is `None` on purpose -- see the module docstring.
+    """
+    payload = ask(description, _questions(), transport=transport, timeout=timeout)
+    if payload is None:
         return None
+    latency_ms = payload.get("latency_ms", 0.0)
+    answers = payload["answers"]
     kind_answer = answers.get("kind") or {}
     difficulty_answer = answers.get("difficulty") or {}
-    trivial_answer = answers.get("trivial") or {}
 
     kind = kind_answer.get("choice")
     if kind not in KIND_CRITERIA:
         return None
 
-    # A Noul carries no confidence of its own: the probability *is* the answer, and
-    # its distance from 0.5 is how sure the model is.
-    try:
-        trivial_probability = float(trivial_answer.get("noul", 0.0))
-    except (TypeError, ValueError):
-        trivial_probability = 0.0
-
-    usage = payload.get("usage") or {}
-    try:
-        cost = float(usage.get("cost", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        cost = 0.0
+    trivial_probability = noul_of(answers, "trivial")
+    cost = answer_cost(payload)
 
     return Classification(
         kind=str(kind),

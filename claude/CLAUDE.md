@@ -123,6 +123,26 @@ OpenRouter's live catalogue); `ruti openrouter setup` registers the routers
 (`pareto-code`, `free`) and any free models you pick as routable aliases. Neither the
 modes nor the registration touch this file.
 
+### Standing a council
+
+`ruti mode council on|auto` turns the one-off `ruti council` command into a standing
+policy for the session, and shows it in the status line (`council` / `council?`) so an
+expensive mode is never on without being visible.
+
+* `on` — convene before genuinely ambiguous, hard-to-reverse calls: an architecture
+  choice, a product judgement, a tradeoff with no obviously right side. Not for
+  mechanical work; `route` is for that.
+* `auto` — hand the question over and let it decide. It convenes only when the call is
+  *both* ambiguous and expensive to get wrong, and declines everything else for about
+  $0.000025, so a question that did not need a council costs one small call instead of
+  N paid ones. "What should we name the flag?" is ambiguous and still gets refused.
+
+Either level also adds a judge to `ruti council`: it names the answer that argues its
+case best and says whether the council agreed at all. Read it as a pointer, not a
+verdict — it ranks how well an answer is argued, not whether it is true, and the raw
+answers are always printed in full for exactly that reason. A council whose opinions
+you did not read is a council you paid for and threw away.
+
 ### What stays in this session
 
 Planning and architecture. Anything needing back-and-forth exploration of the codebase

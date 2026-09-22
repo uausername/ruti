@@ -196,6 +196,12 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
                 segments.append(_colour("free", "32"))
             elif active["free"] == "hard":
                 segments.append(_colour("free!", "33"))
+            # Magenta, and the only mode shown that costs more rather than less --
+            # worth reading at a glance before asking anything expensive.
+            if active.get("council") == "on":
+                segments.append(_colour("council", "35"))
+            elif active.get("council") == "auto":
+                segments.append(_colour("council?", "35"))
     except Exception:
         pass
 

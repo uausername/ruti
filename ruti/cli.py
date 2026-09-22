@@ -626,6 +626,8 @@ def mode(ctx: click.Context, as_json: bool) -> None:
     if state["jev"] and not jev.configured():
         jev_why = " (no key)"
     ui.say(f"  jev    : {'[ok]on[/ok]' if jev_on else '[muted]off[/muted]'}{jev_why}")
+    council_level = state["council"]
+    ui.say(f"  council: {'[muted]off[/muted]' if council_level == 'off' else f'[ok]{council_level}[/ok]'}")
     summary = modes_mod.active_summary(state)
     if summary:
         ui.say(f"\n[muted]active: {summary}[/muted]")
@@ -657,6 +659,25 @@ def mode_free(level: str) -> None:
         "soft": "free mode: soft -- paid metered APIs are flagged and deprioritised, not blocked",
         "hard": "free mode: hard -- `route` rules out paid metered APIs, `delegate` refuses them",
     }[level])
+
+
+@mode.command("council")
+@click.argument("level", type=click.Choice(["off", "on", "auto"]))
+def mode_council(level: str) -> None:
+    """Stand a council for judgement calls. `on` asks the manager to convene for
+    ambiguous decisions; `auto` lets the classifier decide per question whether one is
+    worth the spend. Both add a judge to `ruti council`."""
+    session_id = _session_or_die()
+    modes_mod.set_council(session_id, level)
+    ui.ok({
+        "off": "council mode off -- `ruti council` still works when you call it",
+        "on": "council mode: on -- the manager is told to convene before ambiguous calls",
+        "auto": "council mode: auto -- the classifier decides per question, and refuses "
+                "most of them",
+    }[level])
+    if level != "off" and not jev.configured():
+        ui.warn("no classifier key, so there is no judge and `auto` cannot decide -- "
+                "councils will still convene when you ask for one")
 
 
 @mode.command("jev")
@@ -976,15 +997,47 @@ def _say_effective_model(outcome: delegate_mod.Outcome) -> None:
                    "provider. A resident local model can be added explicitly.")
 @click.option("--timeout", type=float, default=council_mod.DEFAULT_TIMEOUT)
 @click.option("--yes", is_flag=True, help="Skip the cost confirmation.")
+@click.option("--auto/--no-auto", default=None,
+              help="Ask the classifier first whether the question is worth several "
+                   "answers, and decline cheaply if not. Defaults to on when the "
+                   "session's council mode is `auto`.")
+@click.option("--judge/--no-judge", default=None,
+              help="Have the classifier point at the best-argued answer and say "
+                   "whether the council agreed. The full answers are printed either "
+                   "way. Defaults to on whenever council mode is not off.")
 @click.option("--json", "as_json", is_flag=True)
 def council(question: str, models: str | None, timeout: float, yes: bool,
-            as_json: bool) -> None:
+            auto: bool | None, judge: bool | None, as_json: bool) -> None:
     """Ask several models the same question and show every answer, unreconciled.
 
     For a genuinely hard or ambiguous call, not mechanical work -- `ruti route` is
     for that. This spends real money and real context on purpose: N parallel API
     calls, and every raw answer is meant to be read, not just the winning one.
     """
+    level = modes_mod.current(sessions.current_session_id())["council"]
+    if auto is None:
+        auto = level == "auto"
+    if judge is None:
+        judge = level != "off"
+
+    # The gate runs before the confirmation, not after: its whole purpose is to avoid
+    # N paid calls, and asking the user to approve a spend the tool is about to refuse
+    # would be a strange order to do it in.
+    if auto:
+        worth = council_mod.worth_convening(question)
+        if worth is None:
+            ui.warn("could not judge whether this is worth a council -- deciding that "
+                    "is yours, re-run with --no-auto")
+            return
+        if not worth.convene:
+            if as_json:
+                ui.emit_json({"convened": False, "worth": worth.summary()})
+            else:
+                ui.say(f"[muted]no council: {ui.literal(worth.reason())}[/muted]")
+            return
+        if not as_json:
+            ui.say(f"[muted]council warranted: {ui.literal(worth.reason())}[/muted]")
+
     picked = [m.strip() for m in models.split(",")] if models else council_mod.default_models()
     if not picked:
         raise click.ClickException(
@@ -1001,9 +1054,13 @@ def council(question: str, models: str | None, timeout: float, yes: bool,
             return
 
     result = council_mod.convene(question, picked, timeout=timeout)
+    verdict = council_mod.judge(result) if judge else None
 
     if as_json:
-        ui.emit_json(result.summary())
+        payload = result.summary()
+        if verdict is not None:
+            payload["verdict"] = verdict.summary()
+        ui.emit_json(payload)
         return
 
     for opinion in result.opinions:
@@ -1016,6 +1073,20 @@ def council(question: str, models: str | None, timeout: float, yes: bool,
     if failed:
         ui.say("")
         ui.warn(f"{failed} of {len(result.opinions)} model(s) did not answer")
+
+    if verdict is not None:
+        ui.heading("Judge")
+        if verdict.usable:
+            ui.say(f"  best argued: [ok]{verdict.best}[/ok] "
+                   f"[muted](confidence {verdict.confidence:.2f})[/muted]")
+        else:
+            ui.say(f"  [muted]no clear winner (confidence {verdict.confidence:.2f})[/muted]")
+        ui.say(f"  the council {'agrees' if verdict.agreed else 'is split'} "
+               f"[muted]({verdict.agreement:.2f})[/muted]")
+        # Said every time, because a pointer from a small fast model is easy to start
+        # treating as a verdict once it has been right a few times running.
+        ui.say("  [muted]a pointer, not a conclusion: it ranks how well each answer "
+               "argues its case, not whether it is right[/muted]")
 
 
 # ------------------------------------------------------------------------- provider
