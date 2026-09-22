@@ -1,0 +1,110 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A second push to the same branch makes the first run's answer worthless.
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Both results are wanted even when one fails: ruti targets Windows, so a
+      # Linux-only failure is a portability finding, not a reason to hide the rest.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+
+    env:
+      # ruti resolves its state directory at import time from %LOCALAPPDATA% or
+      # ~/.local/state. Pointing it at the workspace keeps a test that writes state
+      # out of the runner's home, and makes the two platforms resolve the same path.
+      RUTI_HOME: ${{ github.workspace }}/.ruti-ci-state
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        # The full dependency set rather than --no-deps: `providers.py` imports
+        # litellm lazily inside its probe functions, and a test that reaches one
+        # should fail on the probe's own terms, not on a missing module.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install pytest
+
+      - name: Show what is installed
+        run: python -m pip list
+
+      - name: Tests
+        run: python -m pytest -q --junit-xml=pytest-results.xml
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-results-${{ matrix.os }}
+          path: pytest-results.xml
+          if-no-files-found: warn
+
+  import-check:
+    name: every module imports
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Compile everything
+        # Catches a syntax error in a module no test happens to import.
+        run: python -m compileall -q ruti
+
+      - name: Import every module
+        # A hook or a CLI command that fails at import is invisible to the test
+        # suite until the session that needs it is already broken.
+        env:
+          RUTI_HOME: ${{ github.workspace }}/.ruti-ci-state
+        run: |
+          python - <<'PY'
+          import importlib
+          import pkgutil
+          import sys
+
+          import ruti
+
+          failed = []
+          for info in pkgutil.walk_packages(ruti.__path__, prefix="ruti."):
+              try:
+                  importlib.import_module(info.name)
+              except Exception as exc:
+                  failed.append(f"{info.name}: {exc!r}")
+          for line in failed:
+              print(line, file=sys.stderr)
+          print(f"{len(failed)} module(s) failed to import")
+          sys.exit(1 if failed else 0)
+          PY
