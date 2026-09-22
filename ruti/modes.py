@@ -29,7 +29,11 @@ from .sessions import SESSIONS_FILE
 # "soft" deprioritises paid APIs and warns; "hard" refuses them outright.
 FREE_LEVELS: tuple[str, ...] = ("off", "soft", "hard")
 
-DEFAULTS: dict[str, Any] = {"coding": False, "free": "off"}
+# `jev` defaults to on because a classification costs about $0.000025 and can only make
+# routing more cautious. It is a switch rather than a setting so that one session can
+# stop sending task descriptions off the machine without unsetting a key that the rest
+# of the toolchain shares.
+DEFAULTS: dict[str, Any] = {"coding": False, "free": "off", "jev": True}
 
 
 def _load() -> dict[str, Any]:
@@ -53,11 +57,16 @@ def current(session_id: str | None) -> dict[str, Any]:
     return {
         "coding": bool(record.get("coding", DEFAULTS["coding"])),
         "free": _normalise_free(record.get("free", DEFAULTS["free"])),
+        "jev": bool(record.get("jev", DEFAULTS["jev"])),
     }
 
 
 def set_coding(session_id: str, on: bool) -> None:
     _update(session_id, "coding", bool(on))
+
+
+def set_jev(session_id: str, on: bool) -> None:
+    _update(session_id, "jev", bool(on))
 
 
 def set_free(session_id: str, level: str) -> None:

@@ -42,6 +42,28 @@ into a queue of similarly-shaped work, is not a reason to skip it — task five 
 same check as task one; momentum is not judgement. If several tasks have gone by with
 no `route` call, that gap is itself the signal to stop and call it before the next one.
 
+#### Letting the classifier do the classifying
+
+`--describe "<what the task is>"` hands the description to a decision model instead of
+taking your `--kind` on faith. It answers in about a second and a half and costs about
+$0.000025, and it prints what it decided and what it declined:
+
+```
+ruti route --describe "wrap the RLS helpers so Postgres runs them once per query" --files 3 --loc 120 --json
+```
+
+It may only make routing **more** cautious. A harder `--kind`, a higher difficulty or
+"not trivial after all" are taken on ordinary confidence; anything that would relax
+routing needs high confidence before it is accepted, and the output says so either
+way. So `--describe` is never a reason to leave `--kind` off — pass your own reading
+and let the two disagree in the open.
+
+Do not read it as an oracle. It classifies from the words you give it, so it does not
+know that a change to an RLS helper is security work in this codebase unless you say
+so; measured on a real node it called exactly that `refactor`. `ruti mode jev off`
+turns it off for the session, and `ruti classify "<description>"` asks it without
+ranking anyone.
+
 ### Delegating
 
 Never call `opencode` directly. Use:

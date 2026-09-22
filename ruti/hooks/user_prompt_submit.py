@@ -15,7 +15,7 @@ import json
 import sys
 import time
 
-from ruti import ledger, modes, quota, sessions
+from ruti import jev, ledger, modes, quota, sessions
 from ruti.config import STATE_ROOT, read_json, write_json
 
 MEMO_FILE = STATE_ROOT / "hook-memo.json"
@@ -23,8 +23,21 @@ MEMO_FILE = STATE_ROOT / "hook-memo.json"
 # How many prompts may pass before the full policy is restated even if nothing changed.
 FULL_EVERY = 12
 
+# Classifying costs about a second and a half of wall clock before the model even
+# starts reading, so it is not worth spending on "yes", "continue" or "fix the typo".
+# A prompt that actually describes work to be routed is longer than this.
+MIN_PROMPT_CHARS = 120
 
-def build_context() -> tuple[str, bool]:
+# A classification is only useful where the skip is documented to happen: substantial
+# work, begun without a ranking. Below this the guess is too close to call to nag over.
+HINT_MIN_CONFIDENCE = 0.7
+
+# Tighter than the library default: this one sits between the user pressing enter and
+# the model reading anything, so a slow answer is worth less than no answer.
+HINT_TIMEOUT = 2.0
+
+
+def build_context(prompt: str | None = None) -> tuple[str, bool]:
     # A session-scoped `ruti off` means routing advice is not just unhelpful here, it's
     # actively wrong -- so replace the whole budget block with a one-line reminder
     # rather than layering it on top.
@@ -78,6 +91,10 @@ def build_context() -> tuple[str, bool]:
             f"{outstanding.get('kind') or 'this'} work and nothing has been delegated to "
             "it since -- delegate, or say why you are writing it in-session instead."
         )
+    else:
+        hint = _route_hint(session_id, prompt)
+        if hint:
+            line += "\n" + hint
 
     write_json(MEMO_FILE, {
         "last_band": band,
@@ -85,6 +102,47 @@ def build_context() -> tuple[str, bool]:
         "at": time.time(),
     })
     return line, full
+
+
+def _route_hint(session_id: str | None, prompt: str | None) -> str:
+    """Name the classification when a prompt looks like work nobody ranked.
+
+    This is the one place the classifier earns its keep. The documented failure is not
+    that `route` gives bad answers, it is that it never gets called once a session
+    settles into a rhythm -- so the reminder has to arrive already carrying the
+    classification, or it is just another line of policy to skim past.
+
+    Everything here fails quiet. No key, the switch off, a slow endpoint, a prompt too
+    short to be a task: all of them return "" and the prompt goes on untouched.
+    """
+    prompt = (prompt or "").strip()
+    if len(prompt) < MIN_PROMPT_CHARS:
+        return ""
+    if not modes.current(session_id).get("jev", True) or not jev.configured():
+        return ""
+
+    # A blackholed endpoint outruns `urlopen`'s timeout -- that is per socket
+    # operation, not per call -- and on a dead network the hook measured three and a
+    # half seconds, on every prompt. The probe is cached, and caches its failures for
+    # minutes, so an outage costs one slow prompt rather than all of them.
+    health = jev.probe()
+    if not health or not health.get("ok"):
+        return ""
+
+    guess = jev.classify(prompt, timeout=HINT_TIMEOUT)
+    if guess is None or guess.kind_confidence < HINT_MIN_CONFIDENCE:
+        return ""
+    # Small work is exactly what the skip rule is for; nagging about it would teach the
+    # manager to ignore the line.
+    if guess.trivial:
+        return ""
+
+    return (
+        f"ruti: this reads as `{guess.kind}` work ({guess.kind_confidence:.2f}) and not "
+        f"trivial ({guess.trivial_probability:.2f}), and nothing has been ranked for it. "
+        f"Call `ruti route --kind {guess.kind} --files N --loc N --json` before starting "
+        "-- the size test is per task, not per session."
+    )
 
 
 def _mode_notes(session_id: str | None) -> list[str]:
@@ -108,13 +166,19 @@ def _mode_notes(session_id: str | None) -> list[str]:
 
 
 def main() -> int:
+    prompt = ""
     try:
-        sys.stdin.read()  # payload is not needed, but must be drained
+        raw = sys.stdin.read()
+        payload = json.loads(raw) if raw.strip() else {}
+        if isinstance(payload, dict):
+            prompt = str(payload.get("prompt") or "")
     except Exception:
+        # The stdin must still be drained; a payload we cannot parse just means the
+        # hint is skipped, not that the hook fails.
         pass
 
     try:
-        context, _ = build_context()
+        context, _ = build_context(prompt)
     except Exception:
         # A hook that fails must not block the prompt.
         return 0

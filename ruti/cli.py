@@ -12,7 +12,8 @@ from . import providers as providers_mod
 from . import usage as usage_mod
 from . import modes as modes_mod
 from . import openrouter as openrouter_mod
-from . import ledger, lmstudio, litellm_cfg, planner, quota, router, sessions, tls, ui, vram
+from . import (jev, ledger, lmstudio, litellm_cfg, planner, quota, router, sessions, tls, ui,
+               vram)
 from .config import ensure_dirs, file_lock, load_dotenv
 
 
@@ -620,6 +621,11 @@ def mode(ctx: click.Context, as_json: bool) -> None:
     ui.say(f"  coding : {'[ok]on[/ok]' if state['coding'] else '[muted]off[/muted]'}")
     free = state["free"]
     ui.say(f"  free   : {'[muted]off[/muted]' if free == 'off' else f'[ok]{free}[/ok]'}")
+    jev_on = state["jev"] and jev.configured()
+    jev_why = "" if state["jev"] else " (switched off for this session)"
+    if state["jev"] and not jev.configured():
+        jev_why = " (no key)"
+    ui.say(f"  jev    : {'[ok]on[/ok]' if jev_on else '[muted]off[/muted]'}{jev_why}")
     summary = modes_mod.active_summary(state)
     if summary:
         ui.say(f"\n[muted]active: {summary}[/muted]")
@@ -651,6 +657,20 @@ def mode_free(level: str) -> None:
         "soft": "free mode: soft -- paid metered APIs are flagged and deprioritised, not blocked",
         "hard": "free mode: hard -- `route` rules out paid metered APIs, `delegate` refuses them",
     }[level])
+
+
+@mode.command("jev")
+@click.argument("state", type=click.Choice(["on", "off"]))
+def mode_jev(state: str) -> None:
+    """Toggle the task classifier. Off: `route --describe` stops calling out, and the
+    prompt hook goes back to a generic reminder instead of a guessed command."""
+    session_id = _session_or_die()
+    modes_mod.set_jev(session_id, state == "on")
+    if state == "on" and not jev.configured():
+        ui.warn(f"classifier on, but {jev.TRANSPORTS[jev.DEFAULT_TRANSPORT]['key_env']} "
+                "is unset, so nothing will be classified")
+        return
+    ui.ok(f"classifier {state}")
 
 
 def _free_status_of(alias: str) -> bool | None:
@@ -714,14 +734,34 @@ def _refuse_if_disabled(as_json: bool) -> None:
               help="Rank without recording a recommendation: for checking what route "
                    "would say, not for a task about to start. The prompt hook then has "
                    "nothing to remind you to delegate.")
+@click.option("--describe", default=None,
+              help="A sentence or two about the task. A classifier reads it and derives "
+                   "the kind and how much judgement the work needs, instead of taking "
+                   "your word for them. It may only make routing more cautious.")
 @click.option("--json", "as_json", is_flag=True)
 def route(kind: str, files: int, loc: int, needs_tools: bool, repo_context: str,
-          risk: str, latency: str, probe: bool, as_json: bool) -> None:
+          risk: str, latency: str, probe: bool, describe: str | None, as_json: bool) -> None:
     """Rank the executors for a task you have already classified."""
     _refuse_if_disabled(as_json)
     task = router.Task(kind=kind, files=files, loc=loc, needs_tools=needs_tools,
                        repo_context=repo_context, risk=risk, latency=latency)
-    result = router.rank(task, record=not probe)
+
+    notes: list[str] = []
+    guess = None
+    if describe and not _classifier_on():
+        notes = ["classifier off for this session (`ruti mode jev on` re-enables it)"]
+    elif describe:
+        guess = jev.classify(describe)
+        if guess is not None:
+            task, notes = router.apply_classification(task, guess)
+        else:
+            notes = ["classifier unavailable, so the flags you passed stand unchanged"]
+
+    result = router.rank(task, record=not probe, described=describe, guess=guess)
+    if guess is not None:
+        result["classifier"] = guess.summary()
+    if notes:
+        result["classifier_notes"] = notes
 
     if as_json:
         ui.emit_json(result)
@@ -733,6 +773,11 @@ def route(kind: str, files: int, loc: int, needs_tools: bool, repo_context: str,
     ui.say(f"[head]{q['band']}[/head]  {used} of the 5h window used{freshness}")
     ui.say(f"[muted]task: {result['task']['kind']}, ~{result['task']['estimated_tokens']} tokens, "
            f"difficulty {result['task']['difficulty']}[/muted]")
+
+    if notes:
+        ui.heading("Classifier")
+        for note in notes:
+            ui.say(f"  [muted]- {ui.literal(note)}[/muted]")
 
     ui.heading("Eligible")
     for entry in result["ranked"]:
@@ -767,6 +812,64 @@ def _executor_tags(entry: dict) -> str:
     else:
         tags.append("[muted]subscription[/muted]")
     return "(" + ", ".join(tags) + ")"
+
+
+def _classifier_on() -> bool:
+    """Whether this session still wants task descriptions classified."""
+    return bool(modes_mod.current(sessions.current_session_id()).get("jev", True))
+
+
+@main.command()
+@click.argument("description", nargs=-1, required=True)
+@click.option("--transport", type=click.Choice(sorted(jev.TRANSPORTS)),
+              default=jev.DEFAULT_TRANSPORT,
+              help="Which endpoint answers. Both speak the same wire format.")
+@click.option("--json", "as_json", is_flag=True)
+def classify(description: tuple[str, ...], transport: str, as_json: bool) -> None:
+    """Say what a task looks like, without ranking anyone to do it.
+
+    For checking the classifier against your own read of a task. `ruti route
+    --describe` is the same call wired into a ranking.
+    """
+    _refuse_if_disabled(as_json)
+    text = " ".join(description).strip()
+
+    if not _classifier_on():
+        message = "the classifier is off for this session; `ruti mode jev on` re-enables it"
+        if as_json:
+            ui.emit_json({"classified": False, "reason": message})
+        else:
+            ui.warn(message)
+        return
+
+    if not jev.configured(transport):
+        message = (f"no key for the {transport} transport "
+                   f"({jev.TRANSPORTS[transport]['key_env']} is unset)")
+        if as_json:
+            ui.emit_json({"classified": False, "reason": message})
+        else:
+            ui.say(f"[warn]{message}[/warn]")
+        return
+
+    guess = jev.classify(text, transport=transport)
+    if guess is None:
+        if as_json:
+            ui.emit_json({"classified": False, "reason": "the classifier did not answer"})
+        else:
+            ui.say("[warn]the classifier did not answer; routing is unaffected[/warn]")
+        return
+
+    if as_json:
+        ui.emit_json({"classified": True, **guess.summary()})
+        return
+
+    ui.say(f"[head]{guess.kind}[/head]  [muted]confidence {guess.kind_confidence:.2f}[/muted]")
+    ui.say(f"  difficulty {guess.difficulty:.2f} "
+           f"[muted](confidence {guess.difficulty_confidence:.2f})[/muted]")
+    ui.say(f"  trivial: {'yes' if guess.trivial else 'no'} "
+           f"[muted]({guess.trivial_probability:.2f})[/muted]")
+    ui.say(f"[muted]{guess.model} via {guess.transport}, {guess.latency_ms:.0f} ms, "
+           f"${guess.cost_usd:.6f}[/muted]")
 
 
 @main.command()
