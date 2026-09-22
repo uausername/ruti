@@ -1,5 +1,7 @@
 # ruti
 
+[![CI](https://github.com/uausername/ruti/actions/workflows/ci.yml/badge.svg)](https://github.com/uausername/ruti/actions/workflows/ci.yml)
+
 **Stop burning your Claude Code subscription on boilerplate.**
 
 `ruti` keeps Claude Code as your architect and reviewer, and routes the token-heavy
