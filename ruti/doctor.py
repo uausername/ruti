@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Callable
 
 from . import jev, litellm_cfg, lmstudio, planner, tls
@@ -582,7 +582,11 @@ def _check_proxy_task() -> Check:
                 f"Start-ScheduledTask {SCHEDULED_TASK}"
             ),
         )
-    program = Path(_task_command()).name.lower()
+    # PureWindowsPath, not Path: this string comes from schtasks and is always a
+    # Windows path, but `Path` takes the flavour of whatever platform is running. On
+    # POSIX a backslash is an ordinary character, so the whole of
+    # C:\Python312\pythonw.exe reads as the file name and the check below misfires.
+    program = PureWindowsPath(_task_command()).name.lower()
     if program and program != "pythonw.exe":
         # A console program started by a non-elevated task gets its console taken over
         # by Windows Terminal, which cannot hide it: an empty window at every logon,

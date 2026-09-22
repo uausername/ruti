@@ -43,7 +43,18 @@ def test_an_unregistered_task_has_no_run_level(monkeypatch):
     assert doctor._task_run_level() is None
 
 
+# The settings branch of the check reads the task XML directly. Without this the test
+# would only pass on a machine that has the task registered with healthy settings --
+# which is how it passed locally for months and failed on the first CI runner.
+HEALTHY_SETTINGS = ("<Task><Settings>"
+                    "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"
+                    "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>"
+                    "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"
+                    "</Settings></Task>")
+
+
 def test_an_elevated_task_is_flagged_with_the_commands_to_undo_it(monkeypatch):
+    monkeypatch.setattr(doctor, "_task_xml", lambda: HEALTHY_SETTINGS)
     monkeypatch.setattr(doctor, "_task_run_level", lambda: "HighestAvailable")
     check = doctor._check_proxy_task()
     assert check.status == doctor.WARN

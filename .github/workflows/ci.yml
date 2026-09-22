@@ -7,22 +7,41 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
+  # A second push to the same branch makes the first run's answer worthless.
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   test:
-    # ruti drives Windows Scheduled Tasks and pythonw.exe, and part of the
-    # suite asserts on that behaviour, so Windows is the honest target here.
-    name: pytest (Python ${{ matrix.python-version }})
-    runs-on: windows-latest
+    name: pytest (${{ matrix.os }}, ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
 
     strategy:
+      # Both platforms' results are wanted even when one fails. ruti drives Windows
+      # Scheduled Tasks and pythonw.exe and part of the suite asserts on that, so
+      # Windows is the honest target -- but Linux is what catches a test that passes
+      # only because of something on the developer's own machine, which is exactly
+      # what it caught the first time this ran.
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13"]
+        include:
+          - os: windows-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.13"
+          - os: ubuntu-latest
+            python-version: "3.12"
+
+    env:
+      # ruti resolves its state directory at import time from %LOCALAPPDATA% or
+      # ~/.local/state. Pointing it into the workspace keeps a test that writes state
+      # out of the runner's home and makes both platforms resolve the same path.
+      RUTI_HOME: ${{ github.workspace }}/.ruti-ci-state
 
     steps:
       - name: Checkout
@@ -33,12 +52,75 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install package and test deps
+        # The full dependency set rather than --no-deps: `providers.py` imports litellm
+        # lazily inside its probe functions, and a test that reaches one should fail on
+        # the probe's own terms, not on a missing module.
         run: |
           python -m pip install --upgrade pip
           pip install -e .
           pip install pytest
 
       - name: Run tests
-        run: pytest -q
+        run: pytest -q --junit-xml=pytest-results.xml
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-results-${{ matrix.os }}-${{ matrix.python-version }}
+          path: pytest-results.xml
+          if-no-files-found: warn
+
+  imports:
+    name: every module imports
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      RUTI_HOME: ${{ github.workspace }}/.ruti-ci-state
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Compile everything
+        # Catches a syntax error in a module no test happens to import.
+        run: python -m compileall -q ruti
+
+      - name: Import every module
+        # A hook or a CLI command that fails at import is invisible to the suite until
+        # the session that needs it is already broken.
+        run: |
+          python - <<'PY'
+          import importlib
+          import pkgutil
+          import sys
+
+          import ruti
+
+          failed = []
+          for info in pkgutil.walk_packages(ruti.__path__, prefix="ruti."):
+              try:
+                  importlib.import_module(info.name)
+              except Exception as exc:
+                  failed.append(f"{info.name}: {exc!r}")
+          for line in failed:
+              print(line, file=sys.stderr)
+          print(f"{len(failed)} module(s) failed to import")
+          sys.exit(1 if failed else 0)
+          PY
