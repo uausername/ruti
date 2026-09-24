@@ -98,13 +98,6 @@ def _refresh_facts() -> dict[str, Any]:
         pass
 
     try:
-        from . import ledger
-
-        facts["last_delegation"] = ledger.last_delegation()
-    except Exception:
-        pass
-
-    try:
         write_json(FACTS_FILE, facts)
     except Exception:
         pass
@@ -265,7 +258,17 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
     if route_text:
         segments.append(route_text)
 
-    last = facts.get("last_delegation")
+    # Scoped to this session, not `_refresh_facts`'s machine-wide cache: that file has
+    # no session key (proxy/GPU genuinely are machine-global), and a delegation from a
+    # different, possibly much older session next to this session's own route
+    # recommendation reads as related when it is not. Read live for the same reason
+    # `route_text` above is -- the point is to see it the moment it happens.
+    try:
+        from . import ledger
+
+        last = ledger.last_delegation(payload.get("session_id"))
+    except Exception:
+        last = None
     # Not repeated when the route segment already shows this very run.
     if route_run and last and route_run.get("at") == last.get("at"):
         last = None

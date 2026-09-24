@@ -93,9 +93,22 @@ def read_events(since_days: float | None = None) -> list[dict[str, Any]]:
     return events
 
 
-def last_delegation() -> dict[str, Any] | None:
+def last_delegation(session_id: str | None = None) -> dict[str, Any] | None:
     """The most recent delegation event, read from the tail so the status line can
-    afford to call this on every repaint without scanning the whole ledger."""
+    afford to call this on every repaint without scanning the whole ledger.
+
+    Unscoped (the default), this reads whatever the *whole machine* last delegated,
+    which can be a different, possibly much older session's attempt sitting right next
+    to this session's own route recommendation -- confusing enough side by side that
+    it is worth spelling out here: pass `session_id` (the status line always does now)
+    to scope it to one session instead, via the same tail `last_route` already uses.
+    """
+    if session_id:
+        for entry in reversed(_session_tail(session_id)):
+            if entry.get("event") == "delegation":
+                return entry
+        return None
+
     if not LEDGER.exists():
         return None
     try:
