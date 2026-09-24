@@ -171,11 +171,24 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
         # Colour carries the band for anyone who can see it; the word carries it for
         # everyone else, and for a terminal that strips escapes.
         segments.append(_colour(f"{band} {text}", BAND_COLOUR.get(band, "37")))
+        if snapshot.freshness != "live":
+            # The band above was computed from this same stale reading, so the number
+            # can be quietly wrong at the exact moment it is glanced at for reassurance.
+            segments.append(_colour(f"~{snapshot.freshness}", "90"))
     else:
         segments.append(_colour("quota n/a", "35"))
 
     if snapshot.seven_day is not None:
-        segments.append(f"{snapshot.seven_day.used_percentage:.0f}% 7d")
+        pct = snapshot.seven_day.used_percentage
+        text = f"{pct:.0f}% 7d"
+        if snapshot.seven_day_binding:
+            # It is the reason `band` is this tight, not merely a number alongside a
+            # worse one -- share the band's own colour so that reads at a glance.
+            segments.append(_colour(text, BAND_COLOUR.get(snapshot.band, "37")))
+        elif pct >= 60.0:
+            segments.append(_colour(text, "33"))
+        else:
+            segments.append(text)
 
     model = (payload.get("model") or {}).get("display_name")
     effort = (payload.get("effort") or {}).get("level")
@@ -187,6 +200,15 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
     try:
         session_id = payload.get("session_id")
         if session_id:
+            from . import sessions
+
+            if sessions.is_disabled(session_id):
+                # The one toggle that matters most and used to have no presence here
+                # at all -- `route`/`delegate` refuse outright, and previously the only
+                # sign was a hook message that scrolls out of view within a prompt or
+                # two. Shown first, loudest, so it cannot be scrolled past unnoticed.
+                segments.append(_colour("OFF", "31"))
+
             from . import modes
 
             active = modes.current(session_id)
@@ -202,6 +224,15 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
                 segments.append(_colour("council", "35"))
             elif active.get("council") == "auto":
                 segments.append(_colour("council?", "35"))
+
+            # Shown always, not only while active, unlike the modes above: the whole
+            # point is to be able to tell "off" from "silent because irrelevant" at a
+            # glance, for the one toggle that quietly changes what `route --describe`
+            # and the prompt hook's hint actually do.
+            from . import jev as jev_mod
+
+            jev_on = active.get("jev", True) and jev_mod.configured()
+            segments.append(_colour("jev", "32") if jev_on else _colour("jev", "90"))
     except Exception:
         pass
 
@@ -249,12 +280,38 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
         else:
             segments.append(_colour(f"last:{requested}", "36"))
 
+    # Known Jev spend this session -- classification plus the council's own gate and
+    # judge, never the council members' own answers (see `session_jev_cost`'s
+    # docstring for why). Silent at exactly $0.00, like the other spend segments.
+    try:
+        from . import ledger
+
+        jev_cost = ledger.session_jev_cost(payload.get("session_id"))
+        if jev_cost > 0:
+            segments.append(_colour(f"jev:${jev_cost:.4f}", "90"))
+    except Exception:
+        pass
+
     gpu = facts.get("gpu")
     if gpu:
         segments.append(f"gpu {gpu['free_mib'] / 1024:.1f}G free")
 
     segments.append(_colour("proxy ok", "32") if facts.get("proxy")
                     else _colour("proxy DOWN", "31"))
+
+    # The status line cannot afford to run `doctor` itself (schtasks calls, a TLS
+    # chain walk -- seconds, not the milliseconds a repaint budget allows), so this
+    # reads whatever the session-start hook last cached, passively and without a TTL.
+    # Silent when there is no cached report yet, or when it was clean.
+    try:
+        from . import doctor
+
+        cached = doctor.cached()
+        if cached and cached.get("problems"):
+            colour = "31" if cached["worst"] == doctor.BAD else "33"
+            segments.append(_colour(f"doctor:{len(cached['problems'])}", colour))
+    except Exception:
+        pass
 
     return " · ".join(segments)
 

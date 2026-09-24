@@ -224,6 +224,25 @@ def _session_tail(session_id: str, max_bytes: int = 131072) -> list[dict[str, An
     return entries
 
 
+def session_jev_cost(session_id: str | None) -> float:
+    """Known Jev spend this session: classification calls plus the council's own gate
+    and judge. Deliberately partial -- it does not include what a convened council's
+    member models actually cost, because pulling that from the proxy's usage log needs
+    a multi-second settle wait per model (see `usage.collect`) that would tax every
+    `ruti council` call whether or not anyone reads the total. Labelled `jev:` rather
+    than `spent:` wherever this is shown, so the number never claims more than it is.
+    """
+    if not session_id:
+        return 0.0
+    total = 0.0
+    for entry in _session_tail(session_id):
+        if entry.get("event") == "route":
+            total += float((entry.get("classifier") or {}).get("cost_usd", 0.0) or 0.0)
+        elif entry.get("event") == "jev_spend":
+            total += float(entry.get("cost_usd", 0.0) or 0.0)
+    return total
+
+
 def unfollowed_route(session_id: str | None) -> dict[str, Any] | None:
     """The latest ranking in this session that named a delegate and was not acted on."""
     route = last_route(session_id)

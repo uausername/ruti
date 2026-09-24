@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from ruti import delegate, ledger, usage
+from ruti import config, delegate, ledger, modes, sessions, usage
 
 
 @pytest.fixture(autouse=True)
@@ -19,6 +19,22 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr(delegate, "RUNNING_FILE", tmp_path / "running.json")
     monkeypatch.setattr(delegate, "LOG_DIR", tmp_path / "logs")
     (tmp_path / "logs").mkdir()
+
+    # `doctor.cache()`/`cached()` re-import `STATE_ROOT` from `config` inside the
+    # function on every call, so patching it here is enough for those two alone.
+    monkeypatch.setattr(config, "STATE_ROOT", tmp_path)
+
+    # `sessions.py` and `modes.py` are the opposite: each binds its own `SESSIONS_FILE`
+    # name once at import time (`modes.py`'s own copy comes from `from .sessions
+    # import SESSIONS_FILE`, a second binding the `config.STATE_ROOT` patch above does
+    # not reach), so patching `config.STATE_ROOT` alone leaves both pointed at the real
+    # machine's session state. Every test so far has dodged this by mocking
+    # `modes.current` instead of calling `set_coding`/`set_council`/`set_jev` for real
+    # -- worth closing outright rather than leaving as a trap for the next one that
+    # doesn't.
+    sessions_file = tmp_path / "sessions.json"
+    monkeypatch.setattr(sessions, "SESSIONS_FILE", sessions_file)
+    monkeypatch.setattr(modes, "SESSIONS_FILE", sessions_file)
     return tmp_path
 
 
