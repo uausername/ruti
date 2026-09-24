@@ -180,20 +180,39 @@ def test_status_line_segment_never_raises(monkeypatch):
 
 
 def test_status_line_does_not_repeat_the_run_the_route_segment_shows(write, monkeypatch):
-    _route(write, "ruti-router/free")
-    run = _delegation(write, "ruti-router/free")
-    monkeypatch.setattr(statusline, "_refresh_facts",
-                        lambda: {"proxy": True, "loaded": [], "last_delegation": run})
+    # `last:` is now read live from the ledger, scoped to this session -- so these are
+    # real delegation events, not a faked `_refresh_facts` return.
+    monkeypatch.setattr(statusline, "_refresh_facts", lambda: {"proxy": True, "loaded": []})
     monkeypatch.setattr(statusline, "_running_delegate", lambda: None)
     monkeypatch.setattr("ruti.modes.current", lambda _s: {"coding": False, "free": "off"})
+
+    _route(write, "ruti-router/free")
+    _delegation(write, "ruti-router/free")
     line = statusline.render({"session_id": S}, quota.Quota(None, None, 0.0))
     assert "→ free ✓" in line and "last:" not in line
 
-    other = dict(run, at=run["at"] + 5, model="ruti-router/inkling-small")
-    monkeypatch.setattr(statusline, "_refresh_facts",
-                        lambda: {"proxy": True, "loaded": [], "last_delegation": other})
+    # A second, different delegation after that pairing: no longer the run the route
+    # segment already shows, so it earns its own `last:` segment.
+    _delegation(write, "ruti-router/inkling-small")
     assert "last:inkling-small" in statusline.render({"session_id": S},
                                                      quota.Quota(None, None, 0.0))
+
+
+def test_status_line_last_is_scoped_to_this_session_not_the_whole_ledger(write, monkeypatch):
+    """The bug this was built to fix: a stale, unrelated failure from a different,
+    older session showing up next to this session's own route recommendation as if
+    the two were connected."""
+    monkeypatch.setattr(statusline, "_refresh_facts", lambda: {"proxy": True, "loaded": []})
+    monkeypatch.setattr(statusline, "_running_delegate", lambda: None)
+    monkeypatch.setattr("ruti.modes.current", lambda _s: {"coding": False, "free": "off"})
+
+    write("delegation", session="an-older-session", model="ruti-router/north-mini-code",
+         ok=False)
+    _route(write, "ruti-router/gemini-flash-lite")
+
+    line = statusline.render({"session_id": S}, quota.Quota(None, None, 0.0))
+    assert "north-mini-code" not in line
+    assert "→ gemini-flash-lite" in line
 
 
 def test_a_proxy_that_stopped_answering_is_restarted_not_just_started(monkeypatch):
