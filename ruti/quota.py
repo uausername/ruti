@@ -34,6 +34,17 @@ GREEN, YELLOW, ORANGE, RED, CRITICAL, UNKNOWN = (
 # Upper bound of five-hour utilisation for each band.
 BAND_CEILINGS = ((GREEN, 40.0), (YELLOW, 70.0), (ORANGE, 85.0), (RED, 95.0))
 
+# The weekly window escalates the band in steps rather than one cliff at 90%. Applied
+# cumulatively in ascending order, so crossing both tiers still lands exactly where the
+# old single ">= 90" check did -- GREEN/YELLOW/ORANGE each move exactly one notch per
+# tier crossed. The 90% tier's mapping is unchanged from before this was tiered; only
+# the 75% tier is new, and it is what turns a quiet 82% into a visible nudge instead of
+# a number nobody reads until it crosses 90.
+SEVEN_DAY_ESCALATION: tuple[tuple[float, dict[str, str]], ...] = (
+    (75.0, {GREEN: YELLOW}),
+    (90.0, {GREEN: ORANGE, YELLOW: ORANGE, ORANGE: RED}),
+)
+
 FRESH_SECONDS = 120
 STALE_SECONDS = 1800
 
@@ -159,12 +170,10 @@ class Quota:
         return self.five_hour.used_percentage + rate * (remaining / 3600)
 
     @property
-    def band(self) -> str:
-        if self.freshness in ("unknown", "never"):
-            return UNKNOWN
-        if self.five_hour is None:
-            return UNKNOWN
-
+    def _five_hour_band(self) -> str:
+        """The band the five-hour window alone would give, before the weekly window
+        gets a say. Kept separate so `seven_day_binding` can tell "the week made this
+        worse" apart from "both windows happen to be bad at once"."""
         used = self.five_hour.used_percentage
         band = CRITICAL
         for name, ceiling in BAND_CEILINGS:
@@ -177,12 +186,36 @@ class Quota:
         projected = self.projected_at_reset
         if projected is not None and projected > 100 and band == GREEN:
             band = YELLOW
+        return band
+
+    @property
+    def band(self) -> str:
+        if self.freshness in ("unknown", "never"):
+            return UNKNOWN
+        if self.five_hour is None:
+            return UNKNOWN
+
+        band = self._five_hour_band
 
         # The weekly window can be the binding constraint even when the five-hour one
-        # is clear; never report more headroom than the tighter of the two.
-        if self.seven_day is not None and self.seven_day.used_percentage >= 90:
-            band = {GREEN: ORANGE, YELLOW: ORANGE, ORANGE: RED}.get(band, band)
+        # is clear; never report more headroom than the tighter of the two. Applied in
+        # ascending tiers rather than one cliff -- see SEVEN_DAY_ESCALATION.
+        if self.seven_day is not None:
+            used7 = self.seven_day.used_percentage
+            for ceiling, mapping in SEVEN_DAY_ESCALATION:
+                if used7 >= ceiling:
+                    band = mapping.get(band, band)
         return band
+
+    @property
+    def seven_day_binding(self) -> bool:
+        """Whether the weekly window is the *reason* `band` is this tight -- not just
+        whether it happens to be high while the five-hour window is separately bad on
+        its own. Drives the status line's colour and the one extra clause in
+        `summary()`: a number that changed nothing is not worth a sentence."""
+        if self.five_hour is None or self.seven_day is None:
+            return False
+        return self.band != self._five_hour_band
 
     @property
     def policy(self) -> dict[str, Any]:
@@ -201,6 +234,8 @@ class Quota:
             parts.append(f"on track for {projected:.0f}%")
         if self.freshness != "live":
             parts.append(f"reading is {self.freshness}")
+        if self.seven_day_binding and self.seven_day is not None:
+            parts.append(f"7d at {self.seven_day.used_percentage:.0f}% is the tighter window")
         return f"[{self.band}] " + ", ".join(parts)
 
 

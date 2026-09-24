@@ -1029,6 +1029,10 @@ def council(question: str, models: str | None, timeout: float, yes: bool,
             ui.warn("could not judge whether this is worth a council -- deciding that "
                     "is yours, re-run with --no-auto")
             return
+        # Logged regardless of the verdict: a refused council still spent the gate's
+        # own $0.000025, and the session cost tally would otherwise undercount exactly
+        # the calls that saved money by not convening.
+        ledger.record("jev_spend", purpose="council_gate", cost_usd=worth.cost_usd)
         if not worth.convene:
             if as_json:
                 ui.emit_json({"convened": False, "worth": worth.summary()})
@@ -1055,6 +1059,8 @@ def council(question: str, models: str | None, timeout: float, yes: bool,
 
     result = council_mod.convene(question, picked, timeout=timeout)
     verdict = council_mod.judge(result) if judge else None
+    if verdict is not None:
+        ledger.record("jev_spend", purpose="council_judge", cost_usd=verdict.cost_usd)
 
     if as_json:
         payload = result.summary()

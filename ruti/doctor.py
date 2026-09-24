@@ -59,6 +59,37 @@ class Report:
     def fixable(self) -> list[Check]:
         return [c for c in self.checks if c.fix and c.status != OK]
 
+    def cache(self) -> None:
+        """Persist enough of this report for the status line to show it later.
+
+        The status line cannot call `run_checks()` itself -- several checks here walk
+        `schtasks` or a TLS chain, seconds of work that would freeze the interface on
+        the repaint that hit an expired cache. So instead this writes once, right after
+        the session-start hook already paid the cost, and the status line only ever
+        reads what lands here -- passively, with no TTL of its own to expire.
+        """
+        from .config import STATE_ROOT, write_json
+
+        problems = [c for c in self.checks if c.status != OK]
+        write_json(STATE_ROOT / "doctor-last.json", {
+            "at": time.time(),
+            "worst": self.worst,
+            "problems": [{"name": c.name, "status": c.status} for c in problems],
+        })
+
+
+def cached() -> dict | None:
+    """The last report `cache()` wrote, or None if there is none yet.
+
+    Read-only and TTL-free on purpose -- see `Report.cache`. A missing file (no
+    session has started yet, or this is a `-p` run where the hook never fired) and a
+    corrupt one both read as "nothing to show", never as a problem worth surfacing.
+    """
+    from .config import STATE_ROOT, read_json
+
+    data = read_json(STATE_ROOT / "doctor-last.json", default=None)
+    return data if isinstance(data, dict) else None
+
 
 # --------------------------------------------------------------------------- fixes
 

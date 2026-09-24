@@ -21,6 +21,14 @@ def build_report() -> tuple[str, str] | None:
     from ruti import doctor
 
     report = doctor.run_checks()
+    # Cached unconditionally, healthy or not: the status line reads this passively
+    # (`doctor.cached()`) and a stale BAD from a problem fixed since would otherwise
+    # sit there for the rest of the session.
+    try:
+        report.cache()
+    except Exception:
+        pass
+
     problems = [c for c in report.checks if c.status != doctor.OK]
     if not problems:
         return None
