@@ -19,7 +19,8 @@ session:
 
     {"<session-id>": {"disabled": bool, "coding": bool,
                       "free": "off" | "soft" | "hard", "jev": bool,
-                      "council": "off" | "on" | "auto", "at": <unix ts>}}
+                      "council": "off" | "on" | "auto", "wait": bool,
+                      "wait_state": {...}, "at": <unix ts>}}
 
 `at` is refreshed on every write so `sessions.prune()` does not discard an active
 mode as if it were a stale toggle from a session long over.
@@ -47,7 +48,7 @@ COUNCIL_LEVELS: tuple[str, ...] = ("off", "on", "auto")
 # stop sending task descriptions off the machine without unsetting a key that the rest
 # of the toolchain shares.
 DEFAULTS: dict[str, Any] = {"coding": False, "free": "off", "jev": True,
-                            "council": "off"}
+                            "council": "off", "wait": False}
 
 
 def _load() -> dict[str, Any]:
@@ -81,6 +82,7 @@ def current(session_id: str | None) -> dict[str, Any]:
         "free": _normalise_free(record.get("free", DEFAULTS["free"])),
         "jev": bool(record.get("jev", DEFAULTS["jev"])),
         "council": _normalise_council(record.get("council", DEFAULTS["council"])),
+        "wait": bool(record.get("wait", DEFAULTS["wait"])),
     }
 
 
@@ -90,6 +92,26 @@ def set_coding(session_id: str, on: bool) -> None:
 
 def set_jev(session_id: str, on: bool) -> None:
     _update(session_id, "jev", bool(on))
+
+
+def set_wait(session_id: str, on: bool) -> None:
+    _update(session_id, "wait", bool(on))
+    if not on:
+        # A pause left over from before `off` must not resurface if wait is turned
+        # back on later in the same window.
+        _update(session_id, "wait_state", {})
+
+
+def wait_state(session_id: str | None) -> dict[str, Any]:
+    """Wait mode's bookkeeping for this session: which window was noticed/paused."""
+    if not session_id:
+        return {}
+    value = (_load().get(session_id) or {}).get("wait_state")
+    return value if isinstance(value, dict) else {}
+
+
+def set_wait_state(session_id: str, state: dict[str, Any]) -> None:
+    _update(session_id, "wait_state", state)
 
 
 def set_council(session_id: str, level: str) -> None:
@@ -123,6 +145,8 @@ def active_summary(modes: dict[str, Any]) -> str:
         parts.append(f"free:{modes['free']}")
     if modes.get("council", "off") != "off":
         parts.append(f"council:{modes['council']}")
+    if modes.get("wait"):
+        parts.append("wait")
     return ", ".join(parts)
 
 

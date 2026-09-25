@@ -80,6 +80,10 @@ def build_context(prompt: str | None = None) -> tuple[str, bool]:
     # are set for rather than following the band debounce.
     for note in _mode_notes(session_id):
         line += "\n" + note
+    if modes.current(session_id).get("wait"):
+        from ruti import wait
+
+        line += "\n" + wait.prompt_note(session_id, snapshot)
 
     # A ranking that named a delegate and was never acted on is the one thing the
     # manager cannot see for itself: the advice scrolls out of context long before the

@@ -70,14 +70,17 @@ def _shell_command(module: str) -> str:
     return f"{interpreter} -m {module}"
 
 
-def _exec_hook(module: str, timeout: int) -> dict[str, Any]:
+def _exec_hook(module: str, timeout: int, matcher: str | None = None) -> dict[str, Any]:
     # Exec form rather than a shell string: this machine's home directory contains a
     # space, and exec form removes the entire class of quoting bugs.
-    return {
+    entry: dict[str, Any] = {
         "hooks": [
             {"type": "command", "command": _python(), "args": ["-m", module], "timeout": timeout}
         ]
     }
+    if matcher is not None:
+        entry = {"matcher": matcher, **entry}
+    return entry
 
 
 def desired_settings(current: dict[str, Any]) -> dict[str, Any]:
@@ -91,16 +94,23 @@ def desired_settings(current: dict[str, Any]) -> dict[str, Any]:
 
     hooks = updated.setdefault("hooks", {})
     # Replace only ruti's own entries; anything else registered here stays.
-    for event, module, timeout in (
-        ("UserPromptSubmit", "ruti.hooks.user_prompt_submit", 10),
-        ("SessionStart", "ruti.hooks.session_start", 25),
-        ("SessionEnd", "ruti.hooks.session_end", 10),
+    # Wait mode's Stop hook sleeps until the five-hour window resets, so its timeout
+    # has to cover a whole window; while wait mode is off it returns at once.
+    from .wait import STOP_HOOK_TIMEOUT
+
+    for event, module, timeout, matcher in (
+        ("UserPromptSubmit", "ruti.hooks.user_prompt_submit", 10, None),
+        ("SessionStart", "ruti.hooks.session_start", 25, None),
+        ("SessionEnd", "ruti.hooks.session_end", 10, None),
+        ("PreToolUse", "ruti.hooks.wait_gate", 10, "*"),
+        ("PostToolUse", "ruti.hooks.wait_gate", 10, "*"),
+        ("Stop", "ruti.hooks.wait_gate", STOP_HOOK_TIMEOUT, None),
     ):
         others = [
             entry for entry in hooks.get(event, [])
             if not any("ruti." in str(h.get("args", "")) for h in entry.get("hooks", []))
         ]
-        hooks[event] = others + [_exec_hook(module, timeout)]
+        hooks[event] = others + [_exec_hook(module, timeout, matcher)]
     return updated
 
 

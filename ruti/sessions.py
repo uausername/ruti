@@ -56,6 +56,8 @@ def set_disabled(session_id: str, disabled: bool) -> None:
             record.get("disabled")
             or record.get("coding")
             or record.get("free", "off") != "off"
+            or record.get("council", "off") != "off"
+            or record.get("wait")
         )
         if meaningful:
             data[session_id] = record
