@@ -652,17 +652,15 @@ def _check_lmstudio() -> Check:
                      detail="local models are unavailable; remote providers still work")
     if not lmstudio.server_running():
         return Check(
-            "lmstudio", BAD, "the LM Studio server is down",
-            detail=(
-                "the desktop app being open does not start it. Every local request "
-                "will fail over to a remote provider, which looks like success"
-            ),
+            # Not a failure any more: `ruti delegate` starts the server and loads the
+            # model it needs, so a stopped server after a reboot is the normal state.
+            "lmstudio", OK, "server stopped -- `ruti delegate` starts it on demand",
             fix=_fix_lmstudio_server, fix_label="start the server",
         )
     loaded = lmstudio.loaded_models()
     if not loaded:
-        return Check("lmstudio", WARN, "server up, but no model is loaded",
-                     detail="run `ruti model use <key>`")
+        return Check("lmstudio", OK,
+                     "server up, no model resident -- `ruti delegate` loads one on demand")
     return Check(
         "lmstudio", OK,
         f"{len(loaded)} model(s) loaded",
@@ -728,18 +726,18 @@ def _check_local_route() -> Check:
         if not advertised:
             return Check("local-route", OK,
                          "LM Studio is down, but the proxy advertises no local model")
+        # `ruti delegate` starts the server and loads the model before sending
+        # anything, so only a request that bypasses it would fall back to a remote one.
         return Check(
-            "local-route", WARN,
-            f"{len(advertised)} advertised local model(s) cannot answer",
-            detail=("LM Studio is down, so a request for " + ", ".join(advertised) +
-                    " does not error -- it falls back to gemini-flash. Start the "
-                    "server (`ruti doctor --fix`) or stop serving them."),
+            "local-route", OK,
+            f"LM Studio is stopped; {len(advertised)} local alias(es) load on demand "
+            "through `ruti delegate`",
         )
 
     resident = {m.identifier for m in lmstudio.loaded_models() if m.identifier}
     if not resident:
-        return Check("local-route", WARN, "no local model is resident to route to",
-                     detail="run `ruti model use <key>`")
+        return Check("local-route", OK,
+                     "no local model resident -- `ruti delegate` loads one on demand")
 
     unreachable = resident - served
     if unreachable:
