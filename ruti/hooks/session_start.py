@@ -44,11 +44,16 @@ def build_report() -> tuple[str, str] | None:
     hint = f"\n  `ruti doctor --fix` can repair: {', '.join(fixable)}" if fixable else ""
 
     user_message = "ruti found problems with the delegation chain:\n" + "\n".join(lines) + hint
+    # Only a BAD check stops delegation; warnings are worth knowing about, but telling
+    # the manager to stop delegating over them contradicts the policy it is given.
+    if any(c.status == doctor.BAD for c in problems):
+        verdict = ("\nDo not delegate work until the BROKEN items are resolved -- a broken "
+                   "backend does not fail loudly, it silently answers from another provider.")
+    else:
+        verdict = "\nThese are warnings only; delegation still works."
     model_context = (
-        "ruti health check at session start found problems that make delegation "
-        "unreliable:\n" + "\n".join(lines) + hint +
-        "\nDo not delegate work until these are resolved -- a broken local backend does "
-        "not fail loudly, it silently answers from a remote provider instead."
+        "ruti health check at session start found problems:\n" + "\n".join(lines) + hint +
+        verdict
     )
     return user_message, model_context
 

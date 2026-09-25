@@ -69,12 +69,14 @@ class Outcome:
     tail: str = ""
     error: str = ""
     substituted: bool = False
+    load_error: str | None = None
     lines_written: int = 0
     broken_files: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        return self.exit_code == 0 and not self.error and not self.broken_files
+        return (self.exit_code == 0 and not self.error and not self.broken_files
+                and not self.load_error)
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -94,6 +96,7 @@ class Outcome:
             "diff_stat": self.diff_stat,
             "log": self.log_path,
             **({"error": self.error} if self.error else {}),
+            **({"load_error": self.load_error} if self.load_error else {}),
             **({"tail": self.tail} if self.tail else {}),
         }
 
@@ -225,6 +228,18 @@ def run(
     ensure_dirs()
     alias = model.split("/")[-1]
     outcome = Outcome(model_requested=model, router=_router_alias(alias))
+    # `route` ranks a local model that is not resident as "would load in a few
+    # seconds", so the load has to happen here: a request for an unloaded `local-*`
+    # alias does not fail, the proxy's fallback quietly answers from a remote model.
+    if alias.startswith("local-"):
+        from . import lmstudio, planner
+        from .router import OPENCODE_PROMPT_TOKENS, RESPONSE_HEADROOM
+
+        try:
+            planner.ensure_resident(alias, min_context=OPENCODE_PROMPT_TOKENS + RESPONSE_HEADROOM,
+                                    ttl_seconds=lmstudio.DEFAULT_TTL_SECONDS)
+        except Exception as exc:  # the substitution probe below still reports the outcome
+            outcome.load_error = str(exc)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     log_path = LOG_DIR / f"delegate-{stamp}-{model.replace('/', '_')}.log"
     outcome.log_path = str(log_path)

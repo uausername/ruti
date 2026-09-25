@@ -252,3 +252,27 @@ def _remember_load(model_key: str, identifier: str, context: int, measured: int 
         "at": time.time(),
     }
     write_json(STATE_FILE, state)
+
+
+def ensure_resident(identifier: str, *, min_context: int, ttl_seconds: int | None = None) -> dict:
+    """Ensures a local model is loaded and resident, starting the server if needed.
+
+    This is the entry point for `ruti delegate` to ensure that a model is ready before
+    a request goes out. It starts the server if it is down, then works out a plan
+    to make the model resident, and executes it.
+    """
+    from .config import file_lock
+
+    if not lmstudio.server_running():
+        lmstudio.start_server()
+
+    # The identifier comes from `identifier_for(model.key)`, so we have to map back.
+    catalog_model = next((m for m in lmstudio.list_models() if identifier_for(m.key) == identifier), None)
+    if catalog_model is None:
+        raise RuntimeError(f"no downloaded model maps to {identifier!r}")
+
+    with file_lock("model-swap", timeout=180.0):
+        plan = plan_load(catalog_model, min_context=min_context)
+        if not plan.ok:
+            raise RuntimeError("cannot load " + catalog_model.key + ": " + "; ".join(plan.reasons))
+        return execute(plan, ttl_seconds=ttl_seconds)
