@@ -217,6 +217,15 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
                 segments.append(_colour("council", "35"))
             elif active.get("council") == "auto":
                 segments.append(_colour("council?", "35"))
+            if active.get("wait"):
+                from . import quota as quota_mod, wait as wait_mod
+
+                snap = quota_mod.load()
+                paused = modes.wait_state(session_id).get("paused")
+                if paused and paused == wait_mod.window_key(snap):
+                    segments.append(_colour(f"paused->{wait_mod.reset_clock(snap)}", "33"))
+                else:
+                    segments.append(_colour("wait", "34"))
 
             # Shown always, not only while active, unlike the modes above: the whole
             # point is to be able to tell "off" from "silent because irrelevant" at a

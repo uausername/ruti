@@ -123,6 +123,16 @@ OpenRouter's live catalogue); `ruti openrouter setup` registers the routers
 (`pareto-code`, `free`) and any free models you pick as routable aliases. Neither the
 modes nor the registration touch this file.
 
+### Wait mode
+
+`ruti mode wait on` keeps a long task from running into the hard five-hour stop. At
+90% a hook tells you, once per window, to assess the open tasks: finish only what fits
+before 95%, start nothing large, keep the task list current. At 95% every tool call
+except `ruti` and TodoWrite is refused -- write a checkpoint in your reply (done, in
+progress and where it stopped, remaining steps in order) and end the turn. The `Stop`
+hook then waits out the reset and resumes the session with an instruction to continue
+from that checkpoint. `ruti mode wait off` releases a pause.
+
 ### Standing a council
 
 `ruti mode council on|auto` turns the one-off `ruti council` command into a standing

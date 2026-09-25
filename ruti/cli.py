@@ -628,6 +628,7 @@ def mode(ctx: click.Context, as_json: bool) -> None:
     ui.say(f"  jev    : {'[ok]on[/ok]' if jev_on else '[muted]off[/muted]'}{jev_why}")
     council_level = state["council"]
     ui.say(f"  council: {'[muted]off[/muted]' if council_level == 'off' else f'[ok]{council_level}[/ok]'}")
+    ui.say(f"  wait   : {'[ok]on[/ok]' if state['wait'] else '[muted]off[/muted]'}")
     summary = modes_mod.active_summary(state)
     if summary:
         ui.say(f"\n[muted]active: {summary}[/muted]")
@@ -678,6 +679,25 @@ def mode_council(level: str) -> None:
     if level != "off" and not jev.configured():
         ui.warn("no classifier key, so there is no judge and `auto` cannot decide -- "
                 "councils will still convene when you ask for one")
+
+
+@mode.command("wait")
+@click.argument("state", type=click.Choice(["on", "off"]))
+def mode_wait(state: str) -> None:
+    """Ride the five-hour window to its edge instead of off it. At 90% the manager is
+    told to assess its open tasks; at 95% tool calls are refused and it writes a
+    checkpoint; after the reset the Stop hook resumes the same session by itself."""
+    from . import wait as wait_mod
+
+    session_id = _session_or_die()
+    modes_mod.set_wait(session_id, state == "on")
+    if state == "off":
+        ui.ok("wait mode off -- any pause in progress is released")
+        return
+    ui.ok(f"wait mode on -- assess at {wait_mod.NOTICE_AT:.0f}%, pause at "
+          f"{wait_mod.PAUSE_AT:.0f}%, resume after the reset")
+    ui.say("[muted]needs the PreToolUse/PostToolUse/Stop hooks from `ruti install`; while "
+           "paused, Esc in Claude Code cancels the wait[/muted]")
 
 
 @mode.command("jev")
