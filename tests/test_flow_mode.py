@@ -439,3 +439,13 @@ def test_a_trusted_folder_gets_no_warning(tools):
     on()
     flow.write_handoff(SID, "Goal: x", "C:/work")
     assert "trusted" not in flow.stop(SID, {}, spawn=Spawn())["systemMessage"]
+
+
+def test_a_finished_continuation_closes_its_window(tools):
+    on()
+    path = flow.write_handoff(SID, "Goal: x", "C:/work")
+    spawn = Spawn()
+    flow.stop(SID, {}, spawn=spawn)
+    assert "-NoExit" not in spawn.calls[0][0]
+    script = path.with_suffix(".ps1").read_text(encoding="utf-8-sig")
+    assert script.rstrip().endswith("exit $LASTEXITCODE")

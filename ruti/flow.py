@@ -287,6 +287,9 @@ def launcher_script(handoff: Path, cwd: str, permission_mode: str | None,
         f"$env:{HANDOFF_ENV} = {_ps_quote(handoff)}",
         *(f"Remove-Item Env:{name} -ErrorAction SilentlyContinue" for name in names),
         "& " + " ".join(_ps_quote(a) for a in [claude, *args, prompt]),
+        # claude's own exit code, so the terminal can tell a finished session (window
+        # closes) from a failed start (window stays, showing the code).
+        "exit $LASTEXITCODE",
     ]) + "\n"
 
 
@@ -303,7 +306,10 @@ def launch(handoff: Path, cwd: str, permission_mode: str | None, *,
         encoding="utf-8-sig", newline="\r\n",
     )
     shell = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
-    shell_argv = [shell, "-NoExit", "-ExecutionPolicy", "Bypass", "-File", str(script)]
+    # No -NoExit: with it every finished continuation left a dead shell behind, one
+    # window per hop. Windows Terminal closes a tab whose process exits 0 and keeps one
+    # that failed, so a launch that went wrong still stays readable.
+    shell_argv = [shell, "-NoLogo", "-ExecutionPolicy", "Bypass", "-File", str(script)]
     dropped = {name.upper() for name in [*markers, "CLAUDE_CODE_SESSION_ID"]}
     common: dict[str, Any] = {
         "env": {k: v for k, v in os.environ.items() if k.upper() not in dropped},
