@@ -67,11 +67,27 @@ def used(session_id: str | None) -> float | None:
         return None
 
 
+def _flow_on(session_id: str | None) -> bool:
+    try:
+        from . import modes  # imported here: modes is not needed by the status line path
+
+        return bool(modes.current(session_id).get("flow"))
+    except Exception:
+        return False
+
+
 def warning(session_id: str | None) -> str:
     """One line for the prompt hook, or "" while the session is under the line."""
     pct = used(session_id)
     if pct is None or pct < WARN_PERCENT:
         return ""
+    if _flow_on(session_id):
+        return (
+            f"ruti context -- {pct:.0f}% of this conversation's context window is used, "
+            f"past the {WARN_PERCENT:.0f}% line, and flow mode is on: finish the step in "
+            "hand, write the handoff with `ruti flow handoff`, and end the turn -- a "
+            "fresh session opens in a new window and continues from it."
+        )
     return (
         f"ruti context -- {pct:.0f}% of this conversation's context window is used, "
         f"past the {WARN_PERCENT:.0f}% line. Do not start new substantive work: "

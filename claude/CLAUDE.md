@@ -135,11 +135,26 @@ from that checkpoint. `ruti mode wait off` releases a pause.
 
 ### Default modes
 
-`ruti defaults set coding=on free=soft wait=on` sets the modes every session has
-unless it sets its own; `ruti defaults` shows them, `ruti defaults clear [mode]` goes
-back to the built-in ones. A session's own `ruti mode ...` always wins. The status
+`ruti defaults set coding=on free=soft wait=on flow=on` sets the modes every session
+has unless it sets its own; `ruti defaults` shows them, `ruti defaults clear [mode]`
+goes back to the built-in ones. A session's own `ruti mode ...` always wins. The status
 line and the prompt hook show the effective modes, so trust them over what you
 remember setting.
+
+### Flow mode
+
+`ruti mode flow on` hands a long task to a fresh session instead of letting this one's
+context fill. At 50% context a hook tells you once: finish the step in hand, then pipe
+a handoff into `ruti flow handoff` (heredoc: `ruti flow handoff <<'EOF'` ... `EOF`) --
+Goal; Done; In progress, exactly where you stopped; Next steps in order; Key files,
+commands and state; Decisions and constraints; Instructions to your next self -- and
+end the turn. Write it for a reader with none of this conversation: that is who reads
+it. From 60% without a handoff, and always once one is written, every tool except
+`ruti` and TodoWrite is refused. The `Stop` hook then opens `claude` in a new window in
+the same directory and permission mode; that session starts with the handoff and this
+session's modes in its context. At most five sessions in a chain. `ruti mode flow off`
+drops a handoff not yet launched. With flow on, this replaces the 50% advice in
+"Context window watch" -- hand off instead of offering `/compact`.
 
 ### Standing a council
 

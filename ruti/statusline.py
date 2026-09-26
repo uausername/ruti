@@ -227,6 +227,11 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
                     segments.append(_colour(f"paused->{wait_mod.reset_clock(snap)}", "33"))
                 else:
                     segments.append(_colour("wait", "34"))
+            if active.get("flow"):
+                # The arrow once this session has passed the task on: the window stays
+                # open, and should read as done rather than as still at work.
+                launched = modes.flow_state(session_id).get("launched")
+                segments.append(_colour("flow→" if launched else "flow", "36"))
 
             # Shown always, not only while active, unlike the modes above: the whole
             # point is to be able to tell "off" from "silent because irrelevant" at a

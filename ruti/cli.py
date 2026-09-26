@@ -692,6 +692,7 @@ def mode(ctx: click.Context, as_json: bool) -> None:
     council_level = state["council"]
     ui.say(f"  council: {'[muted]off[/muted]' if council_level == 'off' else f'[ok]{council_level}[/ok]'}")
     ui.say(f"  wait   : {'[ok]on[/ok]' if state['wait'] else '[muted]off[/muted]'}")
+    ui.say(f"  flow   : {'[ok]on[/ok]' if state['flow'] else '[muted]off[/muted]'}")
     summary = modes_mod.active_summary(state)
     if summary:
         ui.say(f"\n[muted]active: {summary}[/muted]")
@@ -763,6 +764,27 @@ def mode_wait(state: str) -> None:
            "paused, Esc in Claude Code cancels the wait[/muted]")
 
 
+@mode.command("flow")
+@click.argument("state", type=click.Choice(["on", "off"]))
+def mode_flow(state: str) -> None:
+    """Hand a long task to a fresh session before this one's context fills. At 50% the
+    manager is told to write a handoff; from 60% tools are refused until it does; the
+    Stop hook then opens `claude` in a new window, which picks up the handoff and these
+    modes. The old window stays open."""
+    from . import flow as flow_mod
+
+    session_id = _session_or_die()
+    modes_mod.set_flow(session_id, state == "on")
+    if state == "off":
+        ui.ok("flow mode off -- a handoff not yet launched is dropped, and a session that "
+              "handed off is released")
+        return
+    ui.ok(f"flow mode on -- hand off at {flow_mod.FLOW_AT:.0f}% context, tools refused from "
+          f"{flow_mod.FORCE_AT:.0f}% until then, at most {flow_mod.MAX_HOPS} sessions in a chain")
+    ui.say("[muted]the new session inherits this one's permission mode; needs the hooks "
+           "from `ruti install`[/muted]")
+
+
 @mode.command("jev")
 @click.argument("state", type=click.Choice(["on", "off"]))
 def mode_jev(state: str) -> None:
@@ -816,6 +838,47 @@ def _refuse_if_disabled(as_json: bool) -> None:
     else:
         ui.bad(message)
     raise SystemExit(1)
+
+
+# ----------------------------------------------------------------------- flow
+
+
+@main.group("flow")
+def flow_group() -> None:
+    """Flow mode's handoff from one session to the next (see `ruti mode flow`)."""
+
+
+@flow_group.command("handoff")
+@click.option("--file", "file_path", type=click.Path(exists=True, dir_okay=False),
+              help="Read the handoff from a file instead of stdin.")
+def flow_handoff(file_path: str | None) -> None:
+    """Write this session's handoff -- Goal, Done, In progress, Next steps, Key files,
+    Decisions, Instructions -- for the next session to continue from."""
+    import os
+    from pathlib import Path
+
+    from . import flow as flow_mod
+
+    session_id = _session_or_die()
+    if not modes_mod.current(session_id)["flow"]:
+        raise click.ClickException("flow mode is off for this session -- `ruti mode flow on` "
+                                   "first")
+    if file_path:
+        data = Path(file_path).read_bytes()
+    else:
+        data = click.get_binary_stream("stdin").read()
+    # Bytes, decoded here: a heredoc from Git Bash arrives as UTF-8 whatever the console
+    # code page says, and reading it as cp1251 would mangle every Cyrillic word in it.
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = data.decode(errors="replace")
+    try:
+        path = flow_mod.write_handoff(session_id, text, os.getcwd())
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    ui.ok(f"handoff written: {path}")
+    ui.say("[muted]end the turn now -- the Stop hook opens the next session[/muted]")
 
 
 # ---------------------------------------------------------------------------- route
