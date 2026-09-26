@@ -28,7 +28,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from . import (jev, litellm_cfg, lmstudio, modes, openrouter, planner, providers, quota,
-               sessions, vram)
+               sessions, track, vram)
 
 # Measured, not guessed: `opencode run` sends an 8095-token system prompt before any
 # task text. A model whose window cannot hold it will not run slowly, it will fail --
@@ -84,6 +84,9 @@ class Candidate:
     # A router picks the real model per request, so neither its class nor its price
     # is known before it has run.
     router: bool = False
+    # What the ledger says this executor actually did (see `track.py`). None means
+    # ruti has never run it, which leaves the constants above in charge.
+    track: "track.Record | None" = None
     # Who bills a metered executor, e.g. "openrouter". Only meaningful for remote.
     provider: str | None = None
     command: str = ""
@@ -439,7 +442,31 @@ def rank(task: Task, snapshot: quota.Quota | None = None, *,
         + [_self_candidate(task, snapshot)]
     )
 
+    # What the ledger already knows about each executor, read once for the whole
+    # ranking. Without it every remote executor scores 0.9 and the tie is settled by
+    # registration order. `track.load` answers `{}` when history cannot be read, so a
+    # ledger problem leaves the ranking exactly as it was.
+    history = track.load()
+
     for candidate in candidates:
+        # History first, before the score: an alias that has been asked before is judged
+        # on what it did, not on the 0.75 every remote executor is given by default.
+        # Not named `record` -- that is this function's own flag, and shadowing it would
+        # quietly stop the ledger write at the end.
+        track_record = (history.get(candidate.name)
+                        if candidate.tier in ("local", "remote") else None)
+        candidate.track = track_record
+        tracked = track_record is not None and track_record.runs > 0
+        if tracked and track_record.speed is not None:
+            # Half the score's weight is speed, so this has to land before the score is
+            # computed rather than after it.
+            candidate.speed = track_record.speed
+        elif track_record is not None and track_record.excluded > 0:
+            candidate.reasons.append(
+                f"no track record of its own yet: {track_record.excluded} past run(s) "
+                "were answered by another model"
+            )
+
         # Hard gates.
         if task.needs_tools and not candidate.supports_tools:
             candidate.blockers.append("the task requires tool calls")
@@ -478,6 +505,16 @@ def rank(task: Task, snapshot: quota.Quota | None = None, *,
         # Score. Budget dominates, then speed; capability is already gated above.
         budget_term = 1.0 - candidate.quota_cost * (0.4 + 0.6 * _pressure(snapshot))
         candidate.score = round(budget_term * (0.6 + 0.4 * candidate.speed), 3)
+        # The measured track record, applied to the score it belongs to and not to the
+        # adjustments below: this is what the model did, while those are what the
+        # session's policy says about it.
+        if tracked:
+            candidate.score = round(candidate.score * track_record.factor, 3)
+            why = (f"track record: {track_record.succeeded} of "
+                   f"{track_record.runs} run(s) succeeded")
+            if track_record.median_s is not None:
+                why += f", median {track_record.median_s:.0f}s"
+            candidate.reasons.append(f"{why} (score x{track_record.factor:.2f})")
         if (free_mode != "off" and candidate.tier == "remote"
                 and candidate.free is not True and candidate.eligible):
             candidate.score = round(candidate.score * 0.4, 3)
@@ -601,6 +638,16 @@ def _render(candidate: Candidate) -> dict[str, Any]:
         "coding": candidate.coding,
         "context_window": candidate.context_window,
         "command": candidate.command,
+        "track": (
+            {
+                "runs": candidate.track.runs,
+                "succeeded": candidate.track.succeeded,
+                "median_s": candidate.track.median_s,
+                "excluded": candidate.track.excluded,
+                "factor": round(candidate.track.factor, 3),
+            }
+            if candidate.track is not None else None
+        ),
         "reasons": candidate.reasons,
         "blockers": candidate.blockers,
     }
