@@ -31,8 +31,15 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from .config import file_lock, read_json, write_json
+from .config import STATE_ROOT, file_lock, read_json, write_json
 from .sessions import SESSIONS_FILE
+
+# The user's own defaults, layered over `DEFAULTS` below. Consulted by `current()` for
+# any mode a session has not set itself, so a default reaches every session -- including
+# ones already running that never touched that mode -- and an explicit `ruti mode ...`
+# in a session always wins. No SessionStart step: a hook that copied defaults into each
+# new session would miss sessions it never saw start.
+DEFAULTS_FILE = STATE_ROOT / "mode-defaults.json"
 
 # "soft" deprioritises paid APIs and warns; "hard" refuses them outright.
 FREE_LEVELS: tuple[str, ...] = ("off", "soft", "hard")
@@ -50,10 +57,72 @@ COUNCIL_LEVELS: tuple[str, ...] = ("off", "on", "auto")
 DEFAULTS: dict[str, Any] = {"coding": False, "free": "off", "jev": True,
                             "council": "off", "wait": False}
 
+BOOL_MODES: tuple[str, ...] = ("coding", "jev", "wait")
+_LEVELS: dict[str, tuple[str, ...]] = {"free": FREE_LEVELS, "council": COUNCIL_LEVELS}
+_TRUE, _FALSE = ("on", "true", "1", "yes"), ("off", "false", "0", "no")
+
 
 def _load() -> dict[str, Any]:
     data = read_json(SESSIONS_FILE, default={})
     return data if isinstance(data, dict) else {}
+
+
+def validate_default(key: str, value: Any) -> Any:
+    """The stored form of `value` for mode `key`; ValueError if it is not one.
+
+    Accepts what a person types (`on`, `off`, `soft`, ...) as well as the stored form,
+    so the CLI and a hand-edited file go through the same check.
+    """
+    if key in BOOL_MODES:
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in _TRUE:
+            return True
+        if text in _FALSE:
+            return False
+        raise ValueError(f"{key} takes on or off, not {value!r}")
+    if key in _LEVELS:
+        if value in _LEVELS[key]:
+            return str(value)
+        raise ValueError(f"{key} takes one of {', '.join(_LEVELS[key])}, not {value!r}")
+    raise ValueError(f"no mode called {key!r} -- one of {', '.join(DEFAULTS)}")
+
+
+def user_defaults() -> dict[str, Any]:
+    """The overrides the user has set, minus anything a hand edit left invalid."""
+    data = read_json(DEFAULTS_FILE, default={})
+    if not isinstance(data, dict):
+        return {}
+    valid: dict[str, Any] = {}
+    for key, value in data.items():
+        try:
+            valid[key] = validate_default(key, value)
+        except ValueError:
+            continue
+    return valid
+
+
+def effective_defaults() -> dict[str, Any]:
+    return {**DEFAULTS, **user_defaults()}
+
+
+def set_defaults(values: dict[str, Any]) -> dict[str, Any]:
+    """Validate every pair first, then write them together -- or none of them."""
+    checked = {key: validate_default(key, value) for key, value in values.items()}
+    with file_lock("mode-defaults", timeout=10.0):
+        write_json(DEFAULTS_FILE, {**user_defaults(), **checked})
+    return checked
+
+
+def clear_defaults(keys: list[str] | None = None) -> None:
+    """Drop the named overrides, or all of them."""
+    unknown = [key for key in keys or [] if key not in DEFAULTS]
+    if unknown:
+        raise ValueError(f"no mode called {unknown[0]!r} -- one of {', '.join(DEFAULTS)}")
+    with file_lock("mode-defaults", timeout=10.0):
+        kept = {} if not keys else {k: v for k, v in user_defaults().items() if k not in keys}
+        write_json(DEFAULTS_FILE, kept)
 
 
 def _normalise_free(value: Any) -> str:
@@ -73,16 +142,18 @@ def _normalise_council(value: Any) -> str:
 
 
 def current(session_id: str | None) -> dict[str, Any]:
-    """The modes in effect for this session. No session or no record -> defaults."""
+    """The modes in effect for this session: its own settings, then the user's
+    defaults (`ruti defaults`), then the built-in ones."""
+    defaults = effective_defaults()
     if not session_id:
-        return dict(DEFAULTS)
+        return defaults
     record = _load().get(session_id) or {}
     return {
-        "coding": bool(record.get("coding", DEFAULTS["coding"])),
-        "free": _normalise_free(record.get("free", DEFAULTS["free"])),
-        "jev": bool(record.get("jev", DEFAULTS["jev"])),
-        "council": _normalise_council(record.get("council", DEFAULTS["council"])),
-        "wait": bool(record.get("wait", DEFAULTS["wait"])),
+        "coding": bool(record.get("coding", defaults["coding"])),
+        "free": _normalise_free(record.get("free", defaults["free"])),
+        "jev": bool(record.get("jev", defaults["jev"])),
+        "council": _normalise_council(record.get("council", defaults["council"])),
+        "wait": bool(record.get("wait", defaults["wait"])),
     }
 
 

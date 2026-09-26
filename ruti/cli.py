@@ -596,6 +596,68 @@ def on() -> None:
         ui.say("[muted]ruti was already enabled for this session[/muted]")
 
 
+# ------------------------------------------------------------------- defaults
+
+
+@main.group("defaults", invoke_without_command=True)
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+@click.pass_context
+def defaults(ctx: click.Context, as_json: bool) -> None:
+    """The modes every session starts with. A session's own `ruti mode ...` always wins;
+    a changed default also reaches running sessions that never set that mode."""
+    if ctx.invoked_subcommand is None:
+        _show_defaults(as_json)
+
+
+@defaults.command("show")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def defaults_show(as_json: bool) -> None:
+    """Each mode's default, and whether it is yours or the built-in one."""
+    _show_defaults(as_json)
+
+
+def _show_defaults(as_json: bool) -> None:
+    overrides = modes_mod.user_defaults()
+    effective = modes_mod.effective_defaults()
+    if as_json:
+        ui.emit_json({"defaults": effective, "overridden": sorted(overrides)})
+        return
+    for key, value in effective.items():
+        shown = ("on" if value else "off") if isinstance(value, bool) else value
+        origin = "[ok]set[/ok]" if key in overrides else "[muted]built-in[/muted]"
+        ui.say(f"  {key:<8}: {shown:<5} {origin}")
+
+
+@defaults.command("set")
+@click.argument("pairs", nargs=-1, required=True, metavar="KEY=VALUE...")
+def defaults_set(pairs: tuple[str, ...]) -> None:
+    """Set defaults, e.g. `ruti defaults set coding=on free=soft wait=on`."""
+    values = {}
+    for pair in pairs:
+        key, sep, value = pair.partition("=")
+        if not sep or not key.strip():
+            raise click.ClickException(f"expected KEY=VALUE, got {pair!r}")
+        values[key.strip()] = value.strip()
+    try:
+        written = modes_mod.set_defaults(values)
+    except ValueError as exc:
+        raise click.ClickException(f"{exc} -- nothing was changed") from exc
+    shown = ", ".join(f"{k}={('on' if v else 'off') if isinstance(v, bool) else v}"
+                      for k, v in written.items())
+    ui.ok(f"defaults set: {shown}")
+
+
+@defaults.command("clear")
+@click.argument("keys", nargs=-1)
+def defaults_clear(keys: tuple[str, ...]) -> None:
+    """Back to the built-in default for the named modes, or for all of them."""
+    try:
+        modes_mod.clear_defaults(list(keys) or None)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    ui.ok(f"cleared: {', '.join(keys)}" if keys else "all defaults back to built-in")
+
+
 # ----------------------------------------------------------------------- mode
 
 
