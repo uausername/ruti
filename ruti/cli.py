@@ -216,7 +216,8 @@ def models_sync(as_json: bool) -> None:
     wired = litellm_cfg.wire_include()
     # OpenCode only offers models its own config declares, so a model that is served by
     # the proxy but missing here fails under `opencode` with an opaque server error.
-    written = litellm_cfg.sync_opencode(litellm_cfg.routable_aliases())
+    # From disk, not the proxy: it has not reloaded what was just written.
+    written = litellm_cfg.sync_opencode(litellm_cfg.declared_models())
 
     if as_json:
         ui.emit_json({"models": names, "include_added": wired,
@@ -1282,8 +1283,9 @@ def provider_add(provider_name: str | None, model: str | None, alias: str | None
 
     # Declare it to OpenCode as well. A model the proxy serves but OpenCode has never
     # heard of fails with an opaque "Unexpected server error" that says nothing about
-    # the actual cause.
-    aliases = sorted(set(litellm_cfg.routable_aliases()) | {alias})
+    # the actual cause. From disk, not the proxy: until it restarts it still serves the
+    # old list, and handing that over would bring back aliases removed since.
+    aliases = sorted(set(litellm_cfg.declared_models()) | {alias})
     litellm_cfg.sync_opencode(aliases)
 
     ui.ok(f"{alias} registered in LiteLLM and OpenCode")
@@ -1393,6 +1395,9 @@ def provider_remove(alias: str, yes: bool) -> None:
     registry["providers"] = keep
     providers_mod.save_registry(registry)
     litellm_cfg.write_providers(providers_mod.litellm_entries(registry))
+    # Otherwise OpenCode keeps offering the alias, and a delegation to it fails with the
+    # proxy's opaque error instead of never being attempted.
+    litellm_cfg.sync_opencode(litellm_cfg.declared_models())
     ui.ok(f"removed {alias}")
     ui.say("[muted]its key is still in litellm/.env -- delete the "
            f"{', '.join(r['env_var'] for r in removed)} line(s) if you want it gone[/muted]")
@@ -1605,7 +1610,8 @@ def openrouter_setup(slugs_csv: str | None, key_stdin: bool, skip_verify: bool,
     providers_mod.save_registry(registry)
     litellm_cfg.write_providers(providers_mod.litellm_entries(registry))
     litellm_cfg.wire_include()
-    aliases = sorted(set(litellm_cfg.routable_aliases()) | {r["alias"] for r in planned})
+    # From disk, not the proxy -- see `provider add`.
+    aliases = sorted(set(litellm_cfg.declared_models()) | {r["alias"] for r in planned})
     litellm_cfg.sync_opencode(aliases)
 
     ui.ok(f"registered {len(planned)} alias(es): {', '.join(r['alias'] for r in planned)}")
