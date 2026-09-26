@@ -135,3 +135,27 @@ def test_marking_alone_does_not_promise_an_env_write(setup, monkeypatch):
     out = " ".join((result.output + (result.stderr or "")).split())
     assert result.exit_code == 0, out
     assert "marked 1 alias(es) as coding" in out and "litellm/.env" not in out
+
+
+# ------------------------------------------------------------------ OpenCode sync
+
+
+def test_setup_declares_to_opencode_what_is_on_disk_not_what_the_old_proxy_serves(
+        setup, monkeypatch):
+    # Before the restart the proxy still serves an alias removed since; handing its list
+    # to OpenCode brought that alias back.
+    setup["served"] = ["free", "kimi"]
+    monkeypatch.setattr(litellm_cfg, "routable_aliases", lambda: setup["served"])
+    synced = []
+    monkeypatch.setattr(litellm_cfg, "sync_opencode", lambda names, **_k: synced.append(names))
+    setup["run"]("--models", GENERAL, "--no-restart")
+    assert synced and "kimi" not in synced[-1]
+    assert "inkling-small" in synced[-1]
+
+
+def test_provider_remove_drops_the_alias_from_opencode(setup, monkeypatch):
+    synced = []
+    monkeypatch.setattr(litellm_cfg, "sync_opencode", lambda names, **_k: synced.append(names))
+    result = CliRunner().invoke(cli.main, ["provider", "remove", "free", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert synced == [[]]

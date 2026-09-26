@@ -24,11 +24,11 @@
         "gemini-flash-lite": {
           "name": "Gemini Flash Lite"
         },
+        "glm-5.3-flash": {
+          "name": "Glm 5.3 Flash"
+        },
         "inkling-small": {
           "name": "Inkling Small"
-        },
-        "kimi": {
-          "name": "Kimi"
         },
         "laguna-s-2.1": {
           "name": "Laguna S 2.1"
@@ -45,17 +45,20 @@
         "local-qwen3-4b": {
           "name": "Qwen3 4B (local)"
         },
+        "nemotron-3-ultra-550b-a55b": {
+          "name": "Nemotron 3 Ultra 550B A55B"
+        },
         "nemotron-3.5-lightning": {
           "name": "Nemotron 3.5 Lightning"
-        },
-        "north-mini-code": {
-          "name": "North Mini Code"
         },
         "pareto-code": {
           "name": "Pareto Code"
         },
         "qwen3.8-27b": {
           "name": "Qwen3.8 27B"
+        },
+        "space-bunny-alpha": {
+          "name": "Space Bunny Alpha"
         }
       }
     }

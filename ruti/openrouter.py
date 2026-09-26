@@ -53,12 +53,16 @@ CODING_MODELS: frozenset[str] = frozenset({
 # tool-capable. `recommended()` drops any that have since disappeared upstream;
 # this is the floor, not the ceiling. The free coding models come first: before
 # 2026-09-18 the free part held none at all -- one was a finance-tuned model -- so
-# coding mode had nothing zero-cost to prefer.
+# coding mode had nothing zero-cost to prefer. `north-mini-code` was dropped on
+# 2026-09-26 for poor delegation results; the three after `laguna` replaced it.
+# `space-bunny-alpha` is a stealth model: zero-priced, but temporary by nature.
 DEFAULT_SHORTLIST: tuple[str, ...] = (
     PARETO_CODE,
     FREE_ROUTER,
-    "cohere/north-mini-code:free",
     "poolside/laguna-s-2.1:free",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "stealth/space-bunny-alpha",
+    "z-ai/glm-5.3-flash",
     "thinkingmachines/inkling-small:free",
     "nvidia/nemotron-3.5-lightning:free",
     "dots-studio/dots-3-note-preview:free",
