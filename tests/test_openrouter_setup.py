@@ -159,3 +159,13 @@ def test_provider_remove_drops_the_alias_from_opencode(setup, monkeypatch):
     result = CliRunner().invoke(cli.main, ["provider", "remove", "free", "--yes"])
     assert result.exit_code == 0, result.output
     assert synced == [[]]
+
+
+def test_setup_registers_a_zero_priced_model_as_free(setup, monkeypatch):
+    monkeypatch.setattr(openrouter, "fetch_catalog", lambda **_k: [{
+        "id": "stealth/space-bunny-alpha", "context_length": 1_000_000,
+        "pricing": {"prompt": "0", "completion": "0"}, "supported_parameters": ["tools"],
+    }])
+    setup["run"]("--models", "stealth/space-bunny-alpha", "--no-restart")
+    [record] = [r for r in setup["saved"]["providers"] if r["alias"] == "space-bunny-alpha"]
+    assert record["free"] is True
