@@ -133,6 +133,14 @@ progress and where it stopped, remaining steps in order) and end the turn. The `
 hook then waits out the reset and resumes the session with an instruction to continue
 from that checkpoint. `ruti mode wait off` releases a pause.
 
+### Default modes
+
+`ruti defaults set coding=on free=soft wait=on` sets the modes every session has
+unless it sets its own; `ruti defaults` shows them, `ruti defaults clear [mode]` goes
+back to the built-in ones. A session's own `ruti mode ...` always wins. The status
+line and the prompt hook show the effective modes, so trust them over what you
+remember setting.
+
 ### Standing a council
 
 `ruti mode council on|auto` turns the one-off `ruti council` command into a standing

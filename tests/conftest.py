@@ -37,6 +37,9 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr(modes, "SESSIONS_FILE", sessions_file)
     # Bound at import time like `SESSIONS_FILE`, and written by every `statusline.main()`.
     monkeypatch.setattr(context_watch, "CONTEXT_FILE", tmp_path / "context.json")
+    # Without this a real `ruti defaults set wait=on` on the machine running the suite
+    # would switch wait mode on inside every test that reads `modes.current()`.
+    monkeypatch.setattr(modes, "DEFAULTS_FILE", tmp_path / "mode-defaults.json")
     return tmp_path
 
 
