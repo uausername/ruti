@@ -98,8 +98,22 @@ def fetch_catalog(*, force: bool = False, timeout: float = 15.0) -> list[dict[st
     return models
 
 
-def is_free(slug: str) -> bool:
-    return slug.endswith(":free") or slug == FREE_ROUTER
+def is_free(slug: str, entry: dict[str, Any] | None = None) -> bool:
+    """Zero-cost by slug, or by the catalogue's own price when there is an entry.
+
+    The suffix alone misses zero-priced models published without it -- stealth models
+    such as `stealth/space-bunny-alpha` -- which then ranked and were refused as metered.
+    A router's price is `-1` (it depends on the model picked), so it never reads as 0.
+    """
+    if slug.endswith(":free") or slug == FREE_ROUTER:
+        return True
+    pricing = (entry or {}).get("pricing") or {}
+    try:
+        prices = [float(pricing[key]) for key in ("prompt", "completion")]
+        prices += [float(pricing["request"])] if "request" in pricing else []
+    except (KeyError, TypeError, ValueError):
+        return False
+    return all(price == 0 for price in prices)
 
 
 def is_router(slug: str) -> bool:
@@ -197,7 +211,7 @@ def _row(slug: str, entry: dict[str, Any] | None, *, shortlisted: bool) -> dict[
         "present": entry is not None or router,
         "shortlisted": shortlisted,
         "router": router,
-        "free": is_free(slug),
+        "free": is_free(slug, entry),
         "coding": is_coding(slug),
         "context_length": _context(entry),
         # The routing endpoints exist to drive agentic/coding work; the catalogue
@@ -221,7 +235,7 @@ def recommended(
     seen: set[str] = set()
 
     for slug in DEFAULT_SHORTLIST:
-        if free_only and not is_free(slug) and not is_router(slug):
+        if free_only and not is_free(slug, by_id.get(slug)) and not is_router(slug):
             continue
         rows.append(_row(slug, by_id.get(slug), shortlisted=True))
         seen.add(slug)
@@ -231,7 +245,7 @@ def recommended(
         slug = entry.get("id")
         if not slug or slug in seen:
             continue
-        if free_only and not is_free(slug):
+        if free_only and not is_free(slug, entry):
             continue
         if coding_only and not _supports_tools(entry):
             continue
