@@ -265,6 +265,13 @@ def load() -> Quota:
 def capture(payload: dict[str, Any]) -> Quota:
     """Persist a status-line payload, appending to the burn-rate history."""
     limits = payload.get("rate_limits") or {}
+    if not limits.get("five_hour") and not limits.get("seven_day"):
+        # A session that has not had an API response yet repaints with no limits at
+        # all. `quota.json` is machine-wide, so writing that down wiped every other
+        # session's reading: their bands fell to UNKNOWN and `doctor` reported that no
+        # reading had ever arrived -- seen on every flow handoff's new window. Nothing
+        # measured means nothing to record.
+        return load()
     now = time.time()
 
     previous = read_json(QUOTA_FILE, default={}) or {}
