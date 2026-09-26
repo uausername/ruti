@@ -15,7 +15,7 @@ import json
 import sys
 import time
 
-from ruti import jev, ledger, modes, quota, sessions
+from ruti import context_watch, jev, ledger, modes, quota, sessions
 from ruti.config import STATE_ROOT, read_json, write_json
 
 MEMO_FILE = STATE_ROOT / "hook-memo.json"
@@ -42,12 +42,15 @@ def build_context(prompt: str | None = None) -> tuple[str, bool]:
     # actively wrong -- so replace the whole budget block with a one-line reminder
     # rather than layering it on top.
     session_id = sessions.current_session_id()
+    # About the conversation, not delegation, so it survives `ruti off`; and not
+    # debounced like the band -- it rides on every prompt while the session is past it.
+    context_note = context_watch.warning(session_id)
     if sessions.is_disabled(session_id):
-        return (
-            "ruti: OFF for this session -- `route` and `delegate` refuse. Do "
-            "implementation work in-session. Run `ruti on` to resume delegation.",
-            False,
-        )
+        line = ("ruti: OFF for this session -- `route` and `delegate` refuse. Do "
+                "implementation work in-session. Run `ruti on` to resume delegation.")
+        if context_note:
+            line += "\n" + context_note
+        return line, False
 
     snapshot = quota.load()
     memo = read_json(MEMO_FILE, default={}) or {}
@@ -80,6 +83,8 @@ def build_context(prompt: str | None = None) -> tuple[str, bool]:
     # are set for rather than following the band debounce.
     for note in _mode_notes(session_id):
         line += "\n" + note
+    if context_note:
+        line += "\n" + context_note
     if modes.current(session_id).get("wait"):
         from ruti import wait
 

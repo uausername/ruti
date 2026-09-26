@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from ruti import config, delegate, ledger, modes, sessions, usage
+from ruti import config, context_watch, delegate, ledger, modes, sessions, usage
 
 
 @pytest.fixture(autouse=True)
@@ -35,6 +35,8 @@ def isolated_state(tmp_path, monkeypatch):
     sessions_file = tmp_path / "sessions.json"
     monkeypatch.setattr(sessions, "SESSIONS_FILE", sessions_file)
     monkeypatch.setattr(modes, "SESSIONS_FILE", sessions_file)
+    # Bound at import time like `SESSIONS_FILE`, and written by every `statusline.main()`.
+    monkeypatch.setattr(context_watch, "CONTEXT_FILE", tmp_path / "context.json")
     return tmp_path
 
 
