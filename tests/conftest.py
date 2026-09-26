@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from ruti import config, context_watch, delegate, ledger, modes, sessions, usage
+from ruti import config, context_watch, delegate, flow, ledger, modes, sessions, usage
 
 
 @pytest.fixture(autouse=True)
@@ -40,6 +40,9 @@ def isolated_state(tmp_path, monkeypatch):
     # Without this a real `ruti defaults set wait=on` on the machine running the suite
     # would switch wait mode on inside every test that reads `modes.current()`.
     monkeypatch.setattr(modes, "DEFAULTS_FILE", tmp_path / "mode-defaults.json")
+    # Handoffs and their launcher scripts; a test must never leave one where a real
+    # session's Stop hook could pick it up.
+    monkeypatch.setattr(flow, "FLOW_DIR", tmp_path / "flow")
     return tmp_path
 
 

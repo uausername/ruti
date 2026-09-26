@@ -79,8 +79,11 @@ def _mark_start() -> None:
 
 
 def main() -> int:
+    payload: dict = {}
     try:
-        sys.stdin.read()
+        raw = sys.stdin.read()
+        parsed = json.loads(raw) if raw.strip() else {}
+        payload = parsed if isinstance(parsed, dict) else {}
     except Exception:
         pass
 
@@ -89,20 +92,33 @@ def main() -> int:
     except Exception:
         pass
 
+    # Before the health check: a flow continuation that loses its handoff because
+    # `doctor` raised would start the new session with no idea what it was doing.
+    parts: list[tuple[str, str]] = []
+    try:
+        from ruti import flow
+
+        continued = flow.session_start(payload)
+        if continued:
+            parts.append(continued)
+    except Exception:
+        pass
+
     try:
         report = build_report()
+        if report:
+            parts.append(report)
     except Exception:
-        return 0
-    if report is None:
-        return 0
+        pass
 
-    user_message, model_context = report
+    if not parts:
+        return 0
     json.dump(
         {
-            "systemMessage": user_message,
+            "systemMessage": "\n\n".join(user for user, _ in parts),
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
-                "additionalContext": model_context,
+                "additionalContext": "\n\n".join(model for _, model in parts),
             },
             "suppressOutput": True,
         },

@@ -89,6 +89,10 @@ def build_context(prompt: str | None = None) -> tuple[str, bool]:
         from ruti import wait
 
         line += "\n" + wait.prompt_note(session_id, snapshot)
+    if modes.current(session_id).get("flow"):
+        from ruti import flow
+
+        line += "\n" + flow.prompt_note(session_id)
 
     # A ranking that named a delegate and was never acted on is the one thing the
     # manager cannot see for itself: the advice scrolls out of context long before the

@@ -20,7 +20,8 @@ session:
     {"<session-id>": {"disabled": bool, "coding": bool,
                       "free": "off" | "soft" | "hard", "jev": bool,
                       "council": "off" | "on" | "auto", "wait": bool,
-                      "wait_state": {...}, "at": <unix ts>}}
+                      "wait_state": {...}, "flow": bool, "flow_state": {...},
+                      "at": <unix ts>}}
 
 `at` is refreshed on every write so `sessions.prune()` does not discard an active
 mode as if it were a stale toggle from a session long over.
@@ -55,9 +56,9 @@ COUNCIL_LEVELS: tuple[str, ...] = ("off", "on", "auto")
 # stop sending task descriptions off the machine without unsetting a key that the rest
 # of the toolchain shares.
 DEFAULTS: dict[str, Any] = {"coding": False, "free": "off", "jev": True,
-                            "council": "off", "wait": False}
+                            "council": "off", "wait": False, "flow": False}
 
-BOOL_MODES: tuple[str, ...] = ("coding", "jev", "wait")
+BOOL_MODES: tuple[str, ...] = ("coding", "jev", "wait", "flow")
 _LEVELS: dict[str, tuple[str, ...]] = {"free": FREE_LEVELS, "council": COUNCIL_LEVELS}
 _TRUE, _FALSE = ("on", "true", "1", "yes"), ("off", "false", "0", "no")
 
@@ -154,7 +155,28 @@ def current(session_id: str | None) -> dict[str, Any]:
         "jev": bool(record.get("jev", defaults["jev"])),
         "council": _normalise_council(record.get("council", defaults["council"])),
         "wait": bool(record.get("wait", defaults["wait"])),
+        "flow": bool(record.get("flow", defaults["flow"])),
     }
+
+
+def apply(session_id: str, values: dict[str, Any]) -> None:
+    """Set several modes on a session at once -- a flow continuation taking over the
+    modes of the session it continues. Anything invalid is skipped, not guessed at."""
+    checked: dict[str, Any] = {}
+    for key, value in values.items():
+        try:
+            checked[key] = validate_default(key, value)
+        except ValueError:
+            continue
+    if not checked:
+        return
+    with file_lock("sessions", timeout=10.0):
+        data = _load()
+        record = data.get(session_id) or {}
+        record.update(checked)
+        record["at"] = time.time()
+        data[session_id] = record
+        write_json(SESSIONS_FILE, data)
 
 
 def set_coding(session_id: str, on: bool) -> None:
@@ -183,6 +205,27 @@ def wait_state(session_id: str | None) -> dict[str, Any]:
 
 def set_wait_state(session_id: str, state: dict[str, Any]) -> None:
     _update(session_id, "wait_state", state)
+
+
+def set_flow(session_id: str, on: bool) -> None:
+    _update(session_id, "flow", bool(on))
+    if not on:
+        # A handoff written before `off` must not launch a session if flow comes back.
+        _update(session_id, "flow_state", {**flow_state(session_id), "noticed": False,
+                                           "handoff": None, "launched": False})
+
+
+def flow_state(session_id: str | None) -> dict[str, Any]:
+    """Flow mode's bookkeeping: noticed, the handoff written, launched, and the hop --
+    how many sessions this chain has already run through."""
+    if not session_id:
+        return {}
+    value = (_load().get(session_id) or {}).get("flow_state")
+    return value if isinstance(value, dict) else {}
+
+
+def set_flow_state(session_id: str, state: dict[str, Any]) -> None:
+    _update(session_id, "flow_state", state)
 
 
 def set_council(session_id: str, level: str) -> None:
@@ -218,6 +261,8 @@ def active_summary(modes: dict[str, Any]) -> str:
         parts.append(f"council:{modes['council']}")
     if modes.get("wait"):
         parts.append("wait")
+    if modes.get("flow"):
+        parts.append("flow")
     return ", ".join(parts)
 
 
