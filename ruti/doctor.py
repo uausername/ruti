@@ -706,11 +706,11 @@ def _check_generated_sync() -> Check:
 def _check_local_route() -> Check:
     """Do the local models the proxy advertises and the ones LM Studio holds agree?
 
-    Both directions break silently. A model the proxy serves without LM Studio behind
-    it fails the request, `default_fallbacks` answers from gemini-flash, and nothing
-    anywhere says the work left the machine -- so this is worth naming loudest exactly
-    when LM Studio is down, which is when it used to skip. A model that is resident but
-    unserved is the cheaper mirror image: paid for in VRAM, reachable by nothing.
+    Both directions break. A model the proxy serves without LM Studio behind it fails
+    the request -- loudly since the default fallback was removed, silently before, when
+    gemini-flash answered in its name -- so this is worth naming exactly when LM Studio
+    is down, which is when it used to skip. A model that is resident but unserved is
+    the cheaper mirror image: paid for in VRAM, reachable by nothing.
     """
     if not litellm_cfg.liveliness():
         return Check("local-route", WARN, "skipped -- the proxy is down",

@@ -189,3 +189,22 @@ def test_cli_says_unknown_rather_than_repeating_the_alias(monkeypatch):
     text = result.output + (result.stderr if hasattr(result, "stderr") else "")
     assert "pareto-code -> unknown" in text
     assert "not recording" in text
+
+
+def test_a_fallback_taking_over_mid_run_is_a_substitution(
+        registry, fake_opencode, monkeypatch, tmp_path):
+    # The probe before the run is answered honestly; the rate limit hits later, and the
+    # proxy's fallback answers the rest under the alias's own name.
+    proxy = FakeProxy("pareto-code", group="pareto-code")
+    monkeypatch.setattr(delegate, "PROXY_BASE", proxy.url)
+    rerouted = {**_served("gemini/gemini-2.5-flash"), "group": "gemini-flash"}
+    fake_opencode.extend([_served("anthropic/claude-fable-5-1"), rerouted, rerouted])
+    try:
+        outcome = delegate.run("write it", model="ruti-router/pareto-code",
+                               directory=tmp_path, timeout=30)
+    finally:
+        proxy.close()
+    assert outcome.substituted is True
+    assert outcome.usage.fallback_requests == 2
+    assert "2 of 3 request(s) were answered by gemini-flash" in outcome.usage.note
+    assert outcome.summary()["substituted"] is True

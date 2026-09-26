@@ -78,9 +78,14 @@ is where the saving actually comes from: **the subscription burn is driven by co
 length**, so the win is not that the delegate is cheaper, it is that its output never
 enters this window.
 
-It also checks which model really answered. If it reports `substituted: true`, a
-backend is down and LiteLLM's fallback took the request — work meant to stay on this
-machine went to a remote provider instead. Stop and run `ruti doctor --fix`.
+It also checks which model really answered — before the run with a probe, and after
+it from the proxy's own log of every request. If it reports `substituted: true`, some
+of the run's requests were served by a different model group than the alias (the
+`usage.note` says how many and which): the result is that model's work, not the
+alias's, so judge the alias by it only after rerunning. The proxy has no default
+fallback any more, so an alias that is rate-limited or down fails the run with its own
+error instead of quietly borrowing Gemini; a failure like that is a reason to pick
+another executor, and `ruti doctor --fix` if it repeats.
 
 `model_effective` is the model that actually did the work. For a router alias such as
 `pareto-code` it is the router's own pick, which can be a frontier model billed in USD
@@ -212,8 +217,8 @@ code; `ruti route` gates on both.
 A local model being down or unloaded is not a reason to skip delegation, or to fall
 back to doing the work in-session — it means only that a `local-*` alias specifically
 is not ready. Remote executors need internet, not a working local model. `ruti doctor`
-flagging `lmstudio` or `local-route`, or `substituted: true` in a `delegate` report,
-means "this local alias isn't ready — delegate elsewhere, or run `ruti doctor --fix`",
+flagging `lmstudio` or `local-route`, or a `local-*` delegation failing, means "this
+local alias isn't ready — delegate elsewhere, or run `ruti doctor --fix`",
 not "delegation is blocked." Local models exist for the case of no internet connection
 on this machine; do not generalise that into "the local model must be fixed before
 delegating."

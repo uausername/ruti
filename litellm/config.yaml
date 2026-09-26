@@ -25,16 +25,30 @@ router_settings:
   routing_strategy: simple-shuffle
   allowed_fails: 1
   cooldown_time: 60
+  # A 429 from a free OpenRouter model is its provider throttling for a few seconds,
+  # not a dead backend. With one deployment per alias, cooling it down after the first
+  # one left "no deployments available" for a minute -- and, while a default fallback
+  # existed, sent the rest of the run to Gemini. So a rate limit is retried on the same
+  # model with a pause, and takes five of them before the cool-down.
+  allowed_fails_policy:
+    RateLimitErrorAllowedFails: 5
+  retry_policy:
+    RateLimitErrorRetries: 4
+    TimeoutErrorRetries: 1
+    InternalServerErrorRetries: 2
+  retry_after: 5
 
 litellm_settings:
   num_retries: 2
   request_timeout: 120
-  # Applies to every deployment, so adding a local model needs no edit here. There
-  # used to be a fixed `lm-studio-local` alias instead; it was removed because it kept
-  # pointing at whichever model happened to be loaded last, and once that model was
-  # swapped out every "local" request silently answered from Gemini instead - which
-  # looks identical to the local model working, only slower and off-machine.
-  default_fallbacks: ["gemini-flash"]
+  # No default_fallbacks. `["gemini-flash"]` used to sit here for every deployment,
+  # and it answered in the alias's name: five delegations to `laguna-s-2.1` and `free`
+  # were all done by gemini-2.5-flash, reported as the alias, possibly on a paid key
+  # past free mode. The old `lm-studio-local` alias had failed the same way. A local
+  # model gains nothing from it either -- the reason to have one is no internet, when
+  # Gemini cannot answer anyway -- and `delegate` loads local models on demand. An
+  # alias that cannot answer now fails with its own error; Gemini stays available as
+  # the explicit `gemini-flash` alias for whoever picks it.
   # One line per completion in %LOCALAPPDATA%\ruti\usage.jsonl naming the model that
   # really answered. For a router alias such as pareto-code that is the only place the
   # router's pick survives: the proxy rewrites `model` in every response to the alias

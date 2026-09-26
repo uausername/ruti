@@ -265,7 +265,8 @@ def load() -> Quota:
 def capture(payload: dict[str, Any]) -> Quota:
     """Persist a status-line payload, appending to the burn-rate history."""
     limits = payload.get("rate_limits") or {}
-    if not limits.get("five_hour") and not limits.get("seven_day"):
+    five_new, seven_new = limits.get("five_hour"), limits.get("seven_day")
+    if not five_new and not seven_new:
         # A session that has not had an API response yet repaints with no limits at
         # all. `quota.json` is machine-wide, so writing that down wiped every other
         # session's reading: their bands fell to UNKNOWN and `doctor` reported that no
@@ -275,7 +276,17 @@ def capture(payload: dict[str, Any]) -> Quota:
     now = time.time()
 
     previous = read_json(QUOTA_FILE, default={}) or {}
+    if not isinstance(previous, dict):
+        previous = {}
     history = [tuple(entry) for entry in (previous.get("history") or [])]
+
+    # The same, one window at a time: a session can carry the weekly window without the
+    # five-hour one -- seen live, on every repaint of a second open session -- and
+    # blanking the five-hour reading for that sent every band back to UNKNOWN. A window
+    # the payload lacks is kept from the last reading. The capture time follows the
+    # five-hour window, the one the bands are built on, so a kept reading ages as it
+    # should instead of passing for live.
+    captured = now if five_new else float(previous.get("captured_at_epoch") or now)
 
     five = limits.get("five_hour") or {}
     if five.get("used_percentage") is not None:
@@ -288,10 +299,10 @@ def capture(payload: dict[str, Any]) -> Quota:
 
     record = {
         "version": 1,
-        "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
-        "captured_at_epoch": now,
-        "five_hour": limits.get("five_hour"),
-        "seven_day": limits.get("seven_day"),
+        "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(captured)),
+        "captured_at_epoch": captured,
+        "five_hour": five_new or previous.get("five_hour"),
+        "seven_day": seven_new or previous.get("seven_day"),
         "model": payload.get("model"),
         "effort": (payload.get("effort") or {}).get("level"),
         "context_window": payload.get("context_window"),

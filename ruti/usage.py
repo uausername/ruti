@@ -54,6 +54,10 @@ class Usage:
     cost_usd: float | None = None
     costed_requests: int = 0
     note: str = ""
+    # Requests of this run that another model group answered -- LiteLLM's fallback,
+    # standing in once the alias failed -- and which groups those were.
+    fallback_requests: int = 0
+    fallback_groups: list[str] = field(default_factory=list)
 
     @property
     def cost_complete(self) -> bool:
@@ -66,9 +70,30 @@ class Usage:
             "cost_usd": self.cost_usd,
             "cost_complete": self.cost_complete,
         }
+        if self.fallback_requests:
+            out["fallback_requests"] = self.fallback_requests
+            out["fallback_groups"] = self.fallback_groups
         if self.note:
             out["note"] = self.note
         return out
+
+
+def served_by_fallback(entry: dict[str, Any], alias: str) -> bool:
+    """Was this request answered by a group other than the one asked for?
+
+    The group, not the model name: the proxy rewrites the name in the response to the
+    alias that was requested, so a fallback answer looks like the real thing to the
+    client -- measured on this machine, five runs against `laguna-s-2.1` and `free`
+    were all answered by gemini-flash under their own names. A router is unaffected:
+    whatever model it picks, its group is still its own alias.
+    """
+    group = entry.get("group")
+    if group and group != alias:
+        return True
+    try:
+        return int(entry.get("fallbacks") or 0) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def recording_wired() -> bool:
@@ -195,6 +220,11 @@ def aggregate(alias: str, entries: list[dict[str, Any]]) -> Usage:
     usage = Usage(alias=alias, requests=len(entries))
     by_model: dict[str, dict[str, Any]] = {}
     for entry in entries:
+        if served_by_fallback(entry, alias):
+            usage.fallback_requests += 1
+            group = str(entry.get("group") or "?")
+            if group not in usage.fallback_groups:
+                usage.fallback_groups.append(group)
         name = entry.get("model") or UNKNOWN
         row = by_model.setdefault(name, {
             "model": name, "upstream": entry.get("upstream"), "requests": 0,
