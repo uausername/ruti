@@ -35,7 +35,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from . import context_watch, modes, wait
 from .config import STATE_ROOT, read_json, write_json
@@ -47,6 +47,13 @@ MAX_HOPS = 5
 FLOW_DIR = STATE_ROOT / "flow"
 HANDOFF_ENV = "RUTI_FLOW_HANDOFF"
 KEEP_SECONDS = 14 * 86400
+
+# Where Claude Code keeps per-folder state, trust among it.
+CLAUDE_CONFIG = Path.home() / ".claude.json"
+
+# Claude Code's per-process markers outside the `CLAUDE_CODE_` prefix, as found in the
+# environment of its children on this machine.
+_MARKER_NAMES = frozenset({"CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT"})
 
 # What `claude --permission-mode` accepts, checked against `claude --help` on this
 # machine. Anything else -- "default", or a mode a later version adds -- is left out
@@ -190,8 +197,78 @@ def stop(session_id: str, payload: dict[str, Any], *,
         return {"systemMessage": f"ruti flow: could not open a new session ({exc}). The "
                                  f"handoff is at {path} -- start `claude` in {cwd} and ask "
                                  "it to continue from that file."}
-    return {"systemMessage": f"ruti flow: handed off -- a new session is opening in a new "
-                             f"window (hop {hop} of {MAX_HOPS}). This window can be closed."}
+    message = (f"ruti flow: handed off -- a new session is opening in a new window (hop "
+               f"{hop} of {MAX_HOPS}). This window can be closed.")
+    if trusted(cwd) is False:
+        message += " " + untrusted_note(cwd)
+    return {"systemMessage": message}
+
+
+def trusted(cwd: str) -> bool | None:
+    """Has Claude Code recorded `cwd` as trusted? None when it cannot tell.
+
+    An untrusted folder does not stop the launch -- the new window opens on Claude
+    Code's trust question, and SessionStart, so the handoff, waits behind it. Measured
+    on this machine: the home folder is recorded with the question unanswered, however
+    often it has been accepted, while project folders keep the answer.
+    """
+    data = read_json(CLAUDE_CONFIG, default=None)
+    if not isinstance(data, dict):
+        return None
+    want = os.path.normcase(os.path.normpath(cwd))
+    for path, project in (data.get("projects") or {}).items():
+        if isinstance(project, dict) and os.path.normcase(os.path.normpath(path)) == want:
+            return bool(project.get("hasTrustDialogAccepted"))
+    return False
+
+
+def untrusted_note(cwd: str) -> str:
+    return (f"Claude Code has not recorded {cwd} as trusted, so the new window first asks "
+            "whether to trust the folder -- answer there, or the handoff will not start.")
+
+
+def session_markers(env: Mapping[str, str] | None = None,
+                    persistent: set[str] | None = None) -> list[str]:
+    """What Claude Code set in this process for its own children, to leave behind.
+
+    The hook that opens the next session is such a child, and whatever it hands down
+    makes the new session believe it is nested inside the old one: seen on this
+    machine, an inherited `CLAUDE_CODE_CHILD_SESSION` switched the new session's
+    transcript off, so `/resume` would never have found it. `CLAUDE_CODE_MESSAGING_TOKEN`
+    is the old session's credential and has no business in another process at all.
+    A `CLAUDE_CODE_*` variable the user set in Windows itself is configuration, not a
+    marker, and is kept.
+    """
+    env = os.environ if env is None else env
+    keep = _persistent_env_names() if persistent is None else {n.upper() for n in persistent}
+    return sorted(
+        name for name in env
+        if (name.upper() in _MARKER_NAMES or name.upper().startswith("CLAUDE_CODE_"))
+        and name.upper() not in keep
+    )
+
+
+def _persistent_env_names() -> set[str]:
+    try:
+        import winreg
+    except ImportError:  # not Windows: nothing set "in Windows itself" to keep
+        return set()
+    names: set[str] = set()
+    for root, sub in ((winreg.HKEY_CURRENT_USER, "Environment"),
+                      (winreg.HKEY_LOCAL_MACHINE,
+                       r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")):
+        try:
+            with winreg.OpenKey(root, sub) as key:
+                index = 0
+                while True:
+                    try:
+                        names.add(winreg.EnumValue(key, index)[0].upper())
+                    except OSError:
+                        break
+                    index += 1
+        except OSError:
+            continue
+    return names
 
 
 def _ps_quote(value: Any) -> str:
@@ -199,33 +276,37 @@ def _ps_quote(value: Any) -> str:
 
 
 def launcher_script(handoff: Path, cwd: str, permission_mode: str | None,
-                    claude: str) -> str:
+                    claude: str, drop: list[str] | None = None) -> str:
     args = ["--permission-mode", permission_mode] if permission_mode in PERMISSION_MODES else []
     prompt = f"Continue the task from the ruti flow handoff in your context (file: {handoff})."
-    return "\r\n".join([
+    # Removed here as well as from the spawn's environment: a window Windows Terminal
+    # opens is not guaranteed to take the environment it was asked with.
+    names = sorted({"CLAUDE_CODE_SESSION_ID", *(drop or [])})
+    return "\n".join([
         f"Set-Location -LiteralPath {_ps_quote(cwd)}",
         f"$env:{HANDOFF_ENV} = {_ps_quote(handoff)}",
-        # Belt and braces: a new window does not inherit it, but a child of this hook
-        # would, and a second session must never act under the first one's id.
-        "Remove-Item Env:CLAUDE_CODE_SESSION_ID -ErrorAction SilentlyContinue",
+        *(f"Remove-Item Env:{name} -ErrorAction SilentlyContinue" for name in names),
         "& " + " ".join(_ps_quote(a) for a in [claude, *args, prompt]),
-    ]) + "\r\n"
+    ]) + "\n"
 
 
 def launch(handoff: Path, cwd: str, permission_mode: str | None, *,
            spawn: Callable[..., Any] = subprocess.Popen) -> list[str]:
     """Open `claude` on the handoff in a new window; returns the argv it spawned."""
     script = handoff.with_suffix(".ps1")
+    markers = session_markers()
     # With a BOM: Windows PowerShell 5.1 reads a BOM-less script as the ANSI code page,
     # and a Cyrillic directory name would arrive mangled.
     script.write_text(
-        launcher_script(handoff, cwd, permission_mode, shutil.which("claude") or "claude"),
-        encoding="utf-8-sig",
+        launcher_script(handoff, cwd, permission_mode, shutil.which("claude") or "claude",
+                        drop=markers),
+        encoding="utf-8-sig", newline="\r\n",
     )
     shell = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
     shell_argv = [shell, "-NoExit", "-ExecutionPolicy", "Bypass", "-File", str(script)]
+    dropped = {name.upper() for name in [*markers, "CLAUDE_CODE_SESSION_ID"]}
     common: dict[str, Any] = {
-        "env": {k: v for k, v in os.environ.items() if k.upper() != "CLAUDE_CODE_SESSION_ID"},
+        "env": {k: v for k, v in os.environ.items() if k.upper() not in dropped},
         "cwd": cwd if os.path.isdir(cwd) else None,
         "stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL, "close_fds": True,

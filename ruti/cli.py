@@ -783,6 +783,12 @@ def mode_flow(state: str) -> None:
           f"{flow_mod.FORCE_AT:.0f}% until then, at most {flow_mod.MAX_HOPS} sessions in a chain")
     ui.say("[muted]the new session inherits this one's permission mode; needs the hooks "
            "from `ruti install`[/muted]")
+    import os
+
+    # Said now rather than only at handoff time: by then nobody may be watching, and the
+    # new window would sit on the trust question until someone is.
+    if flow_mod.trusted(os.getcwd()) is False:
+        ui.warn(flow_mod.untrusted_note(os.getcwd()))
 
 
 @mode.command("jev")
