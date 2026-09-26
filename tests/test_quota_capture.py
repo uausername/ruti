@@ -37,3 +37,26 @@ def test_a_later_real_reading_still_replaces_it():
     quota.capture(reading(12.0))
     quota.capture({})
     assert quota.capture(reading(20.0, sid="s2")).five_hour.used_percentage == 20.0
+
+
+def weekly_only(sid="s2"):
+    return {"session_id": sid, "rate_limits": {
+        "seven_day": {"used_percentage": 11.0, "resets_at": time.time() + 86400}}}
+
+
+def test_a_session_reporting_only_the_weekly_window_keeps_the_five_hour_one():
+    quota.capture(reading(16.0))
+    snapshot = quota.capture(weekly_only())
+    assert snapshot.five_hour is not None and snapshot.five_hour.used_percentage == 16.0
+    assert snapshot.seven_day.used_percentage == 11.0
+    assert snapshot.band != quota.UNKNOWN
+
+
+def test_a_kept_five_hour_reading_ages_instead_of_passing_for_live(monkeypatch):
+    clock = [1_000_000.0]
+    monkeypatch.setattr(quota.time, "time", lambda: clock[0])
+    quota.capture(reading(16.0))
+    first = quota.load().captured_at
+    clock[0] += 600
+    quota.capture(weekly_only())
+    assert quota.load().captured_at == first
