@@ -3,7 +3,8 @@
 Registered as `statusLine` in settings.json, this is invoked on every UI repaint with
 a JSON payload on stdin. Two jobs: render one line, and persist `rate_limits` to
 `quota.json` so the router has something to reason about. The second job is the
-important one -- Claude Code writes those counters nowhere else.
+important one -- Claude Code writes those counters nowhere else. It also records the
+session's context-window fill (`context_watch`) for the prompt hook to read back.
 
 Three hard constraints follow from running on every repaint:
 
@@ -20,7 +21,7 @@ import sys
 import time
 from typing import Any
 
-from . import quota
+from . import context_watch, quota
 from .config import LMSTUDIO_BASE, PROXY_BASE, STATE_ROOT, read_json, write_json
 
 FACTS_FILE = STATE_ROOT / "facts.json"
@@ -242,7 +243,7 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
     # not to be confused with the five-hour subscription budget above.
     ctx_used = (payload.get("context_window") or {}).get("used_percentage")
     if ctx_used is not None:
-        colour = "31" if ctx_used >= 85 else "33" if ctx_used >= 60 else "32"
+        colour = "31" if ctx_used >= 85 else "33" if ctx_used >= context_watch.WARN_PERCENT else "32"
         segments.append(_colour(f"{ctx_used:.0f}% ctx", colour))
 
     facts = _refresh_facts()
@@ -354,6 +355,16 @@ def main() -> int:
             snapshot = quota.load()
         except Exception:
             snapshot = quota.Quota(None, None, 0.0)
+
+    # Per session, for the prompt hook: `quota.json` above is machine-wide and would
+    # hand one session another's number.
+    try:
+        context_watch.record(
+            payload.get("session_id"),
+            (payload.get("context_window") or {}).get("used_percentage"),
+        )
+    except Exception:
+        pass
 
     try:
         line = render(payload, snapshot)
