@@ -375,3 +375,67 @@ def test_cli_mode_flow_and_handoff(monkeypatch):
     assert "Цель: довести до конца" in open(path, encoding="utf-8").read()
     assert invoke(["mode", "flow", "off"]).exit_code == 0
     assert modes.flow_state(SID)["handoff"] is None
+
+
+# ------------------------------------------- what the new session inherits (live finds)
+
+
+def test_claude_codes_own_markers_are_not_handed_down():
+    env = {"CLAUDECODE": "1", "CLAUDE_CODE_CHILD_SESSION": "1", "CLAUDE_PID": "9",
+           "CLAUDE_CODE_MESSAGING_TOKEN": "t", "CLAUDE_EFFORT": "xhigh",
+           "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000", "PATH": "C:/bin", "ANTHROPIC_X": "k"}
+    dropped = flow.session_markers(env, persistent={"CLAUDE_CODE_MAX_OUTPUT_TOKENS"})
+    assert dropped == ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_MESSAGING_TOKEN",
+                       "CLAUDE_EFFORT", "CLAUDE_PID"]
+
+
+def test_the_spawned_window_gets_neither_the_markers_nor_the_session_id(tools, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_CHILD_SESSION", "1")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID)
+    monkeypatch.setattr(flow, "_persistent_env_names", lambda: set())
+    on()
+    path = flow.write_handoff(SID, "Goal: x", "C:/work")
+    spawn = Spawn()
+    flow.stop(SID, {}, spawn=spawn)
+    env = {k.upper() for k in spawn.calls[0][1]["env"]}
+    assert "CLAUDE_CODE_CHILD_SESSION" not in env and "CLAUDE_CODE_SESSION_ID" not in env
+    raw = path.with_suffix(".ps1").read_bytes()
+    assert b"Remove-Item Env:CLAUDE_CODE_CHILD_SESSION" in raw
+    assert b"\r\r\n" not in raw and raw.count(b"\r\n") >= 4
+
+
+def trust(value, path="C:/work"):
+    from ruti import config
+    config.write_json(flow.CLAUDE_CONFIG, {"projects": {path: {"hasTrustDialogAccepted": value}}})
+
+
+@pytest.mark.parametrize("value, expected", [(True, True), (False, False)])
+def test_trust_is_read_from_claude_codes_own_record(value, expected):
+    trust(value)
+    assert flow.trusted("C:/work") is expected
+    assert flow.trusted("C:/elsewhere") is False
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="backslash is a separator only on Windows")
+def test_trust_matches_however_the_path_is_spelled():
+    trust(True, path="C:/mycode/ruti")
+    assert flow.trusted("c:" + chr(92) + "mycode" + chr(92) + "ruti") is True
+
+
+def test_trust_is_unknown_without_the_config():
+    assert flow.trusted("C:/work") is None
+
+
+def test_an_untrusted_folder_is_named_when_handing_off(tools):
+    trust(False)
+    on()
+    flow.write_handoff(SID, "Goal: x", "C:/work")
+    message = flow.stop(SID, {}, spawn=Spawn())["systemMessage"]
+    assert "handed off" in message and "not recorded C:/work as trusted" in message
+
+
+def test_a_trusted_folder_gets_no_warning(tools):
+    trust(True)
+    on()
+    flow.write_handoff(SID, "Goal: x", "C:/work")
+    assert "trusted" not in flow.stop(SID, {}, spawn=Spawn())["systemMessage"]

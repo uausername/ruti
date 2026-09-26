@@ -43,6 +43,9 @@ def isolated_state(tmp_path, monkeypatch):
     # Handoffs and their launcher scripts; a test must never leave one where a real
     # session's Stop hook could pick it up.
     monkeypatch.setattr(flow, "FLOW_DIR", tmp_path / "flow")
+    # Absent by default, so trust reads as "cannot tell" instead of whatever the real
+    # ~/.claude.json on the machine running the suite happens to say.
+    monkeypatch.setattr(flow, "CLAUDE_CONFIG", tmp_path / "claude.json")
     return tmp_path
 
 
