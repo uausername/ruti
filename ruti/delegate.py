@@ -321,6 +321,17 @@ def run(
 
     outcome.usage = usage_mod.collect(alias, started_wall, finished_wall)
     outcome.model_effective = outcome.usage.model
+    # The probe above sees one request before the run; the fallback usually takes over
+    # mid-run, after the alias's first rate limit. The run's own log is the record of
+    # what actually answered, so it decides too.
+    if outcome.usage.fallback_requests:
+        outcome.substituted = True
+        outcome.usage.note = "; ".join(filter(None, [
+            f"{outcome.usage.fallback_requests} of {outcome.usage.requests} request(s) "
+            f"were answered by {', '.join(outcome.usage.fallback_groups)} instead of "
+            f"{alias} (LiteLLM fallback)",
+            outcome.usage.note,
+        ]))
     if overlapping:
         outcome.usage.note = "; ".join(filter(None, [
             outcome.usage.note,

@@ -120,3 +120,24 @@ def test_local_zero_alone_does_not_count_as_money_being_tracked(registry):
         {"event": "delegation", "model": "ruti-router/pareto-code", "tier": "remote"},
     ])
     assert not money["counted"]
+
+
+def test_requests_another_group_answered_are_counted_as_fallback():
+    entries = [_entry(1, requested="laguna-s-2.1", model="gemini/gemini-2.5-flash"),
+               _entry(2, requested="laguna-s-2.1", model="poolside/laguna-s-2.1:free")]
+    entries[0]["group"] = "gemini-flash"
+    result = usage.aggregate("laguna-s-2.1", entries)
+    assert result.fallback_requests == 1 and result.fallback_groups == ["gemini-flash"]
+    assert result.summary()["fallback_requests"] == 1
+
+
+def test_a_routers_own_pick_is_not_a_fallback():
+    result = usage.aggregate("pareto-code", [_entry(1), _entry(2, model="openai/gpt-6")])
+    assert result.fallback_requests == 0
+    assert "fallback_requests" not in result.summary()
+
+
+def test_the_proxys_fallback_header_counts_even_under_the_same_group():
+    entry = _entry(1, requested="free")
+    entry["fallbacks"] = "1"
+    assert usage.served_by_fallback(entry, "free")
