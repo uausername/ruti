@@ -1574,8 +1574,8 @@ def provider_remove(alias: str, no_restart: bool, yes: bool) -> None:
     # Keys are shared -- every OpenRouter alias reads RUTI_OPENROUTER_KEY_1 -- so telling
     # the reader to delete the line would take a key the aliases they kept still need
     # away from them. Only a variable nothing keeps is the removed entry's own.
-    users = {r["env_var"]: [k["alias"] for k in keep if k["env_var"] == r["env_var"]]
-             for r in removed}
+    users = {r["env_var"]: [k["alias"] for k in keep if k.get("env_var") == r["env_var"]]
+             for r in removed if r.get("env_var")}
     unused = [var for var, names in users.items() if not names]
     if unused:
         ui.say("[muted]its key is still in litellm/.env -- delete the "
