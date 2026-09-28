@@ -128,6 +128,17 @@ OpenRouter's live catalogue); `ruti openrouter setup` registers the routers
 (`pareto-code`, `free`) and any free models you pick as routable aliases. Neither the
 modes nor the registration touch this file.
 
+In coding mode `route` also reads OpenRouter's per-language token ranking for the
+project's language (detected from the working directory; `--language` overrides it)
+over the last three days: the language's leader gets up to x1.30, the rest in
+proportion to their share, an unranked model x1.0. Only the exact endpoint counts — a
+`:free` alias does not inherit its paid sibling's share. `ruti openrouter suggest`
+lists the ranked models ruti does not have yet, with share, price and context, and
+the prompt hook names one at most once a day per language when it clearly leads
+everything registered. Registering one (`ruti openrouter setup --models <slug>`) is
+the user's call: suggest it, never do it unasked, and warn before a paid one under
+`free soft`.
+
 ### Wait mode
 
 `ruti mode wait on` keeps a long task from running into the hard five-hour stop. At

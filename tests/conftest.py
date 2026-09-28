@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from ruti import config, context_watch, delegate, flow, ledger, modes, sessions, usage
+from ruti import (config, context_watch, delegate, flow, ledger, modes, openrouter,
+                  rankings, sessions, usage)
 
 
 @pytest.fixture(autouse=True)
@@ -46,6 +47,16 @@ def isolated_state(tmp_path, monkeypatch):
     # Absent by default, so trust reads as "cannot tell" instead of whatever the real
     # ~/.claude.json on the machine running the suite happens to say.
     monkeypatch.setattr(flow, "CLAUDE_CONFIG", tmp_path / "claude.json")
+    # Coding mode is on by default, so `router.rank` asks OpenRouter for the language
+    # rankings. An empty URL makes `urlopen` refuse at once (ValueError, which the
+    # module reads as "unreachable") -- no test waits on the network, and a test that
+    # replaces `urlopen` itself still sees the query string it expects.
+    monkeypatch.setattr(rankings, "RANKINGS_URL", "")
+    monkeypatch.setattr(rankings, "RANKINGS_CACHE", tmp_path / "openrouter-rankings.json")
+    monkeypatch.setattr(rankings, "HINTS_FILE", tmp_path / "rankings-hints.json")
+    # Read by the prompt hook's rankings hint; the real one would make the hint depend
+    # on whatever the machine running the suite last downloaded.
+    monkeypatch.setattr(openrouter, "CATALOG_CACHE", tmp_path / "openrouter-catalog.json")
     return tmp_path
 
 
