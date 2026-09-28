@@ -47,8 +47,18 @@ console = Console(theme=_THEME, stderr=True, no_color=bool(os.environ.get("NO_CO
 
 
 def emit_json(payload: Any) -> None:
-    """The machine-readable result. Always stdout, always the only thing there."""
-    sys.stdout.write(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+    """The machine-readable result. Always stdout, always the only thing there.
+
+    Readable UTF-8 where the stream can take it, `\\u` escapes where it cannot: a
+    Windows console left on cp1251 cannot encode an arrow, and a delegation's summary
+    was lost to a UnicodeEncodeError after twenty minutes of work. Both forms are the
+    same JSON to anything that parses it, and the whole text is encoded before any of
+    it is written, so a failed attempt leaves nothing half-printed.
+    """
+    try:
+        sys.stdout.write(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+    except UnicodeEncodeError:
+        sys.stdout.write(json.dumps(payload, indent=2, ensure_ascii=True) + "\n")
 
 
 def say(message: str) -> None:
