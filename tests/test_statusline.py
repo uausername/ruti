@@ -32,10 +32,13 @@ def no_live_facts(monkeypatch):
     monkeypatch.setattr(statusline, "_route_segment", lambda _sid: (None, None))
 
 
-def five_hour_quota(used=10.0, seven_day=None, captured_at=None):
+def five_hour_quota(used=10.0, seven_day=None, captured_at=None, seven_day_in=86400.0):
     return quota.Quota(
         five_hour=quota.Window(used, time.time() + 3600),
-        seven_day=quota.Window(seven_day, time.time() + 86400) if seven_day is not None else None,
+        seven_day=(
+            quota.Window(seven_day, time.time() + seven_day_in)
+            if seven_day is not None else None
+        ),
         captured_at=captured_at if captured_at is not None else time.time(),
     )
 
@@ -111,18 +114,22 @@ def test_seven_day_is_plain_below_60_percent():
 
 
 def test_seven_day_is_amber_between_60_and_the_escalation_tier():
-    line = statusline.render({}, five_hour_quota(used=10.0, seven_day=65.0))
-    assert "\x1b[33m65% 7d\x1b[0m" in line
+    # 86400 s exactly sits on the days/hours boundary, where `fromtimestamp` rounds to
+    # the nearest microsecond and `now()` truncates -- which side it lands on is not
+    # this test's business. A second under the boundary deterministically takes hours.
+    line = statusline.render({}, five_hour_quota(used=10.0, seven_day=65.0,
+                                                 seven_day_in=86400.0 - 1))
+    assert "\x1b[33m65% 7d/24.0h\x1b[0m" in line
 
 
 def test_seven_day_takes_the_bands_own_colour_once_it_is_the_reason_band_is_tight():
     # The user's real numbers on 2026-09-24: 5h comfortable, 7d at 83% -- band becomes
     # YELLOW from the week alone, and the 7d segment should say so in YELLOW, not amber.
-    snap = five_hour_quota(used=13.0, seven_day=83.0)
+    snap = five_hour_quota(used=13.0, seven_day=83.0, seven_day_in=86400.0 - 1)
     assert snap.band == quota.YELLOW
     assert snap.seven_day_binding is True
     line = statusline.render({}, snap)
-    assert "\x1b[33m83% 7d\x1b[0m" in line  # YELLOW's own colour code, "33"
+    assert "\x1b[33m83% 7d/24.0h\x1b[0m" in line  # YELLOW's own colour code, "33"
 
 
 def test_seven_day_does_not_claim_credit_when_five_hour_is_already_worse():
@@ -133,6 +140,42 @@ def test_seven_day_does_not_claim_credit_when_five_hour_is_already_worse():
     line = statusline.render({}, snap)
     assert "\x1b[31m92% 7d\x1b[0m" not in line  # not painted CRITICAL's colour
     assert "92% 7d" in plain(line)
+
+
+# ------------------------------------------------------- the 7d segment's reset clock
+
+
+def test_seven_day_shows_days_left_when_more_than_a_day_remains():
+    line = statusline.render({}, five_hour_quota(used=10.0, seven_day=40.0,
+                                                 seven_day_in=4.1 * 86400))
+    assert "40% 7d/4.1d" in line
+
+
+def test_seven_day_shows_hours_left_when_less_than_a_day_remains():
+    # The same `N`/`h` shape the five-hour segment has always used -- one day minus a
+    # few microseconds lands on "24.0h", never on "1.0d".
+    line = statusline.render({}, five_hour_quota(used=10.0, seven_day=40.0,
+                                                 seven_day_in=9.5 * 3600))
+    assert "40% 7d/9.5h" in line
+
+
+def test_seven_day_omits_the_reset_when_the_timestamp_is_unknown():
+    snap = quota.Quota(
+        five_hour=quota.Window(10.0, time.time() + 3600),
+        seven_day=quota.Window(40.0, None),
+        captured_at=time.time(),
+    )
+    line = statusline.render({}, snap)
+    assert "40% 7d" in line
+    assert "40% 7d/" not in line
+
+
+def test_seven_day_omits_a_reset_already_in_the_past():
+    # A weekly reset that has gone by is a stale reading, not a countdown to zero.
+    line = statusline.render({}, five_hour_quota(used=10.0, seven_day=40.0,
+                                                 seven_day_in=-60.0))
+    assert "40% 7d" in line
+    assert "40% 7d/" not in line
 
 
 # --------------------------------------------------------------------- doctor badge

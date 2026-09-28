@@ -175,6 +175,12 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
     if snapshot.seven_day is not None:
         pct = snapshot.seven_day.used_percentage
         text = f"{pct:.0f}% 7d"
+        # The time left as well, in the same `/` style as the five-hour segment above:
+        # `7d` on its own reads as "7 days left", which is what made a week 23% spent
+        # with four days to spare look the same as a week nearly gone.
+        remaining = snapshot.seven_day.resets_in_seconds
+        if remaining and remaining > 0:
+            text += f"/{quota.format_left(remaining)}"
         if snapshot.seven_day_binding:
             # It is the reason `band` is this tight, not merely a number alongside a
             # worse one -- share the band's own colour so that reads at a glance.
