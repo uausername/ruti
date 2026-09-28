@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from ruti import doctor, proc
+from ruti import doctor, litellm_cfg, proc
 
 
 @pytest.fixture
@@ -89,3 +89,55 @@ def test_the_process_table_sees_this_process():
         pytest.skip("Toolhelp is Windows-only")
     parent, image = doctor._process_table()[os.getpid()]
     assert image.startswith("python") and parent
+
+
+# ------------------------------------------------ what the proxy serves vs. declares
+
+
+@pytest.fixture
+def proxy(monkeypatch):
+    """A live proxy whose served list and the config's declared list are set per test."""
+    state = {"declared": [], "served": []}
+    monkeypatch.setattr(litellm_cfg, "liveliness", lambda *_a, **_k: True)
+    monkeypatch.setattr(litellm_cfg, "declared_models", lambda: list(state["declared"]))
+    monkeypatch.setattr(litellm_cfg, "served_models", lambda: list(state["served"]))
+    return state
+
+
+def test_a_proxy_in_step_with_the_config_is_ok(proxy):
+    proxy["declared"] = proxy["served"] = ["free", "pareto-code"]
+    check = doctor._check_proxy_alive()
+    assert check.status == doctor.OK
+    assert "free" in check.detail and check.fix is None
+
+
+def test_a_declared_model_the_proxy_is_not_serving_is_reported(proxy):
+    proxy["declared"] = ["free", "pareto-code"]
+    proxy["served"] = ["free"]
+    check = doctor._check_proxy_alive()
+    assert check.status == doctor.WARN
+    assert "pareto-code" in check.detail and "not served" in check.detail
+    assert check.fix is doctor._fix_proxy_restart
+
+
+def test_a_served_model_the_config_no_longer_declares_is_reported(proxy):
+    # The state `provider remove` used to leave behind: the config no longer says it,
+    # the process still serves it, and a delegation to it is still accepted.
+    proxy["declared"] = ["free"]
+    proxy["served"] = ["free", "deepseek-v4-flash-0731"]
+    check = doctor._check_proxy_alive()
+    assert check.status == doctor.WARN
+    assert "deepseek-v4-flash-0731" in check.detail
+    assert "no longer declared" in check.detail
+    assert check.fix is doctor._fix_proxy_restart
+
+
+def test_both_directions_of_drift_are_reported_together(proxy):
+    proxy["declared"] = ["free", "pareto-code"]
+    proxy["served"] = ["free", "kimi"]
+    check = doctor._check_proxy_alive()
+    assert check.status == doctor.WARN
+    assert "pareto-code" in check.detail and "kimi" in check.detail
+    assert "1 declared model(s) not served" in check.message
+    assert "1 served but no longer declared" in check.message
+    assert check.fix is doctor._fix_proxy_restart

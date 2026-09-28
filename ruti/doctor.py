@@ -545,16 +545,27 @@ def _check_proxy_alive() -> Check:
         # `provider add` / `openrouter setup` keeps answering happily while missing
         # every model registered since, and `route` then rules those out as
         # "registered but not served" -- the silent failure this tool exists to catch.
-        missing = [name for name in litellm_cfg.declared_models() if name not in served]
-        if missing:
+        # The same staleness runs the other way: a `provider remove` rewrites the config
+        # and the process keeps serving an alias nothing declares any more, so a
+        # delegation to it is still accepted rather than ruled out. Read the declared
+        # list once, so both counts are taken against the same snapshot.
+        declared = litellm_cfg.declared_models()
+        missing = [name for name in declared if name not in served]
+        stale = [name for name in served if name not in declared]
+        if missing or stale:
+            parts = []
+            if missing:
+                parts.append(f"declared but not served: {', '.join(missing)}")
+            if stale:
+                parts.append(
+                    f"served but no longer declared: {', '.join(stale)} -- removed since "
+                    "the process started, and a delegation to it would still be accepted"
+                )
             return Check(
                 "proxy", WARN,
-                f"alive, but serving {len(served)} of {len(served) + len(missing)} "
-                "declared model(s)",
-                detail=(
-                    f"declared but not served: {', '.join(missing)}. The running process "
-                    "predates their registration; restarting it is what picks them up"
-                ),
+                f"alive, but out of step with the config: {len(missing)} declared model(s) "
+                f"not served, {len(stale)} served but no longer declared",
+                detail="; ".join(parts) + "; restarting it is what brings the two back in step",
                 fix=_fix_proxy_restart, fix_label="restart the proxy",
             )
         return Check("proxy", OK, f"alive, serving {len(served)} model(s)",
