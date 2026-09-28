@@ -24,11 +24,12 @@ bill -- a router such as `pareto-code` spends no quota at all and may still hand
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from . import (jev, litellm_cfg, lmstudio, modes, openrouter, planner, providers, quota,
-               sessions, track, vram)
+               rankings, sessions, track, vram)
 
 # Measured, not guessed: `opencode run` sends an 8095-token system prompt before any
 # task text. A model whose window cannot hold it will not run slowly, it will fail --
@@ -89,6 +90,13 @@ class Candidate:
     track: "track.Record | None" = None
     # Who bills a metered executor, e.g. "openrouter". Only meaningful for remote.
     provider: str | None = None
+    # The LiteLLM model string a registered alias points at, e.g.
+    # `openrouter/z-ai/glm-5.3-flash`. What the language rankings are matched against.
+    model: str | None = None
+    # This model's current share of the project language's tokens (see `rankings.py`).
+    # None when coding mode is off, the rankings are unavailable, or it is not ranked.
+    share: "rankings.Share | None" = None
+    share_factor: float = 1.0
     command: str = ""
     reasons: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
@@ -318,6 +326,7 @@ def _remote_candidates(task: Task) -> list[Candidate]:
             coding=openrouter.is_coding_record(record),
             router=openrouter.is_router_record(record),
             provider=record.get("provider"),
+            model=record.get("model"),
             command=f"ruti delegate --model {alias} --task-file <file>",
         )
         candidate.reasons.append(f"{record['model']} -- {_money_reason(candidate)}")
@@ -421,7 +430,8 @@ def _self_candidate(task: Task, snapshot: quota.Quota) -> Candidate:
 
 def rank(task: Task, snapshot: quota.Quota | None = None, *,
          record: bool = True, described: str | None = None,
-         guess: "jev.Classification | None" = None) -> dict[str, Any]:
+         guess: "jev.Classification | None" = None,
+         language: str | None = None) -> dict[str, Any]:
     """Rank every executor for `task`. `record=False` is `route --probe`: the ranking
     is not logged, so it is neither counted as advice nor chased by the prompt hook's
     "nothing has been delegated" reminder.
@@ -429,7 +439,10 @@ def rank(task: Task, snapshot: quota.Quota | None = None, *,
     `described` and `guess` are kept only so the ledger can hold what the classifier
     was shown and what it made of it. Without the description stored beside the guess
     there is no way to ever check the classifier against the kinds actually worked, so
-    routing history that predates `--describe` cannot be replayed at all."""
+    routing history that predates `--describe` cannot be replayed at all.
+
+    `language` names the project's programming language for the rankings coding mode
+    consults; without it the language is detected from the working directory."""
     snapshot = snapshot or quota.load()
     needed = task.estimated_tokens + (OPENCODE_PROMPT_TOKENS if task.needs_tools else 0)
     session_modes = modes.current(sessions.current_session_id())
@@ -447,6 +460,18 @@ def rank(task: Task, snapshot: quota.Quota | None = None, *,
     # registration order. `track.load` answers `{}` when history cannot be read, so a
     # ledger problem leaves the ranking exactly as it was.
     history = track.load()
+
+    # Coding mode also asks what programmers are using right now: each registered
+    # model's share of the project language's tokens on OpenRouter. Read once, and
+    # only in coding mode -- the one place it is consulted. `None` whenever the data
+    # cannot be had, which leaves every score as it was.
+    detected = False
+    ranking: rankings.Ranking | None = None
+    if session_modes["coding"]:
+        if language is None:
+            language = rankings.detect_language(os.getcwd())
+            detected = language is not None
+        ranking = rankings.load(language)
 
     for candidate in candidates:
         # History first, before the score: an alias that has been asked before is judged
@@ -526,6 +551,22 @@ def rank(task: Task, snapshot: quota.Quota | None = None, *,
             candidate.score = round(candidate.score * 1.25, 3)
             candidate.reasons.append("coding mode is on and this one is tuned for code")
 
+        # The language rankings: the leader gets x1.30, the rest in proportion to their
+        # share of the leader's. The exact endpoint only -- a `:free` alias does not
+        # borrow the share its paid sibling earned, since limits and uptime differ.
+        # Unranked means x1.0, not a penalty: only the top nine a day are published.
+        if ranking is not None and candidate.tier == "remote" and candidate.model:
+            candidate.share = ranking.share_of(candidate.model)
+            if candidate.share is not None:
+                candidate.share_factor = ranking.factor(candidate.model)
+                why = (f"rankings: {candidate.share.percent:.1f}% of {ranking.language} "
+                       f"tokens on OpenRouter over the last {len(ranking.days)} day(s), "
+                       f"#{candidate.share.rank}")
+                if candidate.eligible:
+                    candidate.score = round(candidate.score * candidate.share_factor, 3)
+                    why += f" (score x{candidate.share_factor:.2f})"
+                candidate.reasons.append(why)
+
     if task.difficulty <= LOW_DIFFICULTY:
         _rank_paid_below_free(task, candidates)
 
@@ -584,6 +625,20 @@ def rank(task: Task, snapshot: quota.Quota | None = None, *,
             "trivial": task.trivial,
         },
         "modes": session_modes,
+        "rankings": (
+            {
+                "language": ranking.language,
+                "detected": detected,
+                "days": ranking.days,
+                "others_percent": round(ranking.others, 1),
+                "leader_percent": round(ranking.leader, 1),
+            }
+            if ranking is not None else
+            {"language": language, "detected": detected, "days": [],
+             "unavailable": "coding mode is off" if not session_modes["coding"]
+             else "no language detected" if language is None
+             else "the rankings could not be fetched and nothing is cached"}
+        ),
         "probe": not record,
         "ranked": [_render(c) for c in eligible],
         "rejected": [_render(c) for c in rejected],
@@ -647,6 +702,14 @@ def _render(candidate: Candidate) -> dict[str, Any]:
                 "factor": round(candidate.track.factor, 3),
             }
             if candidate.track is not None else None
+        ),
+        "ranking": (
+            {
+                "percent": round(candidate.share.percent, 2),
+                "rank": candidate.share.rank,
+                "factor": candidate.share_factor,
+            }
+            if candidate.share is not None else None
         ),
         "reasons": candidate.reasons,
         "blockers": candidate.blockers,

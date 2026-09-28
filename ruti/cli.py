@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import click
 
 from . import council as council_mod
@@ -12,6 +14,7 @@ from . import providers as providers_mod
 from . import usage as usage_mod
 from . import modes as modes_mod
 from . import openrouter as openrouter_mod
+from . import rankings as rankings_mod
 from . import (jev, ledger, lmstudio, litellm_cfg, planner, quota, router, sessions, tls, ui,
                vram)
 from .config import ensure_dirs, file_lock, load_dotenv
@@ -911,11 +914,17 @@ def flow_handoff(file_path: str | None) -> None:
               help="A sentence or two about the task. A classifier reads it and derives "
                    "the kind and how much judgement the work needs, instead of taking "
                    "your word for them. It may only make routing more cautious.")
+@click.option("--language", default=None,
+              help="The project's programming language, for the rankings coding mode "
+                   "consults (e.g. TypeScript, Python, C#). Detected from the current "
+                   "directory when omitted.")
 @click.option("--json", "as_json", is_flag=True)
 def route(kind: str, files: int, loc: int, needs_tools: bool, repo_context: str,
-          risk: str, latency: str, probe: bool, describe: str | None, as_json: bool) -> None:
+          risk: str, latency: str, probe: bool, describe: str | None,
+          language: str | None, as_json: bool) -> None:
     """Rank the executors for a task you have already classified."""
     _refuse_if_disabled(as_json)
+    language = _language_option(language)
     task = router.Task(kind=kind, files=files, loc=loc, needs_tools=needs_tools,
                        repo_context=repo_context, risk=risk, latency=latency)
 
@@ -930,7 +939,8 @@ def route(kind: str, files: int, loc: int, needs_tools: bool, repo_context: str,
         else:
             notes = ["classifier unavailable, so the flags you passed stand unchanged"]
 
-    result = router.rank(task, record=not probe, described=describe, guess=guess)
+    result = router.rank(task, record=not probe, described=describe, guess=guess,
+                         language=language)
     if guess is not None:
         result["classifier"] = guess.summary()
     if notes:
@@ -946,6 +956,13 @@ def route(kind: str, files: int, loc: int, needs_tools: bool, repo_context: str,
     ui.say(f"[head]{q['band']}[/head]  {used} of the 5h window used{freshness}")
     ui.say(f"[muted]task: {result['task']['kind']}, ~{result['task']['estimated_tokens']} tokens, "
            f"difficulty {result['task']['difficulty']}[/muted]")
+    ranked_by = result["rankings"]
+    if ranked_by.get("days"):
+        how = "detected" if ranked_by["detected"] else "given"
+        ui.say(f"[muted]rankings: {ranked_by['language']} ({how}), OpenRouter token share "
+               f"over {len(ranked_by['days'])} day(s) to {ranked_by['days'][-1]}[/muted]")
+    elif result["modes"].get("coding"):
+        ui.say(f"[muted]rankings: not applied -- {ranked_by['unavailable']}[/muted]")
 
     if notes:
         ui.heading("Classifier")
@@ -967,6 +984,24 @@ def route(kind: str, files: int, loc: int, needs_tools: bool, repo_context: str,
 
     ui.heading("Advice")
     ui.say(f"  {ui.literal(result['advice'])}")
+
+
+def _language_option(language: str | None) -> str | None:
+    """`--language` checked against the tags OpenRouter ranks, case and aliases aside.
+
+    An unknown name is refused rather than ignored: silently dropping it would fall
+    back to detection and rank for a language the user just said was wrong.
+    """
+    if language is None:
+        return None
+    tag = rankings_mod.normalize_language(language)
+    if tag is None:
+        raise click.BadParameter(
+            f"{language!r} is not one OpenRouter ranks; one of: "
+            + ", ".join(rankings_mod.LANGUAGES),
+            param_hint="--language",
+        )
+    return tag
 
 
 def _executor_tags(entry: dict) -> str:
@@ -1585,6 +1620,94 @@ def openrouter_models(free_only: bool, coding_only: bool, refresh: bool, as_json
         ui.say("[muted]a router picks the real model per request; `ruti delegate` reports "
                "which one it picked[/muted]")
     ui.say("[muted]register a set with `ruti openrouter setup`[/muted]")
+
+
+@openrouter.command("suggest")
+@click.option("--language", default=None,
+              help="Which language's ranking to read (e.g. TypeScript). Detected from "
+                   "the current directory when omitted.")
+@click.option("--limit", type=int, default=5, show_default=True,
+              help="How many unregistered models to list at most.")
+@click.option("--refresh", is_flag=True, help="Bypass the 12-hour rankings cache.")
+@click.option("--json", "as_json", is_flag=True)
+def openrouter_suggest(language: str | None, limit: int, refresh: bool, as_json: bool) -> None:
+    """What programmers use most for this project's language, that ruti does not have.
+
+    Reads OpenRouter's per-language token ranking (the last few days), drops what is
+    already registered and what cannot drive `opencode` (no tool calling, a window
+    under 32k), and prices the rest. Nothing is registered: that stays
+    `ruti openrouter setup --models <slug>`, and it is the user's call.
+    """
+    tag = _language_option(language)
+    detected = tag is None
+    if detected:
+        tag = rankings_mod.detect_language(os.getcwd())
+    if tag is None:
+        ui.bad("could not tell this project's language -- pass --language "
+                "(one of: " + ", ".join(rankings_mod.LANGUAGES) + ")")
+        raise SystemExit(1)
+
+    if refresh:
+        rankings_mod.fetch_days(tag, force=True)
+    catalog = openrouter_mod.fetch_catalog()
+    ranking = rankings_mod.load(tag, catalog=catalog)
+    free_level = modes_mod.current(sessions.current_session_id())["free"]
+    records = [r for r in providers_mod.load_registry()["providers"]
+               if r.get("enabled", True) and r.get("model")]
+    rows = (rankings_mod.suggestions(ranking, catalog, [r["model"] for r in records],
+                                     free_level=free_level, limit=limit)
+            if ranking is not None else [])
+    # Where what is already registered stands, so a suggestion reads against it.
+    have = []
+    for record in records:
+        share = ranking.share_of(record["model"]) if ranking is not None else None
+        if share is not None:
+            have.append({"alias": record["alias"], "slug": share.slug,
+                         "percent": round(share.percent, 2), "rank": share.rank})
+    have.sort(key=lambda entry: entry["rank"])
+
+    if as_json:
+        ui.emit_json({
+            "language": tag, "detected": detected, "free_mode": free_level,
+            "available": ranking is not None,
+            "days": ranking.days if ranking is not None else [],
+            "registered": have, "suggestions": rows,
+        })
+        return
+
+    how = "detected" if detected else "given"
+    if ranking is None:
+        ui.warn(f"OpenRouter's {tag} ranking is unreachable and nothing is cached")
+        raise SystemExit(1)
+    ui.say(f"[head]{tag}[/head] [muted]({how}) -- share of OpenRouter tokens, "
+           f"{ranking.days[0]} to {ranking.days[-1]}[/muted]")
+    if have:
+        ui.say("registered: " + ", ".join(
+            f"{entry['alias']} {entry['percent']:.1f}% (#{entry['rank']})" for entry in have))
+    else:
+        ui.say("[muted]registered: none of them is in the ranking[/muted]")
+    if not rows:
+        ui.say("[ok]nothing ranked above what is registered clears the bar[/ok]"
+               + (" [muted](free mode is hard: paid models are not listed)[/muted]"
+                  if free_level == "hard" else ""))
+        return
+
+    grid = ui.table("#", "SHARE", "SLUG", "COST ($/M in/out)", "CTX", "NOTE")
+    for row in rows:
+        cost = ("[ok]free[/ok]" if row["free"] else
+                f"{row['price_in']:g} / {row['price_out']:g}"
+                if row["price_in"] is not None and row["price_out"] is not None
+                else "metered")
+        notes = []
+        if row["needs_warning"]:
+            notes.append("[warn]paid: free mode is soft[/warn]")
+        if row["stealth"]:
+            notes.append("[warn]stealth: prompts may be logged[/warn]")
+        grid.add_row(str(row["rank"]), f"{row['percent']:.1f}%", row["slug"], cost,
+                     f"{row['context_length'] // 1000}k", ", ".join(notes))
+    ui.console.print(grid)
+    ui.say("[muted]nothing is registered by this -- `ruti openrouter setup --models "
+           "<slug>` adds one, once the user agrees[/muted]")
 
 
 @openrouter.command("setup")

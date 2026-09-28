@@ -37,7 +37,7 @@ HINT_MIN_CONFIDENCE = 0.7
 HINT_TIMEOUT = 2.0
 
 
-def build_context(prompt: str | None = None) -> tuple[str, bool]:
+def build_context(prompt: str | None = None, cwd: str | None = None) -> tuple[str, bool]:
     # A session-scoped `ruti off` means routing advice is not just unhelpful here, it's
     # actively wrong -- so replace the whole budget block with a one-line reminder
     # rather than layering it on top.
@@ -83,6 +83,9 @@ def build_context(prompt: str | None = None) -> tuple[str, bool]:
     # are set for rather than following the band debounce.
     for note in _mode_notes(session_id):
         line += "\n" + note
+    rankings_note = _rankings_note(session_id, cwd)
+    if rankings_note:
+        line += "\n" + rankings_note
     if context_note:
         line += "\n" + context_note
     if modes.current(session_id).get("wait"):
@@ -192,20 +195,49 @@ def _mode_notes(session_id: str | None) -> list[str]:
     return notes
 
 
+def _rankings_note(session_id: str | None, cwd: str | None) -> str | None:
+    """In coding mode, a model the project's language favours that ruti lacks.
+
+    Offline by construction -- the rankings and the catalogue are read from their
+    caches, which `ruti route` and `ruti openrouter suggest` keep current -- and at most
+    once a day per language, so a prompt never waits on OpenRouter and the line never
+    turns into noise. `cwd` is the session's, from the hook payload; without it there is
+    no project to speak of.
+    """
+    if not cwd:
+        return None
+    try:
+        state = modes.current(session_id)
+        if not state["coding"]:
+            return None
+        from ruti import providers, rankings
+
+        language = rankings.detect_language(cwd)
+        if language is None:
+            return None
+        models = [str(r["model"]) for r in providers.load_registry()["providers"]
+                  if r.get("enabled", True) and r.get("model")]
+        return rankings.hint(language, models, free_level=state["free"])
+    except Exception:
+        return None
+
+
 def main() -> int:
     prompt = ""
+    cwd: str | None = None
     try:
         raw = sys.stdin.read()
         payload = json.loads(raw) if raw.strip() else {}
         if isinstance(payload, dict):
             prompt = str(payload.get("prompt") or "")
+            cwd = str(payload.get("cwd") or "") or None
     except Exception:
         # The stdin must still be drained; a payload we cannot parse just means the
         # hint is skipped, not that the hook fails.
         pass
 
     try:
-        context, _ = build_context(prompt)
+        context, _ = build_context(prompt, cwd)
     except Exception:
         # A hook that fails must not block the prompt.
         return 0
