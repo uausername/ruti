@@ -48,6 +48,13 @@ SEVEN_DAY_ESCALATION: tuple[tuple[float, dict[str, str]], ...] = (
 FRESH_SECONDS = 120
 STALE_SECONDS = 1800
 
+# The weekly window is not rolling: it resets at a fixed weekly moment, so it started
+# exactly seven days before `resets_at` and its pace can be projected from that.
+SEVEN_DAY_SECONDS = 7 * 86400
+# Too early in the week a linear projection is mostly noise -- a handful of points spent
+# against a near-empty denominator reads as a spike that the week never recovers from.
+MIN_PACE_ELAPSED_SECONDS = 12 * 3600
+
 HISTORY_LIMIT = 64
 
 # What each band permits. The manager's own model matters most: it is the one thing
@@ -122,6 +129,31 @@ class Window:
         return (when - datetime.now(timezone.utc)).total_seconds()
 
 
+def format_left(seconds: float) -> str:
+    """Time left as `4.1d` or `2.2h`. One implementation, because the status line's `/`
+    suffix and `summary()`'s reset clause must not drift apart in the rounding."""
+    if seconds >= 86400:
+        return f"{seconds / 86400:.1f}d"
+    return f"{seconds / 3600:.1f}h"
+
+
+def _local_reset_time(window: Window) -> str | None:
+    """The reset in the machine's local time as `"%a %H:%M"`, or None when the
+    timestamp is not a plain epoch number.
+
+    An ISO string is what quota.json files written before `resets_at` was known to be
+    epoch seconds hold; naming the moment is not worth failing a status line over, so
+    the reset clause is dropped instead.
+    """
+    raw = window.resets_at
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    try:
+        return datetime.fromtimestamp(float(raw)).astimezone().strftime("%a %H:%M")
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 @dataclass(frozen=True)
 class Quota:
     five_hour: Window | None
@@ -168,6 +200,27 @@ class Quota:
         if remaining is None or remaining <= 0:
             return None
         return self.five_hour.used_percentage + rate * (remaining / 3600)
+
+    @property
+    def seven_day_projected_at_reset(self) -> float | None:
+        """Where weekly utilisation lands at the reset if the pace so far holds.
+
+        The five-hour equivalent extrapolates from a measured burn rate over a window
+        that may have started at any time. The weekly window needs neither a history nor
+        a burn rate: it is not rolling, so it began exactly `SEVEN_DAY_SECONDS` before
+        `resets_at` and the average pace since then is the whole projection. None rather
+        than a number whenever that arithmetic would be noise -- no weekly reading, no
+        usable reset, or too little of the week elapsed to mean anything.
+        """
+        if self.seven_day is None:
+            return None
+        remaining = self.seven_day.resets_in_seconds
+        if remaining is None or remaining <= 0 or remaining > SEVEN_DAY_SECONDS:
+            return None
+        elapsed = SEVEN_DAY_SECONDS - remaining
+        if elapsed < MIN_PACE_ELAPSED_SECONDS:
+            return None
+        return self.seven_day.used_percentage * SEVEN_DAY_SECONDS / elapsed
 
     @property
     def _five_hour_band(self) -> str:
@@ -234,8 +287,20 @@ class Quota:
             parts.append(f"on track for {projected:.0f}%")
         if self.freshness != "live":
             parts.append(f"reading is {self.freshness}")
-        if self.seven_day_binding and self.seven_day is not None:
-            parts.append(f"7d at {self.seven_day.used_percentage:.0f}% is the tighter window")
+        if self.seven_day is not None:
+            seven = f"7d {self.seven_day.used_percentage:.0f}% used"
+            # Only when there is a real future moment to point at: a reset already in the
+            # past is a stale reading, not a schedule worth repeating.
+            when = _local_reset_time(self.seven_day)
+            left = self.seven_day.resets_in_seconds
+            if when is not None and left is not None and left > 0:
+                seven += f", resets {when} (in {format_left(left)})"
+            projected7 = self.seven_day_projected_at_reset
+            if projected7 is not None:
+                seven += f", on pace for {projected7:.0f}%"
+            if self.seven_day_binding:
+                seven += " -- the tighter window"
+            parts.append(seven)
         return f"[{self.band}] " + ", ".join(parts)
 
 

@@ -5,10 +5,15 @@ week sitting at 82% -- eight points from a hard jump straight past YELLOW to ORA
 looked exactly like a week at 10%. `seven_day_binding` exists so the status line and
 `summary()` can say *why* band is what it is, and it must not claim credit when the
 five-hour window was already the worse of the two on its own.
+
+The weekly window also gets a reset and a pace, because `7d 23%` alone does not say
+whether there is time left: the window is not rolling, so the average pace since it
+opened projects to the reset without needing a burn-rate history.
 """
 
 from __future__ import annotations
 
+import re
 import time
 
 import pytest
@@ -16,10 +21,13 @@ import pytest
 from ruti import quota
 
 
-def snap(five_hour, seven_day=None):
+def snap(five_hour, seven_day=None, seven_day_in=86400.0):
     return quota.Quota(
         five_hour=quota.Window(five_hour, time.time() + 3600),
-        seven_day=quota.Window(seven_day, time.time() + 86400) if seven_day is not None else None,
+        seven_day=(
+            quota.Window(seven_day, time.time() + seven_day_in)
+            if seven_day is not None else None
+        ),
         captured_at=time.time(),
     )
 
@@ -77,9 +85,75 @@ def test_binding_is_false_with_no_seven_day_reading_at_all():
     assert snap(five_hour=7.0, seven_day=None).seven_day_binding is False
 
 
-def test_summary_names_the_seven_day_window_only_when_it_is_binding():
-    binding = snap(five_hour=7.0, seven_day=82.0).summary()
-    assert "7d at 82%" in binding
+def test_summary_names_the_seven_day_window_whether_or_not_it_is_binding():
+    # The weekly reading is always worth a clause now: how much is left, and when it
+    # resets, are the two numbers a 23% week needs. Binding only adds the *blame*.
+    quiet = snap(five_hour=7.0, seven_day=40.0).summary()
+    assert "7d 40% used" in quiet
+    assert "-- the tighter window" not in quiet
 
-    not_binding = snap(five_hour=7.0, seven_day=40.0).summary()
-    assert "7d" not in not_binding
+    binding = snap(five_hour=7.0, seven_day=82.0).summary()
+    assert "7d 82% used" in binding
+    assert "-- the tighter window" in binding
+
+
+# ----------------------------------------------------------------- the weekly pace
+
+
+@pytest.mark.parametrize("seconds, expected", [
+    (4.1 * 86400, "4.1d"),
+    (86400.0, "1.0d"),
+    (9.5 * 3600, "9.5h"),
+])
+def test_format_left_switches_to_days_above_a_day(seconds, expected):
+    assert quota.format_left(seconds) == expected
+
+
+def test_weekly_pace_projects_the_average_so_far_to_the_reset():
+    # 23% with 4.1 days left means 2.9 of the 7 days are gone, so 23 * 7 / 2.9.
+    q = snap(five_hour=7.0, seven_day=23.0, seven_day_in=4.1 * 86400)
+    assert q.seven_day_projected_at_reset == pytest.approx(55.5, rel=1e-3)
+
+
+def test_weekly_pace_is_withheld_when_too_little_of_the_week_has_gone():
+    # A handful of points against the first hours of the window is noise, not a trend.
+    q = snap(five_hour=7.0, seven_day=23.0,
+             seven_day_in=quota.SEVEN_DAY_SECONDS - 11 * 3600)
+    assert q.seven_day_projected_at_reset is None
+
+
+def test_weekly_pace_is_withheld_without_a_weekly_reading():
+    assert snap(five_hour=7.0, seven_day=None).seven_day_projected_at_reset is None
+
+
+def test_weekly_pace_is_withheld_when_the_reset_is_unknown():
+    q = quota.Quota(
+        five_hour=quota.Window(7.0, time.time() + 3600),
+        seven_day=quota.Window(23.0, None),
+        captured_at=time.time(),
+    )
+    assert q.seven_day_projected_at_reset is None
+
+
+def test_summary_states_the_weekly_reset_and_the_pace_it_implies():
+    line = snap(five_hour=7.0, seven_day=23.0, seven_day_in=4.1 * 86400).summary()
+    assert "7d 23% used" in line
+    assert "resets " in line
+    assert "(in 4.1d)" in line
+    assert "on pace for 56%" in line
+    # "Fri 14:00"-shaped, in the machine's own local time.
+    assert re.search(r"resets \w{3} \d{2}:\d{2} \(in 4\.1d\)", line)
+
+
+def test_summary_drops_the_weekly_reset_when_the_timestamp_is_an_iso_string():
+    # quota.json files written before `resets_at` was known to be epoch seconds hold an
+    # ISO string. The reset clause goes, the rest of the line must still be there.
+    q = quota.Quota(
+        five_hour=quota.Window(7.0, time.time() + 3600),
+        seven_day=quota.Window(40.0, "2099-10-02T14:00:00+00:00"),
+        captured_at=time.time(),
+    )
+    line = q.summary()
+    assert "7d 40% used" in line
+    assert "(in " not in line
+    assert line.startswith("[")
