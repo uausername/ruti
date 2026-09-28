@@ -1337,8 +1337,10 @@ def _serve_written_aliases(no_restart: bool) -> None:
     --fix` does, which kills the listener itself and confirms the port is free.
     """
     if no_restart:
-        ui.say("[muted]the running proxy was left alone (--no-restart) -- it serves the new "
-               "aliases once `ruti doctor --fix` restarts it[/muted]")
+        # Not just "the new aliases": the same message is read after a removal, where
+        # what has to stop being served is the point.
+        ui.say("[muted]the running proxy was left alone (--no-restart) -- it serves what the "
+               "config now declares once `ruti doctor --fix` restarts it[/muted]")
         return
     ui.heading("Restarting the proxy")
     try:
@@ -1546,8 +1548,12 @@ def provider_test(alias: str | None, as_json: bool) -> None:
 
 @provider.command("remove")
 @click.argument("alias")
+@click.option("--no-restart", is_flag=True,
+              help="Leave the running proxy alone. By default it is restarted so it stops "
+                   "serving the removed alias, which fails any delegation running through it "
+                   "right then.")
 @click.option("--yes", is_flag=True)
-def provider_remove(alias: str, yes: bool) -> None:
+def provider_remove(alias: str, no_restart: bool, yes: bool) -> None:
     """Remove a provider. The key stays in .env unless you say otherwise."""
     registry = providers_mod.load_registry()
     keep = [r for r in registry["providers"] if r["alias"] != alias]
@@ -1565,8 +1571,23 @@ def provider_remove(alias: str, yes: bool) -> None:
     # proxy's opaque error instead of never being attempted.
     litellm_cfg.sync_opencode(litellm_cfg.declared_models())
     ui.ok(f"removed {alias}")
-    ui.say("[muted]its key is still in litellm/.env -- delete the "
-           f"{', '.join(r['env_var'] for r in removed)} line(s) if you want it gone[/muted]")
+    # Keys are shared -- every OpenRouter alias reads RUTI_OPENROUTER_KEY_1 -- so telling
+    # the reader to delete the line would take a key the aliases they kept still need
+    # away from them. Only a variable nothing keeps is the removed entry's own.
+    users = {r["env_var"]: [k["alias"] for k in keep if k.get("env_var") == r["env_var"]]
+             for r in removed if r.get("env_var")}
+    unused = [var for var, names in users.items() if not names]
+    if unused:
+        ui.say("[muted]its key is still in litellm/.env -- delete the "
+               f"{', '.join(unused)} line(s) if you want it gone[/muted]")
+    else:
+        sharing = [name for names in users.values() for name in names]
+        shown = ", ".join(sharing[:3]) + (", ..." if len(sharing) > 3 else "")
+        ui.say(f"[muted]its key stays in litellm/.env: {shown} "
+               f"{'still use' if len(sharing) != 1 else 'still uses'} it[/muted]")
+    # Without this the process keeps serving the alias the config no longer declares, and
+    # a delegation to it is still accepted -- the state `doctor` alone used to call OK.
+    _serve_written_aliases(no_restart)
 
 
 # ----------------------------------------------------------------------- openrouter

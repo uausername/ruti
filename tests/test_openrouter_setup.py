@@ -156,9 +156,55 @@ def test_setup_declares_to_opencode_what_is_on_disk_not_what_the_old_proxy_serve
 def test_provider_remove_drops_the_alias_from_opencode(setup, monkeypatch):
     synced = []
     monkeypatch.setattr(litellm_cfg, "sync_opencode", lambda names, **_k: synced.append(names))
-    result = CliRunner().invoke(cli.main, ["provider", "remove", "free", "--yes"])
-    assert result.exit_code == 0, result.output
+    # --no-restart keeps this test about the OpenCode sync, not the restart the same
+    # command now does by default (covered just below).
+    out = _remove(setup, "free", "--no-restart")
     assert synced == [[]]
+    assert setup["restarts"] == 0
+    assert "ruti doctor --fix" in out
+
+
+# ------------------------------------------------------------- provider remove
+
+
+def _remove(setup, alias, *extra):
+    result = CliRunner().invoke(cli.main, ["provider", "remove", alias, "--yes", *extra])
+    out = " ".join((result.output + (result.stderr or "")).split())
+    assert result.exit_code == 0, out
+    return out
+
+
+def test_removing_an_alias_restarts_the_proxy_so_it_stops_serving_it(setup):
+    # The gap this fixes: the registry and the config lost the alias, the process kept
+    # serving it, and doctor called that OK.
+    out = _remove(setup, "free")
+    assert setup["restarts"] == 1
+    assert "Restarting the proxy" in out
+
+
+def test_no_restart_leaves_a_removal_alone_and_names_the_fix(setup):
+    out = _remove(setup, "free", "--no-restart")
+    assert setup["restarts"] == 0
+    assert "left alone" in out and "ruti doctor --fix" in out
+    # worded so it reads true of a removal too
+    assert "new aliases" not in out
+
+
+def test_the_env_note_is_skipped_when_a_kept_alias_shares_the_key(setup):
+    # Every OpenRouter alias reads RUTI_OPENROUTER_KEY_1: telling the reader to delete
+    # it would take the key away from the alias they kept.
+    setup["registry"]["providers"].append(
+        dict(FREE_ROUTER, alias="inkling-small",
+             model="openrouter/thinkingmachines/inkling-small:free"))
+    out = _remove(setup, "free")
+    assert "if you want it gone" not in out
+    assert "its key stays in litellm/.env" in out and "inkling-small" in out
+
+
+def test_the_env_note_is_printed_when_nothing_keeps_the_key(setup):
+    out = _remove(setup, "free", "--no-restart")
+    assert "its key is still in litellm/.env" in out
+    assert "RUTI_OPENROUTER_KEY_1 line(s) if you want it gone" in out
 
 
 def test_setup_registers_a_zero_priced_model_as_free(setup, monkeypatch):
