@@ -751,14 +751,27 @@ def mode_council(level: str) -> None:
 
 
 @mode.command("wait")
-@click.argument("state", type=click.Choice(["on", "off"]))
+@click.argument("state", type=click.Choice(["on", "off", "pause"]))
 def mode_wait(state: str) -> None:
     """Ride the five-hour window to its edge instead of off it. At 90% the manager is
     told to assess its open tasks; at 95% tool calls are refused and it writes a
-    checkpoint; after the reset the Stop hook resumes the same session by itself."""
+    checkpoint; after the reset the Stop hook resumes the same session by itself.
+    `pause` arms that resume early, for a turn the manager wants to end before 95%."""
     from . import wait as wait_mod
 
     session_id = _session_or_die()
+    if state == "pause":
+        # The arming is the whole point: a turn that just ends below the pause line
+        # leaves the Stop hook nothing to act on, and the session waits for the user.
+        clock = wait_mod.pause(session_id, quota.load())
+        if clock is None:
+            why = ("`ruti mode wait on` first" if not modes_mod.current(session_id).get("wait")
+                   else "no current reset time to wait for")
+            ui.bad(f"cannot pause this session -- {why}")
+            raise SystemExit(1)
+        ui.ok(f"paused until the reset at {clock} -- end the turn after writing a "
+              "checkpoint; the Stop hook resumes the session then")
+        return
     modes_mod.set_wait(session_id, state == "on")
     if state == "off":
         ui.ok("wait mode off -- any pause in progress is released")

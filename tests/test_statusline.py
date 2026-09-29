@@ -170,12 +170,47 @@ def test_seven_day_omits_the_reset_when_the_timestamp_is_unknown():
     assert "40% 7d/" not in line
 
 
-def test_seven_day_omits_a_reset_already_in_the_past():
-    # A weekly reset that has gone by is a stale reading, not a countdown to zero.
+def test_seven_drops_a_reset_already_in_the_past_and_with_it_the_old_number():
+    # A weekly reset that has gone by is a stale reading, not a countdown to zero --
+    # and the percentage belonged to the week that has just ended.
     line = statusline.render({}, five_hour_quota(used=10.0, seven_day=40.0,
                                                  seven_day_in=-60.0))
-    assert "40% 7d" in line
-    assert "40% 7d/" not in line
+    assert "7d reset" in plain(line)
+    assert "40% 7d" not in plain(line)
+
+
+# ------------------------------------------------- a window whose reset has gone by
+
+
+def passed_five_hour(used=93.0, captured_ago=4 * 3600, seven_day=None, seven_day_in=86400.0):
+    now = time.time()
+    return quota.Quota(
+        five_hour=quota.Window(used, now - 30.0),
+        seven_day=(
+            quota.Window(seven_day, now + seven_day_in)
+            if seven_day is not None else None
+        ),
+        captured_at=now - captured_ago,
+    )
+
+
+def test_a_passed_five_hour_reset_shows_a_reset_rather_than_a_stale_percentage():
+    # Seen live after 19:20 on an idle session: `UNKNOWN 93% 5h · ~unknown` long after
+    # the window had reset. The number and the freshness marker both qualify the old
+    # reading, so both go.
+    snap = passed_five_hour()
+    assert snap.freshness == "unknown" and snap.five_hour_reset_passed is True
+    line = statusline.render({}, snap)
+    assert "GREEN 5h reset" in plain(line)
+    assert "93%" not in plain(line)
+    assert "~unknown" not in plain(line)
+
+
+def test_a_passed_weekly_reset_renders_as_a_bare_reset():
+    line = statusline.render({}, passed_five_hour(used=7.0, seven_day=83.0,
+                                                  seven_day_in=-60.0))
+    assert "7d reset" in plain(line)
+    assert "83% 7d" not in plain(line)
 
 
 # --------------------------------------------------------------------- doctor badge

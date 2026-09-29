@@ -44,6 +44,111 @@ def test_the_notice_comes_once_per_window():
     assert wait.post_tool_use(SID, snap(92, resets_in=7200)) is not None
 
 
+def test_the_notice_says_what_to_do_if_the_turn_ends_early():
+    # The live bug: the manager took the notice, stopped at 93% of its own accord, and
+    # the Stop hook had no pause to act on, so the session sat there waiting for the
+    # user. The notice has to name the arming, or the same thing happens again.
+    modes.set_wait(SID, True)
+    context = wait.post_tool_use(SID, snap(91))["hookSpecificOutput"]["additionalContext"]
+    assert "ruti mode wait pause" in context
+
+
+# ------------------------------------------------------- pausing before the pause line
+
+
+def test_pause_arms_the_resume_so_the_stop_hook_waits_and_continues():
+    modes.set_wait(SID, True)
+    s = snap(93, resets_in=600)
+    assert wait.pause(SID, s) == wait.reset_clock(s)
+    now = [time.time()]
+    slept = []
+
+    def fake_sleep(seconds):
+        slept.append(seconds)
+        now[0] += seconds
+
+    out = wait.stop(SID, s, sleep=fake_sleep, clock=lambda: now[0])
+    assert out["decision"] == "block"
+    assert "has reset" in out["reason"]
+    assert 600 <= sum(slept) <= 600 + wait.RESUME_MARGIN_SECONDS + 1
+    assert not modes.wait_state(SID).get("paused")
+
+
+def test_pause_marks_the_notice_as_seen_too():
+    modes.set_wait(SID, True)
+    s = snap(93)
+    modes.set_wait_state(SID, {})
+    wait.pause(SID, s)
+    assert wait.post_tool_use(SID, s) is None
+
+
+def test_an_early_pause_still_allows_tools():
+    # The whole difference from the 95% refusal: this arms a resume, it does not stop
+    # the work. Refusing tools here would make `pause` indistinguishable from a pause.
+    modes.set_wait(SID, True)
+    wait.pause(SID, snap(93))
+    assert pre(snap(93)) is None
+    assert pre(snap(94.9)) is None
+
+
+@pytest.mark.parametrize("state, snapshot, why", [
+    ("off", lambda: snap(93), "wait mode is off"),
+    ("on", lambda: snap(93, resets_in=None), "the reset time is unknown"),
+    ("on", lambda: snap(93, resets_in=-10), "the reset has already passed"),
+])
+def test_pause_refuses_and_changes_nothing_when_there_is_nothing_to_wait_for(state, snapshot, why):
+    modes.set_wait(SID, state == "on")
+    s = snapshot()
+    modes.set_wait_state(SID, {})
+    assert wait.pause(SID, s) is None, why
+    assert modes.wait_state(SID).get("paused") is None, why
+    # ...and so the Stop hook still releases the session rather than holding it.
+    assert wait.stop(SID, s, sleep=lambda _s: 1 / 0) is None
+
+
+def test_pause_does_nothing_without_a_five_hour_reading_at_all():
+    modes.set_wait(SID, True)
+    modes.set_wait_state(SID, {})
+    assert wait.pause(SID, quota.Quota(None, None, captured_at=time.time())) is None
+    assert modes.wait_state(SID).get("paused") is None
+
+
+def test_the_prompt_note_says_how_to_stop_early():
+    modes.set_wait(SID, True)
+    assert "ruti mode wait pause" in wait.prompt_note(SID, snap(20))
+
+
+def test_mode_wait_pause_reports_the_clock_and_arms_the_resume(monkeypatch):
+    from click.testing import CliRunner
+    from ruti import cli
+
+    s = snap(93, resets_in=1800)
+    monkeypatch.setattr(sessions, "current_session_id", lambda: SID)
+    monkeypatch.setattr(quota, "load", lambda: s)
+    modes.set_wait(SID, True)
+    modes.set_wait_state(SID, {})
+
+    result = CliRunner().invoke(cli.main, ["mode", "wait", "pause"])
+    assert result.exit_code == 0, result.output
+    assert f"paused until the reset at {wait.reset_clock(s)}" in result.output
+    assert modes.wait_state(SID)["paused"] == wait.window_key(s)
+
+
+def test_mode_wait_pause_fails_loudly_when_wait_mode_is_off(monkeypatch):
+    from click.testing import CliRunner
+    from ruti import cli
+
+    monkeypatch.setattr(sessions, "current_session_id", lambda: SID)
+    monkeypatch.setattr(quota, "load", lambda: snap(93))
+    modes.set_wait(SID, False)
+    modes.set_wait_state(SID, {})
+
+    result = CliRunner().invoke(cli.main, ["mode", "wait", "pause"])
+    assert result.exit_code == 1
+    assert "ruti mode wait on` first" in result.output
+    assert modes.wait_state(SID).get("paused") is None
+
+
 def test_at_the_pause_line_tools_are_refused_and_the_session_is_paused():
     modes.set_wait(SID, True)
     s = snap(95.5)

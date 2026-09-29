@@ -97,6 +97,89 @@ def test_summary_names_the_seven_day_window_whether_or_not_it_is_binding():
     assert "-- the tighter window" in binding
 
 
+# ------------------------------------------------- a window whose reset has gone by
+
+
+def passed_snap(used, captured_ago, seven_day=None, seven_day_in=86400.0, five_in=-30.0):
+    """A reading captured `captured_ago` seconds ago whose five-hour reset has passed."""
+    now = time.time()
+    return quota.Quota(
+        five_hour=quota.Window(used, now + five_in),
+        seven_day=(
+            quota.Window(seven_day, now + seven_day_in)
+            if seven_day is not None else None
+        ),
+        captured_at=now - captured_ago,
+    )
+
+
+def test_a_stale_reading_whose_reset_has_passed_is_a_reset_window():
+    # The live bug: after the reset the status line still read UNKNOWN 93% and the
+    # prompt hook said assume ORANGE, because the reading was old and idle sessions
+    # send no API requests. An idle session's reading freezes, but a frozen reading
+    # whose own reset has passed is a window that has reset -- an empty one.
+    q = passed_snap(93.0, captured_ago=4 * 3600)
+    assert q.freshness == "unknown"
+    assert q.five_hour_reset_passed is True
+    assert q.band == quota.GREEN
+    assert q.seven_day_binding is False
+
+
+def test_the_summary_of_a_passed_window_says_it_reset_and_drops_the_old_number():
+    line = passed_snap(93.0, captured_ago=4 * 3600).summary()
+    assert line.startswith("[GREEN] 5h window reset at ")
+    assert "no reading since" in line
+    assert "reading is" not in line
+    assert "93%" not in line
+
+
+def test_a_passed_weekly_window_does_not_escalate_and_says_it_reset():
+    # 83% would be YELLOW on its own; from a week that has already reset it says
+    # nothing about the week ahead, and the reset is the whole message.
+    q = passed_snap(7.0, captured_ago=4 * 3600, seven_day=83.0, seven_day_in=-60.0)
+    assert q.seven_day_reset_passed is True
+    assert q.band == quota.GREEN
+    assert q.seven_day_binding is False
+    line = q.summary()
+    assert "7d window reset" in line
+    assert "83%" not in line
+    assert "-- the tighter window" not in line
+
+
+def test_a_stale_reading_whose_reset_is_still_ahead_stays_unknown():
+    # The regression guard: only a passed reset lifts staleness. A frozen 93% that has
+    # not reset yet really can be a real 93%, and unknown is the safe reading of it.
+    now = time.time()
+    q = quota.Quota(
+        five_hour=quota.Window(93.0, now + 600),
+        seven_day=quota.Window(83.0, now + 86400),
+        captured_at=now - 4 * 3600,
+    )
+    assert q.five_hour_reset_passed is False
+    assert q.band == quota.UNKNOWN
+
+
+def test_a_weekly_window_alone_cannot_bind_when_only_the_five_hour_reset_passed():
+    # The weekly window is still live here, so it still counts -- but a passed
+    # five-hour reset leaves the base band GREEN either way, and 40% does not move it.
+    q = passed_snap(93.0, captured_ago=4 * 3600, seven_day=40.0, seven_day_in=86400.0)
+    assert q.band == quota.GREEN
+    assert q.seven_day_binding is False
+
+
+def test_a_passed_reset_with_no_timestamp_to_name_says_so_without_one():
+    # A quota.json written before `resets_at` was known to be epoch seconds holds an
+    # ISO string; the local time is not available then, and the clause is dropped.
+    now = time.time()
+    q = quota.Quota(
+        five_hour=quota.Window(93.0, "2020-01-01T00:00:00+00:00"),
+        seven_day=None,
+        captured_at=now - 4 * 3600,
+    )
+    assert q.five_hour_reset_passed is True
+    assert q.summary() == "[GREEN] 5h window reset -- no reading since"
+
+
 # ----------------------------------------------------------------- the weekly pace
 
 
