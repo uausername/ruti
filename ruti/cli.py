@@ -92,9 +92,8 @@ def status(as_json: bool) -> None:
     # of it stops all work, whereas a full GPU only costs an executor.
     ui.heading("Subscription budget")
     # `summary()` already opens with the band, so it is not repeated here.
+    # The weekly window is part of the summary, reset and pace included.
     ui.say(f"  [head]{ui.literal(snapshot.summary())}[/head]")
-    if snapshot.seven_day is not None:
-        ui.say(f"  [muted]{snapshot.seven_day.used_percentage:.0f}% of the 7d window used[/muted]")
     ui.say(f"  [muted]{ui.literal(quota.BAND_POLICY[snapshot.band]['guidance'])}[/muted]")
 
     ui.heading("GPU")
@@ -107,11 +106,14 @@ def status(as_json: bool) -> None:
         )
 
     ui.heading("LM Studio")
+    # Stopped, or up with nothing loaded, is the resting state rather than a fault: the
+    # proxy has no fallback, so nothing is quietly rerouted, and `ruti delegate` starts
+    # the server and loads the model when a local alias is asked for. `ruti doctor`
+    # says the same; the two must not disagree about whether something is wrong.
     if not server_up:
-        ui.bad("server is DOWN -- every local request will fail over to a remote provider")
-        ui.say("  [muted]start it with `lms server start`, or run `ruti doctor --fix`[/muted]")
+        ui.ok("server stopped -- `ruti delegate` starts it when a local alias is asked for")
     elif not loaded:
-        ui.warn("server up, but no model is loaded")
+        ui.ok("server up, no model loaded -- `ruti delegate` loads one on demand")
     else:
         for model in loaded:
             ui.ok(f"{model.identifier}  ctx {model.loaded_context}  "
