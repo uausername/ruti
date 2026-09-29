@@ -9,7 +9,9 @@ manager remembering a rule it read an hour ago:
   only what fits, start nothing large, keep the task list current.
 * **95%** -- `PreToolUse` refuses every tool call except `ruti` itself and TodoWrite,
   telling the manager to write a checkpoint into its reply and end the turn. The
-  refusal marks the session paused for this window.
+  refusal marks the session paused for this window. Ending the turn before that is
+  also fine, but only if `ruti mode wait pause` has armed the resume first: the pause
+  flag is what the `Stop` hook acts on, and nothing else writes it.
 * **Reset** -- the `Stop` hook sees the pause, sleeps until the window's `resets_at`
   (plus a margin), then answers `{"decision": "block"}` with a resume instruction.
   Blocking a stop is the one way a hook can make Claude Code keep going, and because
@@ -86,6 +88,34 @@ def _ruti_only(command: str) -> bool:
         token in command for token in _SHELL_CHAINING)
 
 
+def pause(session_id: str, snapshot: quota.Quota) -> str | None:
+    """Arm the resume by hand, before the pause line, and return the reset clock.
+
+    `stop()` only waits out the reset when the state carries a pause for this window,
+    and until now the only thing that wrote one was the refusal at 95%. A manager that
+    decided on its own to stop at 93% -- after the notice, having written a checkpoint
+    and said it would continue after the reset -- left nothing for the hook to act on,
+    and the session sat there waiting for the user. Tools stay allowed after this:
+    the point is the arming, not a stop.
+    """
+    if not modes.current(session_id).get("wait"):
+        return None
+    key = window_key(snapshot)
+    window = snapshot.five_hour
+    if not key or window is None:
+        return None
+    remaining = window.resets_in_seconds
+    if remaining is None or remaining <= 0:
+        # Nothing to wait for. An unknown reset would sleep on nothing, and a passed
+        # one is a window that has already reset -- resuming against it would hit the
+        # old 95% and pause straight into another five hours.
+        return None
+
+    state = modes.wait_state(session_id)
+    modes.set_wait_state(session_id, {**state, "paused": key, "noticed": key})
+    return reset_clock(snapshot)
+
+
 def tool_allowed_while_paused(tool_name: str, tool_input: Any) -> bool:
     if tool_name in ALWAYS_ALLOWED_TOOLS:
         return True
@@ -145,7 +175,9 @@ def post_tool_use(session_id: str, snapshot: quota.Quota) -> dict[str, Any] | No
         f"{PAUSE_AT:.0f}%, start no large new step, and keep the task list current. At "
         f"{PAUSE_AT:.0f}% tool calls are refused and the session pauses until the reset, "
         "then resumes automatically -- so leave the work at a point that is easy to "
-        "pick up from."
+        "pick up from. "
+        f"If you stop before {PAUSE_AT:.0f}%, run `ruti mode wait pause` first -- only a "
+        "pause resumes by itself after the reset; a turn that just ends waits for the user."
     )
     return {
         "hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": context}
@@ -200,4 +232,5 @@ def prompt_note(session_id: str | None, snapshot: quota.Quota) -> str:
                 "tool calls are refused until then (`ruti mode wait off` overrides).")
     return (f"ruti wait mode is ON: at {NOTICE_AT:.0f}% you will be asked to assess the "
             f"open tasks; at {PAUSE_AT:.0f}% tools are refused -- write a checkpoint and "
-            "end the turn, and the session resumes by itself after the reset.")
+            "end the turn, and the session resumes by itself after the reset. Stopping "
+            "earlier? `ruti mode wait pause` first, or the session waits for the user.")

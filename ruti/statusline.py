@@ -157,38 +157,51 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
 
     if snapshot.five_hour is not None:
         band = snapshot.band
-        used = snapshot.five_hour.used_percentage
-        text = f"{used:.0f}% 5h"
-        remaining = snapshot.five_hour.resets_in_seconds
-        if remaining and remaining > 0:
-            text += f"/{remaining / 3600:.1f}h"
-        # Colour carries the band for anyone who can see it; the word carries it for
-        # everyone else, and for a terminal that strips escapes.
-        segments.append(_colour(f"{band} {text}", BAND_COLOUR.get(band, "37")))
-        if snapshot.freshness != "live":
-            # The band above was computed from this same stale reading, so the number
-            # can be quietly wrong at the exact moment it is glanced at for reassurance.
-            segments.append(_colour(f"~{snapshot.freshness}", "90"))
+        if snapshot.five_hour_reset_passed:
+            # The percentage belongs to a window that has already reset and been idle
+            # since, so it is the one number here that is certainly wrong. Say that
+            # instead -- and drop the freshness marker with it, since the band is no
+            # longer qualified by the reading it came from.
+            segments.append(_colour(f"{band} 5h reset", BAND_COLOUR.get(band, "37")))
+        else:
+            used = snapshot.five_hour.used_percentage
+            text = f"{used:.0f}% 5h"
+            remaining = snapshot.five_hour.resets_in_seconds
+            if remaining and remaining > 0:
+                text += f"/{remaining / 3600:.1f}h"
+            # Colour carries the band for anyone who can see it; the word carries it for
+            # everyone else, and for a terminal that strips escapes.
+            segments.append(_colour(f"{band} {text}", BAND_COLOUR.get(band, "37")))
+            if snapshot.freshness != "live":
+                # The band above was computed from this same stale reading, so the
+                # number can be quietly wrong at the exact moment it is glanced at for
+                # reassurance.
+                segments.append(_colour(f"~{snapshot.freshness}", "90"))
     else:
         segments.append(_colour("quota n/a", "35"))
 
     if snapshot.seven_day is not None:
-        pct = snapshot.seven_day.used_percentage
-        text = f"{pct:.0f}% 7d"
-        # The time left as well, in the same `/` style as the five-hour segment above:
-        # `7d` on its own reads as "7 days left", which is what made a week 23% spent
-        # with four days to spare look the same as a week nearly gone.
-        remaining = snapshot.seven_day.resets_in_seconds
-        if remaining and remaining > 0:
-            text += f"/{quota.format_left(remaining)}"
-        if snapshot.seven_day_binding:
-            # It is the reason `band` is this tight, not merely a number alongside a
-            # worse one -- share the band's own colour so that reads at a glance.
-            segments.append(_colour(text, BAND_COLOUR.get(snapshot.band, "37")))
-        elif pct >= 60.0:
-            segments.append(_colour(text, "33"))
+        if snapshot.seven_day_reset_passed:
+            # Same reasoning as the five-hour segment: the week reset, and what is left
+            # of the last one is not the week ahead. Plain, because nothing here binds.
+            segments.append("7d reset")
         else:
-            segments.append(text)
+            pct = snapshot.seven_day.used_percentage
+            text = f"{pct:.0f}% 7d"
+            # The time left as well, in the same `/` style as the five-hour segment above:
+            # `7d` on its own reads as "7 days left", which is what made a week 23% spent
+            # with four days to spare look the same as a week nearly gone.
+            remaining = snapshot.seven_day.resets_in_seconds
+            if remaining and remaining > 0:
+                text += f"/{quota.format_left(remaining)}"
+            if snapshot.seven_day_binding:
+                # It is the reason `band` is this tight, not merely a number alongside a
+                # worse one -- share the band's own colour so that reads at a glance.
+                segments.append(_colour(text, BAND_COLOUR.get(snapshot.band, "37")))
+            elif pct >= 60.0:
+                segments.append(_colour(text, "33"))
+            else:
+                segments.append(text)
 
     model = (payload.get("model") or {}).get("display_name")
     effort = (payload.get("effort") or {}).get("level")

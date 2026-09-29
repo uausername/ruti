@@ -240,6 +240,31 @@ class Quota:
         return self.seven_day.used_percentage * SEVEN_DAY_SECONDS / elapsed
 
     @property
+    def five_hour_reset_passed(self) -> bool:
+        """The five-hour window exists and its reset time has already gone by.
+
+        An idle session sends no API requests, so its reading freezes. But a frozen
+        reading whose own reset has passed is not a window about to run out -- it is a
+        window that has reset and not been measured since, i.e. an empty one. Treat it
+        as UNKNOWN anyway and the status line reads `UNKNOWN 93%` for a session that
+        has been idle since the last reset, and the prompt hook tells the manager to
+        assume the window is spent. `wait.effective_used` already counts this as 0%.
+        """
+        window = self.five_hour
+        if window is None:
+            return False
+        remaining = window.resets_in_seconds
+        return remaining is not None and remaining <= 0
+
+    @property
+    def seven_day_reset_passed(self) -> bool:
+        window = self.seven_day
+        if window is None:
+            return False
+        remaining = window.resets_in_seconds
+        return remaining is not None and remaining <= 0
+
+    @property
     def _five_hour_band(self) -> str:
         """The band the five-hour window alone would give, before the weekly window
         gets a say. Kept separate so `seven_day_binding` can tell "the week made this
@@ -259,18 +284,38 @@ class Quota:
         return band
 
     @property
+    def _base_band(self) -> str:
+        """The band before the weekly window gets a say, and what `seven_day_binding`
+        compares against.
+
+        Compared against `_base_band` rather than `_five_hour_band` so a passed reset
+        does not read as the week having made things worse: an old 93% in a window
+        that has since reset is a *reset* window, and blaming the week for it is the
+        misreading that sends the manager into a caution it does not need.
+        """
+        if self.five_hour_reset_passed:
+            return GREEN
+        return self._five_hour_band
+
+    @property
     def band(self) -> str:
-        if self.freshness in ("unknown", "never"):
+        if self.five_hour is None or self.freshness == "never":
             return UNKNOWN
-        if self.five_hour is None:
+        # Staleness alone stops meaning unknown once the reset has passed: the window
+        # is empty by definition whatever its age, and the first API response of the
+        # new window brings a real number. Before the reset a stale reading still has
+        # to be treated as unknown -- a frozen 30% can be a real 90%.
+        if self.freshness == "unknown" and not self.five_hour_reset_passed:
             return UNKNOWN
 
-        band = self._five_hour_band
+        band = self._base_band
 
         # The weekly window can be the binding constraint even when the five-hour one
         # is clear; never report more headroom than the tighter of the two. Applied in
-        # ascending tiers rather than one cliff -- see SEVEN_DAY_ESCALATION.
-        if self.seven_day is not None:
+        # ascending tiers rather than one cliff -- see SEVEN_DAY_ESCALATION. A weekly
+        # window whose own reset has passed is a new, empty week, so the percentage
+        # left over from the last one must not tighten anything.
+        if self.seven_day is not None and not self.seven_day_reset_passed:
             used7 = self.seven_day.used_percentage
             for ceiling, mapping in SEVEN_DAY_ESCALATION:
                 if used7 >= ceiling:
@@ -285,7 +330,7 @@ class Quota:
         `summary()`: a number that changed nothing is not worth a sentence."""
         if self.five_hour is None or self.seven_day is None:
             return False
-        return self.band != self._five_hour_band
+        return self.band != self._base_band
 
     @property
     def policy(self) -> dict[str, Any]:
@@ -295,29 +340,40 @@ class Quota:
         """One line, cheap enough to inject into context on every prompt."""
         if self.five_hour is None:
             return f"quota unknown ({self.freshness})"
-        parts = [f"{self.five_hour.used_percentage:.0f}% of the 5h window used"]
-        remaining = self.five_hour.resets_in_seconds
-        if remaining and remaining > 0:
-            parts.append(f"resets in {remaining / 3600:.1f}h")
-        projected = self.projected_at_reset
-        if projected is not None:
-            parts.append(f"on track for {projected:.0f}%")
-        if self.freshness != "live":
-            parts.append(f"reading is {self.freshness}")
+        if self.five_hour_reset_passed:
+            # The percentage, the burn-rate projection and the "reading is unknown"
+            # all describe a window that no longer exists. What is true is the one
+            # thing that is: it reset, and nothing has been measured since.
+            when = _local_reset_time(self.five_hour)
+            parts = [f"5h window reset at {when} -- no reading since" if when is not None
+                     else "5h window reset -- no reading since"]
+        else:
+            parts = [f"{self.five_hour.used_percentage:.0f}% of the 5h window used"]
+            remaining = self.five_hour.resets_in_seconds
+            if remaining and remaining > 0:
+                parts.append(f"resets in {remaining / 3600:.1f}h")
+            projected = self.projected_at_reset
+            if projected is not None:
+                parts.append(f"on track for {projected:.0f}%")
+            if self.freshness != "live":
+                parts.append(f"reading is {self.freshness}")
         if self.seven_day is not None:
-            seven = f"7d {self.seven_day.used_percentage:.0f}% used"
-            # Only when there is a real future moment to point at: a reset already in the
-            # past is a stale reading, not a schedule worth repeating.
-            when = _local_reset_time(self.seven_day)
-            left = self.seven_day.resets_in_seconds
-            if when is not None and left is not None and left > 0:
-                seven += f", resets {when} (in {format_left(left)})"
-            projected7 = self.seven_day_projected_at_reset
-            if projected7 is not None:
-                seven += f", on pace for {projected7:.0f}%"
-            if self.seven_day_binding:
-                seven += " -- the tighter window"
-            parts.append(seven)
+            if self.seven_day_reset_passed:
+                parts.append("7d window reset -- no reading since")
+            else:
+                seven = f"7d {self.seven_day.used_percentage:.0f}% used"
+                # Only when there is a real future moment to point at: a reset already
+                # in the past is a stale reading, not a schedule worth repeating.
+                when = _local_reset_time(self.seven_day)
+                left = self.seven_day.resets_in_seconds
+                if when is not None and left is not None and left > 0:
+                    seven += f", resets {when} (in {format_left(left)})"
+                projected7 = self.seven_day_projected_at_reset
+                if projected7 is not None:
+                    seven += f", on pace for {projected7:.0f}%"
+                if self.seven_day_binding:
+                    seven += " -- the tighter window"
+                parts.append(seven)
         return f"[{self.band}] " + ", ".join(parts)
 
 
