@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from ruti import install, modes, quota, sessions, wait
 from ruti.hooks import user_prompt_submit, wait_gate
 
@@ -140,3 +142,38 @@ def test_install_registers_the_three_wait_hooks():
     # reinstalling replaces rather than stacks
     again = install.desired_settings(settings)
     assert len(again["hooks"]["Stop"]) == 1
+
+
+# ------------------------------------------------------ Opus in ORANGE, with wait on
+
+
+@pytest.mark.parametrize("band, wait_on, opus", [
+    (quota.ORANGE, True, True),
+    (quota.ORANGE, False, False),
+    # Only ORANGE: UNKNOWN has no live reading for wait mode to pause on, and RED is
+    # too close to 95% for the difference to matter.
+    (quota.UNKNOWN, True, False),
+    (quota.RED, True, False),
+])
+def test_wait_mode_lifts_the_no_opus_rule_in_orange_only(band, wait_on, opus):
+    assert ("opus permitted" in quota.manager(band, wait=wait_on)) is opus
+
+
+def test_outside_wait_mode_the_band_policy_is_unchanged():
+    for band, policy in quota.BAND_POLICY.items():
+        assert quota.manager(band, wait=False) == policy["manager"]
+
+
+@pytest.mark.parametrize("wait_on, expected", [
+    (True, "Manager for this band: opus permitted"),
+    (False, "Manager for this band: sonnet, no opus"),
+])
+def test_the_prompt_hook_names_the_manager_wait_mode_allows(monkeypatch, tmp_path,
+                                                            wait_on, expected):
+    monkeypatch.setattr(sessions, "current_session_id", lambda: SID)
+    monkeypatch.setattr(user_prompt_submit, "MEMO_FILE", tmp_path / "memo.json")
+    monkeypatch.setattr(quota, "load", lambda: snap(72))
+    assert snap(72).band == quota.ORANGE
+    modes.set_wait(SID, wait_on)
+    context, _ = user_prompt_submit.build_context("")
+    assert expected in context

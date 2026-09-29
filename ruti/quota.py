@@ -97,6 +97,23 @@ BAND_POLICY: dict[str, dict[str, Any]] = {
     },
 }
 
+# ORANGE keeps Opus off the manager because the five-hour limit is a hard stop on this
+# account: a manager that runs out strands every task at once. Wait mode takes that away
+# -- at 95% it checkpoints and the session resumes after the reset -- so with it on the
+# cost of Opus in ORANGE is a pause, not a stranded session. Only ORANGE: RED and
+# CRITICAL are too close to 95% for it to matter, and UNKNOWN has no live reading, which
+# is exactly what wait mode needs to know when to pause.
+WAIT_MANAGER: dict[str, str] = {
+    ORANGE: "opus permitted -- wait mode pauses at 95% instead of hitting the hard stop",
+}
+
+
+def manager(band: str, *, wait: bool) -> str:
+    """Who may manage the session in this band, given whether wait mode is on."""
+    if wait and band in WAIT_MANAGER:
+        return WAIT_MANAGER[band]
+    return str(BAND_POLICY[band]["manager"])
+
 
 @dataclass(frozen=True)
 class Window:
