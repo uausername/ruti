@@ -147,7 +147,9 @@ before 95%, start nothing large, keep the task list current. At 95% every tool c
 except `ruti` and TodoWrite is refused -- write a checkpoint in your reply (done, in
 progress and where it stopped, remaining steps in order) and end the turn. The `Stop`
 hook then waits out the reset and resumes the session with an instruction to continue
-from that checkpoint. `ruti mode wait off` releases a pause.
+from that checkpoint. `ruti mode wait off` releases a pause. Because running out then
+costs a pause rather than the session, wait mode also lifts ORANGE's "no Opus" rule;
+the prompt hook's "Manager for this band" line says which applies.
 
 ### Default modes
 
@@ -203,8 +205,10 @@ a scoring accident.
 
 A hook injects the current band on each prompt, so act on what it says rather than
 guessing. In outline: **GREEN** — delegate bulk generation freely. **YELLOW** —
-delegate aggressively, drop effort for planning. **ORANGE** — no Opus, everything
-mechanical goes to a non-Anthropic executor, no speculative repo exploration.
+delegate aggressively, drop effort for planning. **ORANGE** — no Opus (unless wait
+mode is on: it pauses at 95% instead of hitting the hard stop, so Opus may keep
+managing), everything mechanical goes to a non-Anthropic executor, no speculative repo
+exploration.
 **RED** — finish what is open, write a handoff, warn the user. **CRITICAL** — stop.
 **UNKNOWN** — the reading is stale; assume the window is mostly spent.
 

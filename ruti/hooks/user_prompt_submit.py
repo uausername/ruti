@@ -70,8 +70,9 @@ def build_context(prompt: str | None = None, cwd: str | None = None) -> tuple[st
     if full:
         policy = snapshot.policy
         executors = ", ".join(policy["anthropic_executors"]) or "none"
+        waiting = bool(modes.current(session_id).get("wait"))
         line += (
-            f"\nManager for this band: {policy['manager']}. "
+            f"\nManager for this band: {quota.manager(band, wait=waiting)}. "
             f"Anthropic executors permitted: {executors}. "
             f"{policy['guidance']} "
             "Call `ruti route --kind ... --files N --loc N --json` before starting "
