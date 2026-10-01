@@ -32,13 +32,37 @@ FACTS_TTL_SECONDS = 30.0
 HTTP_TIMEOUT = 0.4
 
 BAND_COLOUR = {
-    quota.GREEN: "32", quota.YELLOW: "33", quota.ORANGE: "33",
-    quota.RED: "31", quota.CRITICAL: "31", quota.UNKNOWN: "35",
+    quota.GREEN: "32", quota.YELLOW: "33", quota.ORANGE: "38;5;208",
+    quota.RED: "31", quota.CRITICAL: "1;31", quota.UNKNOWN: "35",
 }
+
+# (ceiling, colour) per tier, ascending. A projection gets the highest tier it lands
+# under: 75 and 90 are where quota.SEVEN_DAY_ESCALATION escalates the band, so crossing
+# either changes what the manager is allowed to do; 100 is the week running out.
+SEVEN_DAY_ARROW_TIERS: tuple[tuple[float, str], ...] = (
+    (75.0, "33"), (90.0, "38;5;208"), (100.0, "31"),
+)
+# No tiers for five hours: the five-hour window resets on its own, so the only overrun
+# that means anything is one that lands past 100 -- the window runs out before its reset.
+FIVE_HOUR_ARROW_TIERS: tuple[tuple[float, str], ...] = ((100.0, "31"),)
 
 
 def _colour(text: str, code: str) -> str:
     return f"\x1b[{code}m{text}\x1b[0m"
+
+
+def _arrow(used: float, projected: float | None,
+           tiers: tuple[tuple[float, str], ...]) -> str:
+    """`↗91%` in the colour of the highest tier the projection crosses, else "".
+
+    Strictly between the current number and the projection: a tier the window has
+    already passed says nothing about where it lands, and a projection at or below where
+    it already is is not a projection at all.
+    """
+    if projected is None:
+        return ""
+    reached = [colour for ceiling, colour in tiers if used < ceiling <= projected]
+    return _colour(f"↗{projected:.0f}%", reached[-1]) if reached else ""
 
 
 def _get(url: str) -> Any:
@@ -154,27 +178,36 @@ def _route_segment(session_id: str | None) -> tuple[str | None, dict[str, Any] |
 
 def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
     segments: list[str] = []
+    binding = snapshot.seven_day_binding
 
     if snapshot.five_hour is not None:
         band = snapshot.band
+        # Colour means "the band, and the window that caused it" -- nothing else. Hence
+        # the band is a segment of its own, and each window below wears its colour only
+        # when it is the reason the band is this tight. As one segment, `YELLOW 3% 5h`
+        # painted the 3% in a colour the week had chosen.
+        # "(7d)" when the week, not this window, is why the band is this tight.
+        segments.append(_colour(f"{band}(7d)" if binding else band,
+                                BAND_COLOUR.get(band, "37")))
         if snapshot.five_hour_reset_passed:
             # The percentage belongs to a window that has already reset and been idle
             # since, so it is the one number here that is certainly wrong. Say that
             # instead -- and drop the freshness marker with it, since the band is no
-            # longer qualified by the reading it came from.
-            segments.append(_colour(f"{band} 5h reset", BAND_COLOUR.get(band, "37")))
+            # longer qualified by the reading it came from. Plain: nothing binds, so
+            # there is nothing for a colour to say.
+            segments.append("5h reset")
         else:
             used = snapshot.five_hour.used_percentage
             text = f"{used:.0f}% 5h"
             remaining = snapshot.five_hour.resets_in_seconds
             if remaining and remaining > 0:
                 text += f"/{remaining / 3600:.1f}h"
-            # Colour carries the band for anyone who can see it; the word carries it for
-            # everyone else, and for a terminal that strips escapes.
-            # "(7d)" when the weekly window, not this one, is why the band is this tight:
-            # "YELLOW 3% 5h" otherwise reads as a band that does not match its own number.
-            label = f"{band}(7d)" if snapshot.seven_day_binding else band
-            segments.append(_colour(f"{label} {text}", BAND_COLOUR.get(band, "37")))
+            arrow = _arrow(used, snapshot.projected_at_reset, FIVE_HOUR_ARROW_TIERS)
+            # Coloured only when the five-hour window is what set the band. When the week
+            # did, this number is not what the colour is about, and painting it the same
+            # is what read as a 3% window being tight.
+            window = text if binding else _colour(text, BAND_COLOUR.get(band, "37"))
+            segments.append(f"{window} {arrow}" if arrow else window)
             if snapshot.freshness != "live":
                 # The band above was computed from this same stale reading, so the
                 # number can be quietly wrong at the exact moment it is glanced at for
@@ -197,14 +230,13 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
             remaining = snapshot.seven_day.resets_in_seconds
             if remaining and remaining > 0:
                 text += f"/{quota.format_left(remaining)}"
-            if snapshot.seven_day_binding:
-                # It is the reason `band` is this tight, not merely a number alongside a
-                # worse one -- share the band's own colour so that reads at a glance.
-                segments.append(_colour(text, BAND_COLOUR.get(snapshot.band, "37")))
-            elif pct >= 60.0:
-                segments.append(_colour(text, "33"))
-            else:
-                segments.append(text)
+            arrow = _arrow(pct, snapshot.seven_day_projected_at_reset, SEVEN_DAY_ARROW_TIERS)
+            # Only the week that set the band wears its colour. The old `pct >= 60.0`
+            # amber painted a window yellow that was changing nothing -- that is a
+            # number, not a warning.
+            window = (_colour(text, BAND_COLOUR.get(snapshot.band, "37"))
+                      if binding else text)
+            segments.append(f"{window} {arrow}" if arrow else window)
 
     model = (payload.get("model") or {}).get("display_name")
     effort = (payload.get("effort") or {}).get("level")
@@ -227,6 +259,15 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
                     segments.append(_colour("->" + target, "36"))
     except Exception:
         pass
+
+    # Same number `/context` reports -- how full the current turn's context window is,
+    # not to be confused with the five-hour subscription budget above. Before the modes
+    # because it is about this turn rather than about the session's settings, and because
+    # it belongs on the line that is never cut off.
+    ctx_used = (payload.get("context_window") or {}).get("used_percentage")
+    if ctx_used is not None:
+        colour = "31" if ctx_used >= 85 else "33" if ctx_used >= context_watch.WARN_PERCENT else "32"
+        segments.append(_colour(f"{ctx_used:.0f}% ctx", colour))
 
     # Session task modes, shown only while active. Never let this raise -- a status
     # line that throws is rendered as a traceback.
@@ -282,13 +323,6 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
             segments.append(_colour("jev", "32") if jev_on else _colour("jev", "90"))
     except Exception:
         pass
-
-    # Same number `/context` reports -- how full the current turn's context window is,
-    # not to be confused with the five-hour subscription budget above.
-    ctx_used = (payload.get("context_window") or {}).get("used_percentage")
-    if ctx_used is not None:
-        colour = "31" if ctx_used >= 85 else "33" if ctx_used >= context_watch.WARN_PERCENT else "32"
-        segments.append(_colour(f"{ctx_used:.0f}% ctx", colour))
 
     # What the session is allowed and set to is one line, the state of the machine is
     # another: together they no longer fit a terminal's width, and the right-hand end is
@@ -363,15 +397,35 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
 
     # The status line cannot afford to run `doctor` itself (schtasks calls, a TLS
     # chain walk -- seconds, not the milliseconds a repaint budget allows), so this
-    # reads whatever the session-start hook last cached, passively and without a TTL.
-    # Silent when there is no cached report yet, or when it was clean.
+    # reads whatever the last run cached, passively and without a TTL. The prompt hook
+    # keeps that run current in the background, so the badge has to say how old it is:
+    # a problem from an hour ago and one the refresh has not reached yet are not the
+    # same news. Silent when there is nothing to show.
     try:
         from . import doctor
 
-        cached = doctor.cached()
-        if cached and cached.get("problems"):
-            colour = "31" if cached["worst"] == doctor.BAD else "33"
-            segments.append(_colour(f"doctor:{len(cached['problems'])}", colour))
+        report = doctor.cached() or {}
+        problems = [
+            p for p in report.get("problems") or []
+            # A stale status-line reading is its own proof the line is painting, and a
+            # proxy that line 2 already reports live needs no second badge.
+            if p.get("name") != "statusline"
+            and not (p.get("name") == "proxy" and facts.get("proxy"))
+        ]
+        if problems:
+            age = max(0.0, time.time() - float(report.get("at") or 0))
+            if age < 3600:
+                when = f"{int(age // 60)}m"
+            elif age < 86400:
+                when = f"{int(age // 3600)}h"
+            else:
+                when = f"{int(age // 86400)}d"
+            # One problem names itself; several are a count, because there is no room
+            # for a list and the count is the part worth reading at a glance.
+            what = problems[0].get("name") or "?"
+            label = what if len(problems) == 1 else str(len(problems))
+            colour = "31" if any(p.get("status") == doctor.BAD for p in problems) else "33"
+            segments.append(_colour(f"doctor:{label} {when}", colour))
     except Exception:
         pass
 

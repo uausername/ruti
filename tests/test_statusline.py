@@ -113,13 +113,16 @@ def test_seven_day_is_plain_below_60_percent():
     assert "\x1b[33m40% 7d" not in line and "\x1b[35m40% 7d" not in line
 
 
-def test_seven_day_is_amber_between_60_and_the_escalation_tier():
-    # 86400 s exactly sits on the days/hours boundary, where `fromtimestamp` rounds to
-    # the nearest microsecond and `now()` truncates -- which side it lands on is not
-    # this test's business. A second under the boundary deterministically takes hours.
+def test_seven_day_is_plain_while_it_changes_nothing_even_past_60_percent():
+    # It used to go amber at 60% "just in case". Colour now means the band and the
+    # window that caused it, and a 65% week against a 10% five-hour window causes
+    # nothing: the band is GREEN, so painting the week yellow was a warning about a
+    # number nobody had to act on.
     line = statusline.render({}, five_hour_quota(used=10.0, seven_day=65.0,
                                                  seven_day_in=86400.0 - 1))
-    assert "\x1b[33m65% 7d/24.0h\x1b[0m" in line
+    assert "65% 7d/24.0h" in line
+    assert "\x1b[33m65% 7d/24.0h\x1b[0m" not in line
+    assert "\x1b[32mGREEN\x1b[0m" in line
 
 
 def test_seven_day_takes_the_bands_own_colour_once_it_is_the_reason_band_is_tight():
@@ -200,10 +203,11 @@ def test_a_passed_five_hour_reset_shows_a_reset_rather_than_a_stale_percentage()
     # reading, so both go.
     snap = passed_five_hour()
     assert snap.freshness == "unknown" and snap.five_hour_reset_passed is True
-    line = statusline.render({}, snap)
-    assert "GREEN 5h reset" in plain(line)
-    assert "93%" not in plain(line)
-    assert "~unknown" not in plain(line)
+    line = plain(statusline.render({}, snap))
+    assert "GREEN" in line
+    assert "5h reset" in line
+    assert "93%" not in line
+    assert "~unknown" not in line
 
 
 def test_a_passed_weekly_reset_renders_as_a_bare_reset():
@@ -233,13 +237,15 @@ def test_a_cached_warn_report_shows_an_amber_count():
         doctor.Check("local-route", doctor.WARN, "stale"),
     ]).cache()
     line = statusline.render({"session_id": "s1"}, five_hour_quota())
-    assert "\x1b[33mdoctor:2\x1b[0m" in line
+    # Several problems are a count, and the age is part of the segment: the refresh that
+    # would clear them runs from the prompt hook, not from the status line.
+    assert re.search(r"\x1b\[33mdoctor:2 \d+[mhd]\x1b\[0m", line)
 
 
 def test_a_cached_bad_report_shows_a_red_count():
     doctor.Report(checks=[doctor.Check("lmstudio", doctor.BAD, "down hard")]).cache()
     line = statusline.render({"session_id": "s1"}, five_hour_quota())
-    assert "\x1b[31mdoctor:1\x1b[0m" in line
+    assert "\x1b[31mdoctor:lmstudio " in line
 
 
 # ----------------------------------------------------------------------- jev spend
@@ -298,9 +304,11 @@ def test_the_budget_is_one_line_and_the_rest_of_the_state_another():
 
 
 def test_a_weekly_window_that_sets_the_band_says_so():
-    # 3% of the five hours, and the week 83% spent: YELLOW is the week's doing.
+    # 3% of the five hours, and the week 83% spent: YELLOW is the week's doing. The band
+    # is its own segment, so the 3% beside it is no longer painted with a colour the
+    # five-hour window did not earn.
     line = plain(statusline.render({"session_id": "s1"}, five_hour_quota(3.0, seven_day=83.0)))
-    assert "YELLOW(7d) 3% 5h" in line
+    assert "YELLOW(7d)" in line and "3% 5h" in line
     # Nothing to explain when the five-hour window is what the band follows.
     line = plain(statusline.render({"session_id": "s1"}, five_hour_quota(60.0)))
     assert "(7d)" not in line
