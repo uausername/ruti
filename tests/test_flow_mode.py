@@ -355,7 +355,7 @@ def no_live_facts(monkeypatch):
 def test_the_status_line_shows_flow_and_then_the_arrow(no_live_facts):
     on()
     line = ANSI.sub("", statusline.render({"session_id": SID}, snap(10)))
-    assert " flow " in f" {line} ".replace("·", " ")
+    assert " flow " in f" {line} ".replace("·", " ").replace("\n", " ")
     modes.set_flow_state(SID, {**modes.flow_state(SID), "launched": True})
     assert "flow→" in statusline.render({"session_id": SID}, snap(10))
 
