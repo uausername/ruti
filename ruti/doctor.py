@@ -41,6 +41,19 @@ class Check:
     detail: str = ""
     fix: Callable[[], str] | None = None
     fix_label: str = ""
+    # True for a finding that is only true because of *when* the run happened, and so
+    # must not outlive that moment. The status line's own last reading being stale is
+    # expected at session start (no line has run since the last session ended) and is
+    # not expected an hour later, mid-session, when it means the line really stopped.
+    expected_at_start: bool = False
+
+
+def _worst(checks: list[Check]) -> str:
+    if any(c.status == BAD for c in checks):
+        return BAD
+    if any(c.status == WARN for c in checks):
+        return WARN
+    return OK
 
 
 @dataclass
@@ -49,31 +62,36 @@ class Report:
 
     @property
     def worst(self) -> str:
-        if any(c.status == BAD for c in self.checks):
-            return BAD
-        if any(c.status == WARN for c in self.checks):
-            return WARN
-        return OK
+        return _worst(self.checks)
 
     @property
     def fixable(self) -> list[Check]:
         return [c for c in self.checks if c.fix and c.status != OK]
 
-    def cache(self) -> None:
+    def cache(self, *, skip_expected: bool = False) -> None:
         """Persist enough of this report for the status line to show it later.
 
-        The status line cannot call `run_checks()` itself -- several checks here walk
-        `schtasks` or a TLS chain, seconds of work that would freeze the interface on
-        the repaint that hit an expired cache. So instead this writes once, right after
-        the session-start hook already paid the cost, and the status line only ever
-        reads what lands here -- passively, with no TTL of its own to expire.
+        Every run writes it -- the session-start hook, a `ruti doctor` from the command
+        line, and the background refresh the prompt hook starts -- so a problem fixed by
+        hand stops being shown immediately rather than at the next session. The status
+        line cannot call `run_checks()` itself (several checks here walk `schtasks` or a
+        TLS chain, seconds of work that would freeze the interface on the repaint that
+        hit an expired cache). So it only ever reads what lands here, passively, with no
+        TTL of its own to expire.
+
+        `skip_expected` drops the findings that are true only because of when the run
+        happened -- see `Check.expected_at_start` -- and grades what remains, so the
+        expected one neither reaches the badge nor the session that just started.
         """
         from .config import STATE_ROOT, write_json
 
-        problems = [c for c in self.checks if c.status != OK]
+        problems = [
+            c for c in self.checks
+            if c.status != OK and not (skip_expected and c.expected_at_start)
+        ]
         write_json(STATE_ROOT / "doctor-last.json", {
             "at": time.time(),
-            "worst": self.worst,
+            "worst": _worst(problems),
             "problems": [{"name": c.name, "status": c.status} for c in problems],
         })
 
@@ -89,6 +107,65 @@ def cached() -> dict | None:
 
     data = read_json(STATE_ROOT / "doctor-last.json", default=None)
     return data if isinstance(data, dict) else None
+
+
+# How old a cached report may get before it is worth running the checks again. Long
+# enough that the checks' own cost is amortised over many prompts, short enough that a
+# problem found is still relevant by the time the badge says how old it is.
+REFRESH_AFTER = 3600      # seconds; older snapshots are re-checked
+REFRESH_LOCK_TTL = 600    # a lock older than this is a crashed run, not a running one
+
+
+def refresh_in_background(*, now: float | None = None, spawn=subprocess.Popen) -> bool:
+    """Start a detached `python -m ruti.doctor` when the cached report has gone stale.
+
+    Called from the prompt hook, which runs once per prompt -- the status line runs
+    every few seconds and cannot afford `run_checks()` at all (see `Report.cache`).
+    Returns True when a run was started, False when there was nothing to do, another
+    run holds the lock, or the spawn failed. Never raises: a health check that fails
+    must not touch the prompt.
+    """
+    try:
+        # Resolved inside the function, like `cache()`/`cached()` do, so a test's
+        # patched STATE_ROOT applies here too.
+        from .config import STATE_ROOT
+
+        moment = time.time() if now is None else now
+        report = cached()
+        if report and moment - float(report.get("at") or 0) < REFRESH_AFTER:
+            return False
+
+        lock = STATE_ROOT / "doctor-refresh.lock"
+        # A lock with no run behind it is a crashed run, not a running one -- after the
+        # TTL it is stale and overwritten rather than waited on forever.
+        if lock.exists() and moment - lock.stat().st_mtime < REFRESH_LOCK_TTL:
+            return False
+        STATE_ROOT.mkdir(parents=True, exist_ok=True)
+        lock.write_text(str(moment), encoding="utf-8")
+
+        # pythonw.exe never opens a console, and launching through a shell is what the
+        # antivirus on this machine quarantines -- so the interpreter directly, with no
+        # window and no PowerShell.
+        interpreter = sys.executable
+        windowless = Path(interpreter).with_name("pythonw.exe")
+        if windowless.exists():
+            interpreter = str(windowless)
+        spawn(
+            [interpreter, "-m", "ruti.doctor"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            cwd=str(Path.home()),
+            creationflags=(
+                getattr(subprocess, "DETACHED_PROCESS", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            ),
+        )
+        return True
+    except Exception:
+        return False
 
 
 # --------------------------------------------------------------------------- fixes
@@ -973,6 +1050,13 @@ def _check_statusline() -> Check:
             "statusline", WARN,
             f"last reading is stale ({snapshot.freshness})",
             detail="normal between sessions; routing assumes ORANGE until it refreshes",
+            # Expected here, and only here: nothing has painted the line since the last
+            # session ended. Said once, to a user who did not ask, and shown on the
+            # status line for the rest of this session as `doctor:1` -- for a condition
+            # that is over before the second prompt. Mid-session the same reading is a
+            # real warning, which is why the expected flag is a property of the run and
+            # not of the check.
+            expected_at_start=True,
         )
     return Check(
         "statusline", OK,
@@ -1050,3 +1134,20 @@ def run_checks() -> Report:
                       f"check failed to run: {type(exc).__name__}: {exc}")
             )
     return report
+
+
+def _refresh_main() -> int:
+    """`python -m ruti.doctor`: the background run `refresh_in_background` starts."""
+    from .config import STATE_ROOT
+
+    try:
+        run_checks().cache()
+    finally:
+        # Unlocked whatever happened, including a run that crashed: the lock's age, not
+        # the process, is what tells the next prompt whether this run is still going.
+        (STATE_ROOT / "doctor-refresh.lock").unlink(missing_ok=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_refresh_main())

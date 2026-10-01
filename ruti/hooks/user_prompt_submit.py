@@ -309,6 +309,16 @@ def main() -> int:
         return 0
 
     json.dump(output, sys.stdout)
+    # Once per prompt, and only after the output is written: this hook sits between the
+    # user pressing enter and the model reading anything, so anything it does has to
+    # come after the answer. The status line is where this would otherwise belong, and
+    # it cannot -- it repaints every few seconds and doctor costs seconds.
+    try:
+        from ruti import doctor
+
+        doctor.refresh_in_background()
+    except Exception:
+        pass
     return 0
 
 

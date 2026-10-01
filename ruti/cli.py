@@ -2059,6 +2059,14 @@ def doctor(fix: bool, as_json: bool) -> None:
                 ui.bad(f"  fix failed: {type(exc).__name__}: {exc}")
         report = doctor_mod.run_checks()
 
+    # Written from here too, not only from the session-start hook: a problem fixed by
+    # hand should stop being shown on the status line now rather than at the next
+    # session. Kept unconditionally -- a stale warning kept, a fixed one cleared.
+    try:
+        report.cache()
+    except Exception:
+        pass
+
     if as_json:
         ui.emit_json(
             {

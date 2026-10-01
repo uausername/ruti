@@ -23,13 +23,17 @@ def build_report() -> tuple[str, str] | None:
     report = doctor.run_checks()
     # Cached unconditionally, healthy or not: the status line reads this passively
     # (`doctor.cached()`) and a stale BAD from a problem fixed since would otherwise
-    # sit there for the rest of the session.
+    # sit there for the rest of the session. The expected findings are the exception --
+    # see `Check.expected_at_start`: the status line's last reading is stale here by
+    # definition, and a `doctor:1` badge saying so would sit there all session for a
+    # condition the first repaint is about to clear.
     try:
-        report.cache()
+        report.cache(skip_expected=True)
     except Exception:
         pass
 
-    problems = [c for c in report.checks if c.status != doctor.OK]
+    problems = [c for c in report.checks
+                if c.status != doctor.OK and not c.expected_at_start]
     if not problems:
         return None
 
