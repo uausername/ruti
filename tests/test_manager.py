@@ -189,6 +189,19 @@ def test_the_hint_names_the_seat_and_then_debounces(monkeypatch):
     assert manager.prompt_hint("s1", "implement", 0.9, 0.5) is None
 
 
+def test_the_commands_are_on_separate_lines_and_the_model_is_told_to_say_them(monkeypatch):
+    monkeypatch.setattr(manager.quota, "load", lambda: Snap(quota.YELLOW))
+    modes.set_manager("s1", True)
+    manager.record_seat("s1", {**PAYLOAD, "model": {"id": "claude-opus-5-5"},
+                               "effort": {"level": "high"}})
+    note, shown = manager.prompt_hint("s1", "implement", 0.9, 0.5)
+    lines = [line.strip() for line in shown.splitlines()]
+    # Pasted on one line they read as a model called "sonnet /effort low".
+    assert "/model sonnet" in lines and any(line.startswith("/effort ") for line in lines)
+    assert not any("/model" in line and "/effort" in line for line in lines)
+    assert "Open your reply with this recommendation" in note
+
+
 # ------------------------------------------------------------------ the seat
 
 
@@ -232,9 +245,14 @@ def hook(monkeypatch, tmp_path):
 def test_the_hook_shows_the_seat_hint_to_the_user(hook, monkeypatch):
     monkeypatch.setattr(ups.manager, "prompt_hint",
                         lambda *_a, **_k: ("note", "shown to user"))
-    assert hook("x" * 200, None)["systemMessage"] == "shown to user"
+    output = hook("x" * 200, None)
+    assert output["systemMessage"] == "shown to user"
+    # `suppressOutput` hid the message in a live CLI session.
+    assert output["suppressOutput"] is False
 
 
 def test_the_hook_says_nothing_when_there_is_no_hint(hook, monkeypatch):
     monkeypatch.setattr(ups.manager, "prompt_hint", lambda *_a, **_k: None)
-    assert "systemMessage" not in hook("x" * 200, None)
+    output = hook("x" * 200, None)
+    assert "systemMessage" not in output
+    assert output["suppressOutput"] is True
