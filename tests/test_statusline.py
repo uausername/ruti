@@ -283,3 +283,24 @@ def test_render_never_raises_even_with_a_hostile_payload(monkeypatch):
     # try/except for exactly this reason.
     line = statusline.render({"session_id": "s1", "model": None, "effort": None}, five_hour_quota())
     assert isinstance(line, str) and line
+
+
+# ------------------------------------------------------------------- two lines, and why a band
+
+
+def test_the_budget_is_one_line_and_the_rest_of_the_state_another():
+    first, second = plain(statusline.render(
+        {"session_id": "s1", "context_window": {"used_percentage": 20},
+         "model": {"display_name": "Opus 5.5"}}, five_hour_quota())).split("\n")
+    # What the budget allows, on the line that must never be cut off.
+    assert "5h" in first and "ctx" in first and "Opus 5.5" in first
+    assert "proxy" in second and "5h" not in second
+
+
+def test_a_weekly_window_that_sets_the_band_says_so():
+    # 3% of the five hours, and the week 83% spent: YELLOW is the week's doing.
+    line = plain(statusline.render({"session_id": "s1"}, five_hour_quota(3.0, seven_day=83.0)))
+    assert "YELLOW(7d) 3% 5h" in line
+    # Nothing to explain when the five-hour window is what the band follows.
+    line = plain(statusline.render({"session_id": "s1"}, five_hour_quota(60.0)))
+    assert "(7d)" not in line

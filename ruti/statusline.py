@@ -171,7 +171,10 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
                 text += f"/{remaining / 3600:.1f}h"
             # Colour carries the band for anyone who can see it; the word carries it for
             # everyone else, and for a terminal that strips escapes.
-            segments.append(_colour(f"{band} {text}", BAND_COLOUR.get(band, "37")))
+            # "(7d)" when the weekly window, not this one, is why the band is this tight:
+            # "YELLOW 3% 5h" otherwise reads as a band that does not match its own number.
+            label = f"{band}(7d)" if snapshot.seven_day_binding else band
+            segments.append(_colour(f"{label} {text}", BAND_COLOUR.get(band, "37")))
             if snapshot.freshness != "live":
                 # The band above was computed from this same stale reading, so the
                 # number can be quietly wrong at the exact moment it is glanced at for
@@ -287,6 +290,11 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
         colour = "31" if ctx_used >= 85 else "33" if ctx_used >= context_watch.WARN_PERCENT else "32"
         segments.append(_colour(f"{ctx_used:.0f}% ctx", colour))
 
+    # What the session is allowed and set to is one line, the state of the machine is
+    # another: together they no longer fit a terminal's width, and the right-hand end is
+    # what got cut off -- so the end that is cut is the machine's, not the budget's.
+    budget, segments = segments, []
+
     facts = _refresh_facts()
     loaded = facts.get("loaded") or []
     if loaded:
@@ -367,7 +375,7 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
     except Exception:
         pass
 
-    return " · ".join(segments)
+    return "\n".join(" · ".join(line) for line in (budget, segments) if line)
 
 
 def main() -> int:
