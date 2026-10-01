@@ -390,12 +390,18 @@ def prompt_hint(session_id: str | None, kind: str, kind_confidence: float,
         if not remember_recommendation(session_id, best.seat):
             return None
         now = advice.current.label() if advice.current else "unknown"
-        message = (f"ruti manager: {kind} work -> {best.seat.label()} fits (now {now}). "
-                   f"Type: {'  '.join(best.seat.commands())}")
+        # One command per line: on one line they get pasted together, and
+        # `/model sonnet /effort low` is read as a model called "sonnet /effort low".
+        commands = "\n".join(f"  {command}" for command in best.seat.commands())
+        message = (f"ruti manager: {kind} work -> {best.seat.label()} fits "
+                   f"(now {now}). Type, one at a time:\n{commands}")
         if advice.switch["verdict"] == "boundary":
-            message += f" -- at the next boundary: {advice.switch['reason']}"
-        note = (f"{message} The user switches; you cannot -- say it once, then carry on "
-                "with the work.")
+            message += f"\n-- at the next boundary: {advice.switch['reason']}"
+        # The model is told to say it itself, as the first line of its reply: the hook's
+        # `systemMessage` was not shown in a live CLI session, and a recommendation
+        # nobody sees is one nobody acts on. Both routes carry the same text.
+        note = (f"{message}\nThe user switches; you cannot. Open your reply with this "
+                "recommendation, commands on separate lines, then carry on with the work.")
         return note, message
     except Exception:
         return None

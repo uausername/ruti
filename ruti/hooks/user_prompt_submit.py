@@ -64,6 +64,9 @@ def build_output(prompt: str | None = None, cwd: str | None = None) -> dict:
     }
     if user_message:
         output["systemMessage"] = user_message
+        # The same flag hid the message in a live CLI session, so a message that has to be
+        # seen goes out without it.
+        output["suppressOutput"] = False
     return output
 
 
