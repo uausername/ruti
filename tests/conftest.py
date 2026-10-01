@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from ruti import (config, context_watch, delegate, flow, ledger, modes, openrouter,
-                  rankings, sessions, usage)
+from ruti import (config, context_watch, delegate, flow, ledger, manager, modes,
+                  openrouter, rankings, sessions, usage)
 
 
 @pytest.fixture(autouse=True)
@@ -57,6 +57,9 @@ def isolated_state(tmp_path, monkeypatch):
     # Read by the prompt hook's rankings hint; the real one would make the hint depend
     # on whatever the machine running the suite last downloaded.
     monkeypatch.setattr(openrouter, "CATALOG_CACHE", tmp_path / "openrouter-catalog.json")
+
+    # Written by every `statusline.main()` and by the prompt hook's seat hint.
+    monkeypatch.setattr(manager, "SEATS_FILE", tmp_path / "seats.json")
     return tmp_path
 
 

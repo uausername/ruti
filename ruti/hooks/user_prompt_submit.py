@@ -7,6 +7,10 @@ The debounce is the point. An unconditional block of policy text on every prompt
 be a few hundred tokens times however many prompts a session has, which is a real leak
 in a tool whose entire purpose is to stop leaks. So: one line normally, and the full
 policy only when the band changes or occasionally as a reminder.
+
+The seat advice in manager mode goes to the user as well, as `systemMessage`: no hook
+can switch Claude Code's own model, so the only way to get the right seat is to show the
+user what to type. It is debounced per recommendation, not per prompt.
 """
 
 from __future__ import annotations
@@ -15,7 +19,7 @@ import json
 import sys
 import time
 
-from ruti import context_watch, jev, ledger, modes, quota, sessions
+from ruti import context_watch, jev, ledger, manager, modes, quota, sessions
 from ruti.config import STATE_ROOT, read_json, write_json
 
 MEMO_FILE = STATE_ROOT / "hook-memo.json"
@@ -38,6 +42,38 @@ HINT_TIMEOUT = 2.0
 
 
 def build_context(prompt: str | None = None, cwd: str | None = None) -> tuple[str, bool]:
+    """The injected context line, and whether this was one of the full restatements."""
+    return _build(prompt, cwd)[:2]
+
+
+def build_output(prompt: str | None = None, cwd: str | None = None) -> dict:
+    """The whole hook JSON, including the `systemMessage` the user is shown.
+
+    Two audiences, two fields: the context line goes into the model's window, and the
+    seat advice goes to the *user* as a visible message -- because the manager cannot
+    switch its own model, a recommendation it only reads is a recommendation nobody
+    acts on.
+    """
+    line, full, user_message = _build(prompt, cwd)
+    output = {
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": line,
+        },
+        "suppressOutput": True,
+    }
+    if user_message:
+        output["systemMessage"] = user_message
+    return output
+
+
+def _build(prompt: str | None, cwd: str | None) -> tuple[str, bool, str | None]:
+    """One pass over the prompt, for both outputs above.
+
+    Shared because the classification is the expensive half: it costs about 1.5s of
+    wall clock before the model reads anything, and the route hint and the manager hint
+    both want it. Asking once is the difference between one call and two.
+    """
     # A session-scoped `ruti off` means routing advice is not just unhelpful here, it's
     # actively wrong -- so replace the whole budget block with a one-line reminder
     # rather than layering it on top.
@@ -50,7 +86,7 @@ def build_context(prompt: str | None = None, cwd: str | None = None) -> tuple[st
                 "implementation work in-session. Run `ruti on` to resume delegation.")
         if context_note:
             line += "\n" + context_note
-        return line, False
+        return line, False, None
 
     snapshot = quota.load()
     memo = read_json(MEMO_FILE, default={}) or {}
@@ -98,18 +134,35 @@ def build_context(prompt: str | None = None, cwd: str | None = None) -> tuple[st
 
         line += "\n" + flow.prompt_note(session_id)
 
+    # Asked for once, here, rather than by each hint: both need it and it is the single
+    # most expensive thing this hook does -- so not at all when neither will use it.
+    outstanding = ledger.unfollowed_route(session_id)
+    manager_on = bool(modes.current(session_id).get("manager"))
+    guess = _classify_prompt(session_id, prompt) if manager_on or not outstanding else None
+
+    # The manager's own seat, and only when it is wrong for this work. Unlike the route
+    # hint below it is *not* suppressed by an unfollowed ranking: nagging about delegation
+    # says nothing about which model the session is on.
+    user_message = None
+    if guess is not None and manager_on:
+        if guess.kind_confidence >= HINT_MIN_CONFIDENCE:
+            seat_hint = manager.prompt_hint(session_id, guess.kind, guess.kind_confidence,
+                                            guess.difficulty)
+            if seat_hint is not None:
+                line += "\n" + seat_hint[0]
+                user_message = seat_hint[1]
+
     # A ranking that named a delegate and was never acted on is the one thing the
     # manager cannot see for itself: the advice scrolls out of context long before the
     # decision it was meant to inform is finished.
-    outstanding = ledger.unfollowed_route(session_id)
     if outstanding:
         line += (
             f"\nruti: the last `ruti route` recommended {outstanding['recommended']} for "
             f"{outstanding.get('kind') or 'this'} work and nothing has been delegated to "
             "it since -- delegate, or say why you are writing it in-session instead."
         )
-    else:
-        hint = _route_hint(session_id, prompt)
+    elif guess is not None:
+        hint = _route_hint(session_id, guess)
         if hint:
             line += "\n" + hint
 
@@ -118,10 +171,34 @@ def build_context(prompt: str | None = None, cwd: str | None = None) -> tuple[st
         "prompts_since_full": 0 if full else count,
         "at": time.time(),
     })
-    return line, full
+    return line, full, user_message
 
 
-def _route_hint(session_id: str | None, prompt: str | None) -> str:
+def _classify_prompt(session_id: str | None,
+                     prompt: str | None) -> "jev.Classification | None":
+    """The prompt's classification, or None for every reason not to ask.
+
+    The guards live in one place because both hints depend on exactly these: a prompt
+    too short to be a task, the classifier switched off or unconfigured, and a
+    blackholed endpoint whose timeout `urlopen` does not actually honour. The probe is
+    cached, and caches its failures for minutes, so an outage costs one slow prompt
+    rather than all of them.
+    """
+    try:
+        text = (prompt or "").strip()
+        if len(text) < MIN_PROMPT_CHARS:
+            return None
+        if not modes.current(session_id).get("jev", True) or not jev.configured():
+            return None
+        health = jev.probe()
+        if not health or not health.get("ok"):
+            return None
+        return jev.classify(text, timeout=HINT_TIMEOUT)
+    except Exception:
+        return None
+
+
+def _route_hint(session_id: str | None, guess: "jev.Classification") -> str:
     """Name the classification when a prompt looks like work nobody ranked.
 
     This is the one place the classifier earns its keep. The documented failure is not
@@ -132,22 +209,7 @@ def _route_hint(session_id: str | None, prompt: str | None) -> str:
     Everything here fails quiet. No key, the switch off, a slow endpoint, a prompt too
     short to be a task: all of them return "" and the prompt goes on untouched.
     """
-    prompt = (prompt or "").strip()
-    if len(prompt) < MIN_PROMPT_CHARS:
-        return ""
-    if not modes.current(session_id).get("jev", True) or not jev.configured():
-        return ""
-
-    # A blackholed endpoint outruns `urlopen`'s timeout -- that is per socket
-    # operation, not per call -- and on a dead network the hook measured three and a
-    # half seconds, on every prompt. The probe is cached, and caches its failures for
-    # minutes, so an outage costs one slow prompt rather than all of them.
-    health = jev.probe()
-    if not health or not health.get("ok"):
-        return ""
-
-    guess = jev.classify(prompt, timeout=HINT_TIMEOUT)
-    if guess is None or guess.kind_confidence < HINT_MIN_CONFIDENCE:
+    if guess.kind_confidence < HINT_MIN_CONFIDENCE:
         return ""
     # Small work is exactly what the skip rule is for; nagging about it would teach the
     # manager to ignore the line.
@@ -238,21 +300,12 @@ def main() -> int:
         pass
 
     try:
-        context, _ = build_context(prompt, cwd)
+        output = build_output(prompt, cwd)
     except Exception:
         # A hook that fails must not block the prompt.
         return 0
 
-    json.dump(
-        {
-            "hookSpecificOutput": {
-                "hookEventName": "UserPromptSubmit",
-                "additionalContext": context,
-            },
-            "suppressOutput": True,
-        },
-        sys.stdout,
-    )
+    json.dump(output, sys.stdout)
     return 0
 
 
