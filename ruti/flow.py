@@ -24,7 +24,9 @@ read an hour ago:
 The permission mode is carried over because the user chose that: a long autonomous task
 should not stall at the first prompt of the window it moved to. `MAX_HOPS` bounds the
 chain -- a flow that keeps handing off without finishing is a loop, not progress, and
-every hop spends the same five-hour window.
+every hop spends the same five-hour window. In manager mode the model and effort go with
+it, which is the one moment in ruti where a model switch costs nothing: the context has
+not been read yet.
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from . import context_watch, modes, wait
+from . import context_watch, manager, modes, wait
 from .config import STATE_ROOT, read_json, write_json
 
 FLOW_AT = context_watch.WARN_PERCENT
@@ -191,17 +193,39 @@ def stop(session_id: str, payload: dict[str, Any], *,
                                  f"not opening another. The handoff is at {path}."}
 
     cwd = str(meta.get("cwd") or payload.get("cwd") or os.getcwd())
+    # The one place the next session's seat is chosen without asking: a handoff is the
+    # clearest description of the work there will be, and a new session is the one
+    # moment a model switch is free. Anything that goes wrong -- mode off, no
+    # classifier, a band with nothing eligible -- launches exactly as it did before.
+    seat = _seat_for(session_id, path)
     try:
-        launch(path, cwd, payload.get("permission_mode"), spawn=spawn or subprocess.Popen)
+        launch(path, cwd, payload.get("permission_mode"), spawn=spawn or subprocess.Popen,
+               seat_args=seat.cli_args() if seat else None)
     except Exception as exc:
         return {"systemMessage": f"ruti flow: could not open a new session ({exc}). The "
                                  f"handoff is at {path} -- start `claude` in {cwd} and ask "
                                  "it to continue from that file."}
     message = (f"ruti flow: handed off -- a new session is opening in a new window (hop "
                f"{hop} of {MAX_HOPS}). This window can be closed.")
+    if seat is not None:
+        message += f" on {seat.label()}"
     if trusted(cwd) is False:
         message += " " + untrusted_note(cwd)
     return {"systemMessage": message}
+
+
+def _seat_for(session_id: str, handoff: Path) -> manager.Seat | None:
+    """The seat the handoff says the next session should open on, or None.
+
+    Never raises: a launch that failed over a seat recommendation would cost the user
+    the continuation itself, which is the one thing this hook exists to hand over.
+    """
+    try:
+        if not modes.current(session_id).get("manager"):
+            return None
+        return manager.seat_for_handoff(handoff.read_text(encoding="utf-8"), session_id)
+    except Exception:
+        return None
 
 
 def trusted(cwd: str) -> bool | None:
@@ -276,8 +300,12 @@ def _ps_quote(value: Any) -> str:
 
 
 def launcher_script(handoff: Path, cwd: str, permission_mode: str | None,
-                    claude: str, drop: list[str] | None = None) -> str:
+                    claude: str, drop: list[str] | None = None,
+                    seat_args: list[str] | None = None) -> str:
     args = ["--permission-mode", permission_mode] if permission_mode in PERMISSION_MODES else []
+    # After the permission mode, because it is the same kind of thing -- what the user
+    # chose for this session, carried into the next one -- and the seat is chosen for it.
+    args += list(seat_args or [])
     prompt = f"Continue the task from the ruti flow handoff in your context (file: {handoff})."
     # Removed here as well as from the spawn's environment: a window Windows Terminal
     # opens is not guaranteed to take the environment it was asked with.
@@ -294,7 +322,8 @@ def launcher_script(handoff: Path, cwd: str, permission_mode: str | None,
 
 
 def launch(handoff: Path, cwd: str, permission_mode: str | None, *,
-           spawn: Callable[..., Any] = subprocess.Popen) -> list[str]:
+           spawn: Callable[..., Any] = subprocess.Popen,
+           seat_args: list[str] | None = None) -> list[str]:
     """Open `claude` on the handoff in a new window; returns the argv it spawned."""
     script = handoff.with_suffix(".ps1")
     markers = session_markers()
@@ -302,7 +331,7 @@ def launch(handoff: Path, cwd: str, permission_mode: str | None, *,
     # and a Cyrillic directory name would arrive mangled.
     script.write_text(
         launcher_script(handoff, cwd, permission_mode, shutil.which("claude") or "claude",
-                        drop=markers),
+                        drop=markers, seat_args=seat_args),
         encoding="utf-8-sig", newline="\r\n",
     )
     shell = shutil.which("pwsh") or shutil.which("powershell") or "powershell"

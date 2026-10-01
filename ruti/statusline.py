@@ -21,7 +21,7 @@ import sys
 import time
 from typing import Any
 
-from . import context_watch, quota
+from . import context_watch, manager, quota
 from .config import LMSTUDIO_BASE, PROXY_BASE, STATE_ROOT, read_json, write_json
 
 FACTS_FILE = STATE_ROOT / "facts.json"
@@ -208,6 +208,23 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
     if model:
         segments.append(f"{model}{'/' + effort if effort else ''}")
 
+    # A seat the manager would rather this session be on, shown only while it differs
+    # from the one running -- it disappears the moment `/model` is typed, which is what
+    # makes it worth glancing at. Its own try/except because the mode check and the
+    # file read are both things a status line must survive.
+    try:
+        session_id = payload.get("session_id")
+        if session_id:
+            from . import modes
+
+            if modes.current(session_id).get("manager"):
+                target = manager.recommended(session_id)
+                current = manager.current_seat(session_id)
+                if target and (current is None or target != current.label()):
+                    segments.append(_colour("->" + target, "36"))
+    except Exception:
+        pass
+
     # Session task modes, shown only while active. Never let this raise -- a status
     # line that throws is rendered as a traceback.
     try:
@@ -387,6 +404,14 @@ def main() -> int:
             payload.get("session_id"),
             (payload.get("context_window") or {}).get("used_percentage"),
         )
+    except Exception:
+        pass
+
+    # Which model and effort this session is on, and how much context it carries: the
+    # input `manager.advise` needs to say whether the seat is wrong for the work. Its
+    # own try/except, because it is a separate caller with its own file to write.
+    try:
+        manager.record_seat(payload.get("session_id"), payload)
     except Exception:
         pass
 

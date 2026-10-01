@@ -176,6 +176,30 @@ session's modes in its context. At most five sessions in a chain. `ruti mode flo
 drops a handoff not yet launched. With flow on, this replaces the 50% advice in
 "Context window watch" -- hand off instead of offering `/compact`.
 
+### Manager mode
+
+`route` picks who does delegated work; `ruti manager` picks the seat this session
+itself runs on -- Claude model alias x effort -- from the task's kind and difficulty
+(`--kind`, `--describe`, `--difficulty`, as in `route`), the budget band and the seat the
+session is on now. Fable is left out unless `--fable` is passed: it bills usage credits.
+
+Claude Code gives no way to switch the running session's model from outside: no hook
+can return a model or effort, and `settings.json` edits are not picked up mid-session.
+So `ruti mode manager on` does what can be done:
+
+* The prompt hook classifies a substantial prompt (the same call the `route` hint
+  makes) and, when the seat is wrong for it, shows the user one line with the exact
+  `/model` and `/effort` to type -- once per change of recommendation, not on every
+  prompt. The status line shows the pending recommendation as `->sonnet/medium`.
+* A flow handoff opens the next session directly on the seat its next steps call for
+  (`claude --model ... --effort ...`): there it is fully automatic.
+
+You cannot type `/model` or `/effort` yourself; do not claim to have switched. When the
+line says **boundary** rather than **now**, the model switch re-reads the whole context
+uncached (the cache is per model, and Opus and Sonnet cache reads cost the same), so it
+pays off at the next handoff, `/compact` or new session, not mid-task. An effort-only
+change is always cheap.
+
 ### Standing a council
 
 `ruti mode council on|auto` turns the one-off `ruti council` command into a standing

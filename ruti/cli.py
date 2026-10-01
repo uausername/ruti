@@ -15,6 +15,7 @@ from . import usage as usage_mod
 from . import modes as modes_mod
 from . import openrouter as openrouter_mod
 from . import rankings as rankings_mod
+from . import manager as manager_mod
 from . import (jev, ledger, lmstudio, litellm_cfg, planner, quota, router, sessions, tls, ui,
                vram)
 from .config import ensure_dirs, file_lock, load_dotenv
@@ -698,6 +699,7 @@ def mode(ctx: click.Context, as_json: bool) -> None:
     ui.say(f"  council: {'[muted]off[/muted]' if council_level == 'off' else f'[ok]{council_level}[/ok]'}")
     ui.say(f"  wait   : {'[ok]on[/ok]' if state['wait'] else '[muted]off[/muted]'}")
     ui.say(f"  flow   : {'[ok]on[/ok]' if state['flow'] else '[muted]off[/muted]'}")
+    ui.say(f"  manager: {'[ok]on[/ok]' if state['manager'] else '[muted]off[/muted]'}")
     summary = modes_mod.active_summary(state)
     if summary:
         ui.say(f"\n[muted]active: {summary}[/muted]")
@@ -807,6 +809,25 @@ def mode_flow(state: str) -> None:
     # new window would sit on the trust question until someone is.
     if flow_mod.trusted(os.getcwd()) is False:
         ui.warn(flow_mod.untrusted_note(os.getcwd()))
+
+
+@mode.command("manager")
+@click.argument("state", type=click.Choice(["on", "off"]))
+def mode_manager(state: str) -> None:
+    """Rank the seat this session is on: model alias x effort, for the task and the
+    band. On: the prompt hook says which `/model` and `/effort` to type when the seat
+    is wrong for the work, and a flow handoff opens the next session on the right one.
+    It cannot switch the model itself -- only the user can."""
+    session_id = _session_or_die()
+    modes_mod.set_manager(session_id, state == "on")
+    if state == "off":
+        ui.ok("manager mode off -- no seat advice for this session")
+        return
+    ui.ok("manager mode on -- when the current seat is wrong for the work, you will be "
+          "told which `/model` and `/effort` the user should type")
+    ui.say("[muted]the model switch itself is the user's: no hook can change it, and a "
+           "switch re-reads the context uncached, so a change of model is asked for at "
+           "the next boundary[/muted]")
 
 
 @mode.command("jev")
@@ -1093,6 +1114,108 @@ def classify(description: tuple[str, ...], transport: str, as_json: bool) -> Non
            f"[muted]({guess.trivial_probability:.2f})[/muted]")
     ui.say(f"[muted]{guess.model} via {guess.transport}, {guess.latency_ms:.0f} ms, "
            f"${guess.cost_usd:.6f}[/muted]")
+
+
+# --------------------------------------------------------------------------- manager
+
+
+@main.command()
+@click.option("--kind", default=None,
+              type=click.Choice(["boilerplate", "implement", "refactor", "debug",
+                                 "analyze", "review", "security"]),
+              help="What sort of work the session is about to manage.")
+@click.option("--describe", default=None,
+              help="A sentence or two about the work. A classifier reads it for the "
+                   "kind and the difficulty, unless you passed --kind or --difficulty, "
+                   "which are taken on faith.")
+@click.option("--difficulty", type=float, default=None,
+              help="How much judgement the work demands, 0..1. Omitted, it comes from "
+                   "the kind, and from --describe where that is confident enough.")
+@click.option("--fable", is_flag=True,
+              help="Consider Fable. It is a strong seat, and it bills usage credits "
+                   "rather than subscription window, so it is ruled out without this.")
+@click.option("--json", "as_json", is_flag=True)
+def manager(kind: str | None, describe: str | None, difficulty: float | None,
+            fable: bool, as_json: bool) -> None:
+    """Rank the seats this session could manage on, and say whether to move off this
+    one. A seat is a model alias and an effort: `opus/high`, `haiku`."""
+    session_id = sessions.current_session_id()
+
+    notes: list[str] = []
+    guess = None
+    if describe and not _classifier_on():
+        notes = ["classifier off for this session (`ruti mode jev on` re-enables it)"]
+    elif describe:
+        guess = jev.classify(describe)
+        if guess is None:
+            notes = ["classifier unavailable, so the flags you passed stand unchanged"]
+
+    difficulty_source = "kind"
+    if difficulty is None:
+        difficulty_source = "kind"
+        if guess is not None and guess.difficulty_confidence >= manager_mod.DIFFICULTY_CONFIDENCE:
+            difficulty = guess.difficulty
+            difficulty_source = "jev"
+    elif guess is not None:
+        notes.append(f"difficulty: kept {difficulty:.2f} from --difficulty rather than the "
+                     f"guess {guess.difficulty:.2f} ({guess.difficulty_confidence:.2f})")
+
+    # The kind moves a seat between model families and a security block, so it is only
+    # taken from the guess where the guess is confident and you asserted nothing.
+    if kind is None:
+        if guess is not None and guess.kind_confidence >= manager_mod.KIND_CONFIDENCE:
+            kind = guess.kind
+            notes.append(f"kind: {guess.kind} ({guess.kind_confidence:.2f})")
+        else:
+            kind = "implement"
+            if guess is not None:
+                notes.append(f"kind: implement; the guess {guess.kind} "
+                             f"({guess.kind_confidence:.2f}) is not confident enough")
+    elif guess is not None:
+        notes.append(f"kind: kept {kind} from --kind rather than the guess "
+                     f"{guess.kind} ({guess.kind_confidence:.2f})")
+
+    result = manager_mod.advise(
+        kind=kind, difficulty=difficulty, session_id=session_id, allow_fable=fable,
+        difficulty_source=difficulty_source,
+    )
+    result_json = result.summary()
+    if notes:
+        result_json["classifier_notes"] = notes
+
+    if as_json:
+        ui.emit_json(result_json)
+        return
+
+    task = result_json["task"]
+    ui.say(f"[head]{result.band}[/head]  {ui.literal(str(quota.BAND_POLICY[result.band]['guidance']))}")
+    ui.say(f"[muted]task: {task['kind']}, difficulty {task['difficulty']} "
+           f"(needs {task['required']}, {task['source']})[/muted]")
+    now = result_json["current"]
+    ui.say(f"[muted]now: {now['seat'] if now else 'unknown -- no status-line reading yet'}[/muted]")
+
+    ui.heading("Seats")
+    for entry in result_json["ranked"][:8]:
+        if entry["eligible"]:
+            ui.say(f"  [ok]{entry['score']:.2f}[/ok]  {entry['seat']}  "
+                   f"[muted]cap {entry['capability']:.2f}, burn {entry['burn']:.2f}[/muted]")
+        else:
+            ui.say(f"  [bad]x[/bad]  {entry['seat']}  "
+                   f"[muted]{ui.literal(entry['blockers'][0])}[/muted]")
+
+    ui.heading("Advice")
+    best = result.best
+    if best is None:
+        ui.say(f"  [muted]{ui.literal(result.switch['reason'])}[/muted]")
+        return
+    ui.say(f"  Type: [head]{ui.literal('  '.join(best.seat.commands()))}[/head]")
+    verdict = result.switch["verdict"]
+    if verdict == "stay":
+        ui.say(f"  [ok]{ui.literal(result.switch['reason'])}[/ok]")
+    elif verdict == "boundary":
+        ui.say(f"  [warn]{ui.literal(result.switch['reason'])}[/warn]")
+    else:
+        ui.say(f"  [muted]{ui.literal(result.switch['reason'])}[/muted]")
 
 
 @main.command()

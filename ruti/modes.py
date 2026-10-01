@@ -12,7 +12,10 @@ verbal instruction does not.
 
 Three of the four save money or context. `council` is the exception -- it spends more
 on purpose -- which is why it is the only one that defaults to off and has an `auto`
-level that has to justify each convening before it happens.
+level that has to justify each convening before it happens. `manager` is the fifth and
+defaults to off for the same reason it is a switch at all: it puts a line in front of
+the user on every prompt whose recommendation has changed, and a session that has not
+asked for that should not get it.
 
 State rides in the same `sessions.json` as the on/off toggle, one record per
 session:
@@ -21,7 +24,7 @@ session:
                       "free": "off" | "soft" | "hard", "jev": bool,
                       "council": "off" | "on" | "auto", "wait": bool,
                       "wait_state": {...}, "flow": bool, "flow_state": {...},
-                      "at": <unix ts>}}
+                      "manager": bool, "at": <unix ts>}}
 
 `at` is refreshed on every write so `sessions.prune()` does not discard an active
 mode as if it were a stale toggle from a session long over.
@@ -56,9 +59,10 @@ COUNCIL_LEVELS: tuple[str, ...] = ("off", "on", "auto")
 # stop sending task descriptions off the machine without unsetting a key that the rest
 # of the toolchain shares.
 DEFAULTS: dict[str, Any] = {"coding": False, "free": "off", "jev": True,
-                            "council": "off", "wait": False, "flow": False}
+                            "council": "off", "wait": False, "flow": False,
+                            "manager": False}
 
-BOOL_MODES: tuple[str, ...] = ("coding", "jev", "wait", "flow")
+BOOL_MODES: tuple[str, ...] = ("coding", "jev", "wait", "flow", "manager")
 _LEVELS: dict[str, tuple[str, ...]] = {"free": FREE_LEVELS, "council": COUNCIL_LEVELS}
 _TRUE, _FALSE = ("on", "true", "1", "yes"), ("off", "false", "0", "no")
 
@@ -156,6 +160,7 @@ def current(session_id: str | None) -> dict[str, Any]:
         "council": _normalise_council(record.get("council", defaults["council"])),
         "wait": bool(record.get("wait", defaults["wait"])),
         "flow": bool(record.get("flow", defaults["flow"])),
+        "manager": bool(record.get("manager", defaults["manager"])),
     }
 
 
@@ -185,6 +190,10 @@ def set_coding(session_id: str, on: bool) -> None:
 
 def set_jev(session_id: str, on: bool) -> None:
     _update(session_id, "jev", bool(on))
+
+
+def set_manager(session_id: str, on: bool) -> None:
+    _update(session_id, "manager", bool(on))
 
 
 def set_wait(session_id: str, on: bool) -> None:
@@ -263,6 +272,8 @@ def active_summary(modes: dict[str, Any]) -> str:
         parts.append("wait")
     if modes.get("flow"):
         parts.append("flow")
+    if modes.get("manager"):
+        parts.append("manager")
     return ", ".join(parts)
 
 
