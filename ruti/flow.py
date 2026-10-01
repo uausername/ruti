@@ -27,10 +27,18 @@ chain -- a flow that keeps handing off without finishing is a loop, not progress
 every hop spends the same five-hour window. In manager mode the model and effort go with
 it, which is the one moment in ruti where a model switch costs nothing: the context has
 not been read yet.
+
+The old session's name and its Remote Control go with it too, both read out of that
+session's transcript -- the JSONL file whose path the Stop hook is handed in
+`transcript_path`. A fresh session would otherwise take its name from the continuation
+prompt, so every flow session would be called the same thing, and Remote Control, which
+the user turned on with `/remote-control`, would silently be off in the window that
+takes the task over.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -62,6 +70,21 @@ _MARKER_NAMES = frozenset({"CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT"})
 # rather than passed to a CLI that would refuse to start over it.
 PERMISSION_MODES = frozenset({"acceptEdits", "auto", "bypassPermissions", "manual",
                               "dontAsk", "plan"})
+
+TITLE_MAX = 80
+# Stripped from a carried-over title before the next hop's own suffix goes on, so hop 3
+# of a chain does not end up called "fix auth (flow 2/5) (flow 3/5)".
+_FLOW_SUFFIX = re.compile(r"\s*\(flow \d+/\d+\)\s*$")
+
+# Markdown punctuation at the edge of a heading or list item, which says nothing about
+# what the line is for.
+_MD_MARKERS = "#*_>`- \t"
+_WHITESPACE = re.compile(r"\s+")
+_GOAL_HEAD = re.compile(r"goal(?![0-9a-z])", re.IGNORECASE)
+# What a heading may put between its word and its text: "**Goal:** Ship it", "-- Goal --".
+# Dashes count as separators because a goal is prose, not a number.
+_GOAL_GAP = ":\u2013\u2014- \t"
+_LEAD_MD = "*_`# \t"
 
 SECTIONS = ("Goal; Done; In progress (exactly where you stopped); Next steps, in order; "
             "Key files, commands and state; Decisions and constraints; Instructions to "
@@ -173,6 +196,101 @@ def write_handoff(session_id: str, text: str, cwd: str) -> Path:
     return path
 
 
+def transcript_facts(path: str | None) -> dict[str, Any]:
+    """{"remote_control": bool, "title": str | None}. Never raises; a missing or
+    unreadable file gives {"remote_control": False, "title": None}.
+
+    Claude Code records both facts in the session's own transcript, one JSON object per
+    line, and a transcript is written continuously and can be several MB -- so it is read
+    line by line, and any line that will not parse (Claude Code writes those too) is
+    passed over. The last title wins because `/rename` writes a new record, and the last
+    bridge status wins because a disconnect is logged as one.
+    """
+    facts: dict[str, Any] = {"remote_control": False, "title": None}
+    if not path:
+        return facts
+    custom = auto = None
+    bridged = False
+    status: bool | None = None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                kind = record.get("type")
+                if kind == "custom-title":
+                    custom = record.get("customTitle")
+                elif kind == "ai-title":
+                    auto = record.get("aiTitle")
+                elif kind == "bridge-session":
+                    # Written every turn while the bridge is up: proof of it, but no proof
+                    # that it is still up.
+                    bridged = True
+                elif kind == "system" and record.get("subtype") == "bridge_status":
+                    # A disconnect is a status too, so the last one decides; a file that
+                    # only ever got per-turn markers falls back to them.
+                    status = "is active" in str(record.get("content") or "").lower()
+    except OSError:
+        return facts
+
+    for candidate in (custom, auto):
+        title = str(candidate or "").strip()
+        if title:
+            facts["title"] = title
+            break
+    facts["remote_control"] = bridged if status is None else status
+    return facts
+
+
+def handoff_goal(text: str) -> str | None:
+    """The handoff's Goal, read out of the markdown the model wrote. None without one.
+
+    A title has to be one line, and the handoff is free prose under seven headings, so
+    this is a heading scan rather than a parse: the first line that says "goal" and the
+    text after it, or the first thing under the heading when the heading stands alone.
+    """
+    lines = str(text or "").splitlines()
+    for index, line in enumerate(lines):
+        plain = line.strip().strip(_MD_MARKERS)
+        head = _GOAL_HEAD.match(plain)
+        if not head:
+            continue
+        rest = plain[head.end():]
+        goal = _WHITESPACE.sub(" ", rest.lstrip(_GOAL_GAP).lstrip(_LEAD_MD)).strip()
+        if not goal:
+            for follow in lines[index + 1:]:
+                goal = _WHITESPACE.sub(" ", follow.strip(_MD_MARKERS)).strip()
+                if goal:
+                    break
+        return goal or None
+    return None
+
+
+def session_title(previous: str | None, handoff_text: str, hop: int) -> str:
+    """What `--name` to open the next session under: the old name, else the handoff's goal.
+
+    The hop number is in the title because the window says nothing else about where it
+    sits in the chain, and the previous session's own suffix is removed first so the
+    count cannot stack across hops.
+    """
+    base = ""
+    if previous:
+        base = _WHITESPACE.sub(" ", _FLOW_SUFFIX.sub("", str(previous))).strip()
+    if not base:
+        base = handoff_goal(handoff_text) or "ruti flow"
+    suffix = f" (flow {hop}/{MAX_HOPS})"
+    if len(base) + len(suffix) > TITLE_MAX:
+        base = base[: TITLE_MAX - len(suffix) - 1].rstrip() + "\u2026"
+    return base + suffix
+
+
 def stop(session_id: str, payload: dict[str, Any], *,
          spawn: Callable[..., Any] | None = None) -> dict[str, Any] | None:
     """Open the next session once a handoff exists. Never blocks the stop."""
@@ -198,9 +316,26 @@ def stop(session_id: str, payload: dict[str, Any], *,
     # moment a model switch is free. Anything that goes wrong -- mode off, no
     # classifier, a band with nothing eligible -- launches exactly as it did before.
     seat = _seat_for(session_id, path)
+    # The name and Remote Control are what the user set up in the session being left, so
+    # reading them is part of opening the continuation. A naming problem must not cost
+    # the continuation itself: anything unreadable here just launches unnamed, without
+    # Remote Control, exactly as it did before.
+    title: str | None = None
+    remote_control = False
+    try:
+        facts = transcript_facts(payload.get("transcript_path"))
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        title = session_title(facts.get("title"), text, hop)
+        remote_control = bool(facts.get("remote_control"))
+    except Exception:
+        title, remote_control = None, False
     try:
         launch(path, cwd, payload.get("permission_mode"), spawn=spawn or subprocess.Popen,
-               seat_args=seat.cli_args() if seat else None)
+               seat_args=seat.cli_args() if seat else None, name=title,
+               remote_control=remote_control)
     except Exception as exc:
         return {"systemMessage": f"ruti flow: could not open a new session ({exc}). The "
                                  f"handoff is at {path} -- start `claude` in {cwd} and ask "
@@ -209,6 +344,10 @@ def stop(session_id: str, payload: dict[str, Any], *,
                f"{hop} of {MAX_HOPS}). This window can be closed.")
     if seat is not None:
         message += f" on {seat.label()}"
+    if title:
+        message += f' Named "{title}".'
+    if remote_control:
+        message += " Remote Control is on there too."
     if trusted(cwd) is False:
         message += " " + untrusted_note(cwd)
     return {"systemMessage": message}
@@ -301,11 +440,18 @@ def _ps_quote(value: Any) -> str:
 
 def launcher_script(handoff: Path, cwd: str, permission_mode: str | None,
                     claude: str, drop: list[str] | None = None,
-                    seat_args: list[str] | None = None) -> str:
+                    seat_args: list[str] | None = None,
+                    name: str | None = None, remote_control: bool = False) -> str:
     args = ["--permission-mode", permission_mode] if permission_mode in PERMISSION_MODES else []
     # After the permission mode, because it is the same kind of thing -- what the user
     # chose for this session, carried into the next one -- and the seat is chosen for it.
     args += list(seat_args or [])
+    if name:
+        args += ["--name", name]
+    if remote_control:
+        # Always with a value: `--remote-control` takes an optional one, so bare it would
+        # make claude read the prompt that follows as the Remote Control session's name.
+        args += ["--remote-control", name or "ruti flow"]
     prompt = f"Continue the task from the ruti flow handoff in your context (file: {handoff})."
     # Removed here as well as from the spawn's environment: a window Windows Terminal
     # opens is not guaranteed to take the environment it was asked with.
@@ -323,7 +469,8 @@ def launcher_script(handoff: Path, cwd: str, permission_mode: str | None,
 
 def launch(handoff: Path, cwd: str, permission_mode: str | None, *,
            spawn: Callable[..., Any] = subprocess.Popen,
-           seat_args: list[str] | None = None) -> list[str]:
+           seat_args: list[str] | None = None,
+           name: str | None = None, remote_control: bool = False) -> list[str]:
     """Open `claude` on the handoff in a new window; returns the argv it spawned."""
     script = handoff.with_suffix(".ps1")
     markers = session_markers()
@@ -331,7 +478,8 @@ def launch(handoff: Path, cwd: str, permission_mode: str | None, *,
     # and a Cyrillic directory name would arrive mangled.
     script.write_text(
         launcher_script(handoff, cwd, permission_mode, shutil.which("claude") or "claude",
-                        drop=markers, seat_args=seat_args),
+                        drop=markers, seat_args=seat_args, name=name,
+                        remote_control=remote_control),
         encoding="utf-8-sig", newline="\r\n",
     )
     shell = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
