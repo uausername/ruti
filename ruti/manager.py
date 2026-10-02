@@ -5,9 +5,12 @@ Claude Code's own model cannot be switched from inside a session. No hook can re
 model or an effort, and an edit to `settings.json` is not picked up by a running
 session. The user switches with `/model <alias>` and `/effort <level>`; a *new* session
 can be started as `claude --model <alias> --effort <level>`. So this module cannot fix a
-wrong seat -- it can only say which one is right, and it says it where the user will
-actually see it: the prompt hook's visible `systemMessage`, the status line, and the
-argv a flow handoff launches the next session with.
+wrong seat -- it can only say which one is right, and it says it on every prompt: as the
+prompt hook's visible `systemMessage` when the recommendation is new, and -- because
+`systemMessage` was not shown in a live CLI session -- as a note the model is told to
+repeat as the last line of every reply until the seat matches. The status line shows the
+same recommendation as `->sonnet/medium`, and a flow handoff launches the next session
+on it.
 
 The economics that decide what "right" means are asymmetric, and the whole ranking rests
 on them:
@@ -16,9 +19,13 @@ on them:
   uncached, and an Opus cache read costs the same as a Sonnet one -- so the cache is not
   a reason to stay, only a reason not to switch casually. A switch pays when the context
   is still small, or when the current model is underpowered for the task at hand.
-* An **effort-only change is cheap**: same model, same cache. That is why a different
-  effort on the right model is always "now", and only a different *model* is ever
-  deferred to a boundary.
+* An **effort-only change is cheap where the docs say it is**: "How Claude Code uses
+  prompt caching" states that on Opus 5.5, Sonnet 5.5 and Fable 5.1, changing effort
+  keeps the cache (most older models recompute instead, which does not matter for the
+  `opus`/`sonnet`/`fable` aliases). So a different effort on the right model is always
+  "now", only a different *model* is ever deferred to a boundary, and `advise` prefers a
+  same-model seat until a switch outscores it by more than re-reading the context costs
+  (`SWITCH_BASE_MARGIN`, `SWITCH_MARGIN_PER_MTOK`).
 * The five-hour window is a hard stop on this account, so what the band permits is a
   policy question, not a score question -- the blocked list is short, stated in words,
   and every blocked seat keeps its score rather than disappearing.
@@ -85,6 +92,15 @@ MANAGER_ONLY_KINDS = ("security", "review")
 # costs less than carrying the wrong seat for the rest of the task.
 SWITCH_FREE_TOKENS = 30_000
 
+# What a model switch has to be worth before it is taken over staying on the current one.
+# Effort is free on Opus 5.5, Sonnet 5.5 and Fable 5.1 -- the cache survives an effort
+# change on those -- so a model switch is never quite free, and it gets more expensive
+# the more context there is to re-read. Scored in the same units as the seats, because
+# that is what it is being compared against.
+SWITCH_BASE_MARGIN = 0.03
+SWITCH_MARGIN_PER_MTOK = 0.6
+
+
 # How much each band pays for capability over burn. `route`'s ordering with a different
 # pair of numbers: there the executor is picked and paid for, here the manager's own
 # model is being chosen and every token is spent from the same five hours.
@@ -133,8 +149,17 @@ class Seat:
     def label(self) -> str:
         return f"{self.model}/{self.effort}" if self.effort else self.model
 
-    def commands(self) -> list[str]:
-        """What the user types to get here, in the order they type it."""
+    def commands(self, current: Seat | None = None) -> list[str]:
+        """What the user types to get here, in the order they type it.
+
+        Given the seat the session is on, `/model` is left out when it is already right:
+        asking for the model the user is already on is a cache-busting no-op and noise on
+        top of noise. An empty list then means there is nothing to type at all.
+        """
+        if current is not None and current.model == self.model:
+            if not self.effort or self.effort == current.effort:
+                return []
+            return [f"/effort {self.effort}"]
         if not self.effort:
             return [f"/model {self.model}"]
         return [f"/model {self.model}", f"/effort {self.effort}"]
@@ -167,6 +192,18 @@ def burn(seat: Seat) -> float:
     return MODEL_BURN.get(seat.model, 1.0) * EFFORT_BURN.get(seat.effort, 1.0)
 
 
+def switch_margin(tokens: int | None) -> float:
+    """The score a model switch must beat to be worth what re-reading the context costs.
+
+    Zero when the context is small, or unreadable -- which is the same thing to be
+    careful in: at that size the re-read is cheap enough that the better seat is simply
+    the better seat, whatever the reading would have said.
+    """
+    if tokens is None or tokens < SWITCH_FREE_TOKENS:
+        return 0.0
+    return SWITCH_BASE_MARGIN + SWITCH_MARGIN_PER_MTOK * tokens / 1_000_000
+
+
 @dataclass
 class Ranked:
     seat: Seat
@@ -192,12 +229,18 @@ class Advice:
 
     def summary(self) -> dict[str, Any]:
         """The JSON `ruti manager --json` emits, in `ruti route --json`'s shape."""
+        best = _render(self.best) if self.best is not None else None
+        if best is not None:
+            # What is left to type, not what would be typed from scratch: on the model
+            # the session is already on, `/model` is a no-op and the only command is
+            # the effort one.
+            best["commands_now"] = self.best.seat.commands(self.current)
         return {
             "band": self.band,
             "task": dict(self.task),
             "current": _render_seat(self.current),
             "switch": dict(self.switch),
-            "best": _render(self.best) if self.best is not None else None,
+            "best": best,
             "ranked": [_render(entry) for entry in self.ranked],
         }
 
@@ -287,8 +330,14 @@ def _rank(seat: Seat, band: str, required: float, *, manager_only: bool,
 
 
 def _verdict(best: Ranked | None, current: Seat | None, required: float,
-             tokens: int | None) -> dict[str, str]:
-    """Now, at a boundary, stay, or nothing at all -- and why."""
+             tokens: int | None,
+             effort_first: tuple[str, int] | None = None) -> dict[str, str]:
+    """Now, at a boundary, stay, or nothing at all -- and why.
+
+    `effort_first` is the seat a model switch would have recommended, and the size of
+    the context that switch would have re-read. Naming it is what turns "effort only"
+    from a shrug into an answer: the user is being told what the alternative costs.
+    """
     if best is None:
         return {"verdict": "none",
                 "reason": "no seat is eligible in this band; write the handoff instead"}
@@ -298,6 +347,12 @@ def _verdict(best: Ranked | None, current: Seat | None, required: float,
         return {"verdict": "stay",
                 "reason": f"{current.label()} already fits the task"}
     if best.seat.model == current.model:
+        if effort_first is not None:
+            other, read = effort_first
+            return {"verdict": "now",
+                    "reason": f"effort only on {current.model} -- the prompt cache is kept "
+                              f"(Opus 5.5, Sonnet 5.5, Fable 5.1), where {other} would "
+                              f"re-read ~{read} tokens uncached"}
         return {"verdict": "now",
                 "reason": "effort only, on the same model -- the prompt cache is "
                           "per model, so this costs nothing to switch"}
@@ -358,11 +413,24 @@ def advise(*, kind: str | None, difficulty: float | None, session_id: str | None
                      reverse=True)
     best = eligible[0] if eligible else None
 
+    # Effort first, when effort is what is actually free. A same-model seat has to be
+    # capable enough, so a current seat that is blocked or underpowered still loses here
+    # and the switch happens as usual. The ranking is left in pure score order: what
+    # this changes is which seat is recommended, not what the seats are worth.
+    effort_first: tuple[str, int] | None = None
+    if (current is not None and best is not None
+            and best.seat.model != current.model):
+        same = [r for r in eligible
+                if r.seat.model == current.model and r.capability >= required]
+        if same and best.score - same[0].score <= switch_margin(tokens):
+            effort_first = (best.seat.label(), tokens or 0)
+            best = same[0]
+
     return Advice(
         ranked=eligible + blocked,
         best=best,
         current=current,
-        switch=_verdict(best, current, required, tokens),
+        switch=_verdict(best, current, required, tokens, effort_first),
         task={"kind": kind, "difficulty": round(difficulty, 2),
               "required": round(required, 2), "source": difficulty_source},
         band=band,
@@ -370,14 +438,18 @@ def advise(*, kind: str | None, difficulty: float | None, session_id: str | None
 
 
 def prompt_hint(session_id: str | None, kind: str, kind_confidence: float,
-                difficulty: float) -> tuple[str, str] | None:
+                difficulty: float) -> tuple[str, str | None] | None:
     """(what the model is told, what the user is shown), or None.
 
-    The user-facing half matters most: the model cannot switch its own seat, so a
-    recommendation it only reads is a recommendation nobody acts on. It goes out as the
-    hook's `systemMessage` -- visible, not injected -- and it goes out once per
-    *change*: the same recommendation on the next prompt is noise, and noise is what
-    teaches a manager to ignore a line.
+    Recomputed from scratch on every prompt: the band, the current seat and the size of
+    the context are all read fresh, and the ranking is decided again rather than carried
+    over. Only the *display* is debounced -- the user is shown a `systemMessage` when the
+    recommendation is new, and not on the repeats, because the same line twice is how a
+    line stops being read. The model is told to keep saying it either way, since it is
+    the model's own last line that the user actually reads in a live CLI session.
+
+    On "stay" the stored recommendation is cleared, so the status line's `->seat` arrow
+    disappears the moment the seat matches instead of pointing at a move already made.
     """
     try:
         if not modes.current(session_id).get("manager"):
@@ -385,24 +457,37 @@ def prompt_hint(session_id: str | None, kind: str, kind_confidence: float,
         advice = advise(kind=kind, difficulty=difficulty, session_id=session_id,
                         difficulty_source="jev")
         best = advice.best
-        if best is None or advice.switch.get("verdict") not in ("now", "boundary"):
+        if best is None:
             return None
-        if not remember_recommendation(session_id, best.seat):
+        verdict = advice.switch.get("verdict")
+        if verdict == "stay":
+            clear_recommendation(session_id)
             return None
+        if verdict not in ("now", "boundary"):
+            return None
+
+        changed = remember_recommendation(session_id, best.seat)
         now = advice.current.label() if advice.current else "unknown"
         # One command per line: on one line they get pasted together, and
         # `/model sonnet /effort low` is read as a model called "sonnet /effort low".
-        commands = "\n".join(f"  {command}" for command in best.seat.commands())
+        commands = "\n".join(f"  {command}"
+                             for command in best.seat.commands(advice.current))
         message = (f"ruti manager: {kind} work -> {best.seat.label()} fits "
                    f"(now {now}). Type, one at a time:\n{commands}")
-        if advice.switch["verdict"] == "boundary":
+        if verdict == "boundary":
             message += f"\n-- at the next boundary: {advice.switch['reason']}"
-        # The model is told to say it itself, as the first line of its reply: the hook's
-        # `systemMessage` was not shown in a live CLI session, and a recommendation
-        # nobody sees is one nobody acts on. Both routes carry the same text.
-        note = (f"{message}\nThe user switches; you cannot. Open your reply with this "
-                "recommendation, commands on separate lines, then carry on with the work.")
-        return note, message
+        # The last line of the reply, not the first: the first line of a reply is where
+        # the work is, and a recommendation that displaces the answer gets ignored. The
+        # `systemMessage` is the belt to this braces, since it was not shown in a live
+        # CLI session at all.
+        note = (f"ruti manager: {kind} work -> {best.seat.label()} (now {now}); "
+                f"{advice.switch['reason']}. The user switches; you cannot. Make this "
+                "the LAST line of your reply -- after everything else, nothing after it "
+                "-- in the user's language, each command in its own code span: "
+                "`Recommendation: <command> then <command>`. Say it every reply until "
+                "the seat matches; it is recomputed for each prompt, so use exactly the "
+                f"commands given here, not an earlier one.\n{commands}")
+        return note, (message if changed else None)
     except Exception:
         return None
 
@@ -493,8 +578,9 @@ def record_seat(session_id: str | None, payload: dict[str, Any]) -> None:
     """Remember the seat this session is on, and how full its context is.
 
     Called from the status line on every repaint, so: never raises, and writes only when
-    something actually moved. The recommendation the hook writes is left alone -- it is
-    written by a different caller on a different cadence, and a repaint must not wipe it.
+    something actually moved. The recommendation and the last classified task are left
+    alone -- they are written by a different caller on a different cadence, and a repaint
+    must not wipe either.
     """
     try:
         if not session_id or not isinstance(payload, dict):
@@ -515,8 +601,9 @@ def record_seat(session_id: str | None, payload: dict[str, Any]) -> None:
             return
         now = time.time()
         data[session_id] = {**record, "at": now,
-                            **({"recommended": previous["recommended"]}
-                               if "recommended" in previous else {})}
+                            **{key: previous[key]
+                               for key in ("recommended", "task")
+                               if key in previous}}
         write_json(SEATS_FILE, {sid: entry for sid, entry in data.items()
                                 if _fresh(entry, now)})
     except Exception:
@@ -548,8 +635,9 @@ def context_tokens(session_id: str | None) -> int | None:
 def remember_recommendation(session_id: str | None, seat: Seat) -> bool:
     """Store `seat` as this session's recommendation; True if it is a new one.
 
-    The debounce the prompt hint runs on: showing the same recommendation twice is how a
-    line stops being read.
+    The debounce the prompt hint's user-facing half runs on: showing the same
+    recommendation twice is how a line stops being read. The classified task in the same
+    record is carried across untouched -- it belongs to a different caller.
     """
     try:
         if not session_id:
@@ -568,6 +656,81 @@ def remember_recommendation(session_id: str | None, seat: Seat) -> bool:
         return True
     except Exception:
         return False
+
+
+def clear_recommendation(session_id: str | None) -> None:
+    """Drop the stored recommendation, so the status line stops pointing at a move made.
+
+    Called when the advice comes back "stay" -- a pending arrow for a seat the session is
+    already on is worse than no arrow. Writes only when there is something to drop, and
+    never raises: this is on the prompt hook's path.
+    """
+    try:
+        if not session_id:
+            return
+        data = _load()
+        entry = data.get(session_id)
+        if not isinstance(entry, dict) or "recommended" not in entry:
+            return
+        data[session_id] = {key: value for key, value in entry.items()
+                            if key != "recommended"}
+        now = time.time()
+        write_json(SEATS_FILE, {sid: other for sid, other in data.items()
+                                if _fresh(other, now)})
+    except Exception:
+        pass
+
+
+# How long the last classified task stands in for a prompt too short to classify. A
+# "yes, go ahead" is the same work as the prompt before it; half an hour is longer than
+# any one turn of it and short enough that the next task is classified fresh.
+TASK_MAX_AGE = 1800.0
+
+
+def remember_task(session_id: str | None, kind: str, difficulty: float) -> None:
+    """Store the task this session is on, for the next prompt to reuse.
+
+    The prompt hook classifies only prompts long enough to be a task, and the prompts
+    that follow one -- "yes", "carry on" -- are not. Without this, the seat advice would
+    go quiet for exactly the turn the user is acting on. Never raises.
+    """
+    try:
+        if not session_id:
+            return
+        data = _load()
+        entry = data.get(session_id)
+        entry = dict(entry) if isinstance(entry, dict) else {}
+        now = time.time()
+        entry["task"] = {"kind": str(kind), "difficulty": float(difficulty), "at": now}
+        entry.setdefault("at", now)
+        data[session_id] = entry
+        write_json(SEATS_FILE, {sid: other for sid, other in data.items()
+                                if _fresh(other, now)})
+    except Exception:
+        pass
+
+
+def last_task(session_id: str | None,
+              max_age: float = TASK_MAX_AGE) -> tuple[str, float] | None:
+    """(kind, difficulty) of the last classified task, or None when there is none to reuse.
+
+    None rather than a default for anything doubtful -- absent, too old, or not shaped
+    like a task -- because a stale kind would rank seats for work this session has
+    finished.
+    """
+    entry = _entry(session_id).get("task")
+    if not isinstance(entry, dict):
+        return None
+    kind, difficulty, at = entry.get("kind"), entry.get("difficulty"), entry.get("at")
+    numbers = (difficulty, at)
+    if not isinstance(kind, str) or not kind:
+        return None
+    if any(isinstance(value, bool) or not isinstance(value, (int, float))
+           for value in numbers):
+        return None
+    if time.time() - at > max_age:
+        return None
+    return kind, float(difficulty)
 
 
 def recommended(session_id: str | None) -> str | None:

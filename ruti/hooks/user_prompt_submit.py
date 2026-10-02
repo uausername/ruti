@@ -8,9 +8,13 @@ be a few hundred tokens times however many prompts a session has, which is a rea
 in a tool whose entire purpose is to stop leaks. So: one line normally, and the full
 policy only when the band changes or occasionally as a reminder.
 
-The seat advice in manager mode goes to the user as well, as `systemMessage`: no hook
-can switch Claude Code's own model, so the only way to get the right seat is to show the
-user what to type. It is debounced per recommendation, not per prompt.
+The seat advice in manager mode is recomputed on every prompt -- from the current seat,
+the band and the size of the context, none of it carried over from the last one. It
+reaches the user as `systemMessage`, once per change of recommendation, because no hook
+can switch Claude Code's own model and the only way to get the right seat is to show the
+user what to type; on the repeats the model carries it instead, as the last line of its
+own reply. A prompt too short to classify reuses the last classified task, which is what
+"yes, go ahead" is.
 """
 
 from __future__ import annotations
@@ -52,7 +56,8 @@ def build_output(prompt: str | None = None, cwd: str | None = None) -> dict:
     Two audiences, two fields: the context line goes into the model's window, and the
     seat advice goes to the *user* as a visible message -- because the manager cannot
     switch its own model, a recommendation it only reads is a recommendation nobody
-    acts on.
+    acts on. The model gets the same advice on every prompt, in the context line, and
+    repeats it to the user itself.
     """
     line, full, user_message = _build(prompt, cwd)
     output = {
@@ -147,10 +152,24 @@ def _build(prompt: str | None, cwd: str | None) -> tuple[str, bool, str | None]:
     # hint below it is *not* suppressed by an unfollowed ranking: nagging about delegation
     # says nothing about which model the session is on.
     user_message = None
-    if guess is not None and manager_on:
-        if guess.kind_confidence >= HINT_MIN_CONFIDENCE:
-            seat_hint = manager.prompt_hint(session_id, guess.kind, guess.kind_confidence,
-                                            guess.difficulty)
+    if manager_on:
+        kind: str | None = None
+        difficulty: float | None = None
+        confidence = 0.0
+        if guess is not None and guess.kind_confidence >= HINT_MIN_CONFIDENCE:
+            kind, difficulty = guess.kind, guess.difficulty
+            confidence = guess.kind_confidence
+            # Kept for the next prompt, which is very likely to be too short to classify
+            # on its own -- "yes, go ahead" is the same work as the prompt above it.
+            manager.remember_task(session_id, kind, difficulty)
+        else:
+            task = manager.last_task(session_id)
+            if task is not None:
+                # The task goes on; the ranking is still recomputed against the band,
+                # the seat and the context as they are right now.
+                kind, difficulty, confidence = task[0], task[1], 1.0
+        if kind is not None:
+            seat_hint = manager.prompt_hint(session_id, kind, confidence, difficulty)
             if seat_hint is not None:
                 line += "\n" + seat_hint[0]
                 user_message = seat_hint[1]

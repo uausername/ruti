@@ -1208,7 +1208,12 @@ def manager(kind: str | None, describe: str | None, difficulty: float | None,
     if best is None:
         ui.say(f"  [muted]{ui.literal(result.switch['reason'])}[/muted]")
         return
-    ui.say(f"  Type: [head]{ui.literal('  '.join(best.seat.commands()))}[/head]")
+    # What is left to type, not what would be typed from scratch: the same model is
+    # already on, so only the effort is asked for. An empty list is the stay verdict,
+    # and the reason below says so.
+    typed = best.seat.commands(result.current)
+    if typed:
+        ui.say(f"  Type: [head]{ui.literal('  '.join(typed))}[/head]")
     verdict = result.switch["verdict"]
     if verdict == "stay":
         ui.say(f"  [ok]{ui.literal(result.switch['reason'])}[/ok]")

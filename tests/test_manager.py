@@ -49,6 +49,17 @@ PAYLOAD = {
 }
 
 
+def seated(model_id, effort, tokens):
+    """A status-line payload for a session on `model_id`/`effort` carrying `tokens`.
+
+    `current_usage` is what the hook reads, so the window size is the only thing left to
+    override -- which is why the sizes below are set on it and not on the percentage.
+    """
+    return {**PAYLOAD, "model": {"id": model_id}, "effort": {"level": effort},
+            "context_window": {**PAYLOAD["context_window"],
+                               "current_usage": {"input_tokens": tokens}}}
+
+
 # ------------------------------------------------------------------ the ranking
 
 
@@ -118,18 +129,26 @@ def test_fable_needs_opting_in():
 
 
 def test_verdicts_against_the_best_seat_in_yellow():
-    best = manager.Seat("sonnet", "medium")
     seen = {
         "same seat": (manager.Seat("sonnet", "medium"), 100_000),
         "effort only": (manager.Seat("sonnet", "high"), 100_000),
-        "over budget": (manager.Seat("opus", "high"), 100_000),
         "cheap switch": (manager.Seat("opus", "high"), 10_000),
     }
     verdicts = {name: advise(quota.YELLOW, kind="implement", current=seat,
                              context_tokens=tokens).switch["verdict"]
-               for name, (seat, tokens) in seen.items()}
-    assert verdicts == {"same seat": "stay", "effort only": "now",
-                        "over budget": "boundary", "cheap switch": "now"}
+                for name, (seat, tokens) in seen.items()}
+    assert verdicts == {"same seat": "stay", "effort only": "now", "cheap switch": "now"}
+
+
+def test_a_switch_that_survives_the_effort_preference_is_deferred_to_a_boundary():
+    # The YELLOW/opus/100k case this used to cover is an effort change on opus now, not
+    # a switch: opus/low is within the margin a model switch has to beat. The switch
+    # survives where the current model has no seat the band permits for this task.
+    advice = advise(quota.ORANGE, kind="implement", current=manager.Seat("opus", "high"),
+                    context_tokens=100_000)
+    assert advice.best.seat.model == "sonnet"
+    assert advice.switch["verdict"] == "boundary"
+
 
 
 def test_an_underpowered_seat_is_told_to_move_now():
@@ -137,6 +156,48 @@ def test_an_underpowered_seat_is_told_to_move_now():
                     context_tokens=100_000)
     assert advice.switch["verdict"] == "now"
     assert "underpowered" in advice.switch["reason"]
+
+
+# ------------------------------------------------------------------ effort first
+
+
+def test_a_big_context_keeps_the_model_and_moves_the_effort():
+    # sonnet/medium outscores every Opus seat here, but switching to it re-reads a
+    # quarter of a million tokens uncached, so effort is what moves.
+    advice = advise(quota.YELLOW, kind="implement", current=manager.Seat("opus", "xhigh"),
+                    context_tokens=250_000)
+    assert advice.best.seat.model == "opus"
+    assert advice.best.seat.effort != "xhigh"
+    assert advice.switch["verdict"] == "now"
+    assert "cache is kept" in advice.switch["reason"]
+    # The ranking itself is untouched: still pure score order, and the seat it ranked
+    # first is the one the reason names as the alternative.
+    assert advice.ranked[0].seat.model == "sonnet"
+    assert "sonnet/medium" in advice.switch["reason"]
+
+
+def test_a_small_context_makes_the_switch_cheap_again():
+    advice = advise(quota.YELLOW, kind="implement", current=manager.Seat("opus", "xhigh"),
+                    context_tokens=10_000)
+    assert advice.best.seat.model == "sonnet"
+
+
+def test_an_underpowered_model_still_switches_under_a_big_context():
+    advice = advise(quota.GREEN, kind="debug", current=manager.Seat("haiku", None),
+                    context_tokens=250_000)
+    assert advice.best.seat.model in ("opus", "sonnet")
+    assert advice.switch["verdict"] == "now"
+
+
+def test_a_blocked_model_still_switches_under_a_big_context():
+    advice = advise(quota.ORANGE, kind="implement",
+                    current=manager.Seat("opus", "high"), context_tokens=250_000)
+    assert advice.best.seat.model != "opus"
+
+
+@pytest.mark.parametrize("tokens,margin", [(None, 0.0), (10_000, 0.0), (250_000, 0.18)])
+def test_the_switch_margin_prices_the_context(tokens, margin):
+    assert manager.switch_margin(tokens) == pytest.approx(margin)
 
 
 # ------------------------------------------------------------------ the record
@@ -171,6 +232,30 @@ def test_a_repaint_leaves_the_recommendation_alone():
     assert manager.recommended("s1") == "sonnet/medium"
 
 
+# ------------------------------------------------------------------ the task record
+
+
+def test_a_classified_task_is_reused_by_the_next_short_prompt():
+    manager.remember_task("s1", "implement", 0.5)
+    assert manager.last_task("s1") == ("implement", 0.5)
+    # A repaint and a new recommendation are other callers' writes: neither may drop it.
+    manager.record_seat("s1", PAYLOAD)
+    manager.remember_recommendation("s1", manager.Seat("sonnet", "medium"))
+    assert manager.last_task("s1") == ("implement", 0.5)
+
+
+def test_a_task_too_old_to_be_this_one_is_not_reused():
+    manager.remember_task("s1", "implement", 0.5)
+    assert manager.last_task("s1", max_age=-1.0) is None
+    assert manager.last_task("other") is None
+
+
+def test_remembering_a_task_never_raises():
+    manager.remember_task(None, "implement", 0.5)
+    manager.remember_task("s1", "implement", "not a number")
+    assert manager.last_task("s1") is None
+
+
 # ------------------------------------------------------------------ the hint
 
 
@@ -178,28 +263,56 @@ def test_the_hint_is_off_without_manager_mode():
     assert manager.prompt_hint("s1", "implement", 0.9, 0.5) is None
 
 
-def test_the_hint_names_the_seat_and_then_debounces(monkeypatch):
+def test_the_hint_names_the_seat_shows_it_once_and_then_repeats(monkeypatch):
     monkeypatch.setattr(manager.quota, "load", lambda: Snap(quota.YELLOW))
     modes.set_manager("s1", True)
-    manager.record_seat("s1", {**PAYLOAD, "model": {"id": "claude-opus-5-5"},
-                               "effort": {"level": "high"}})
-    hint = manager.prompt_hint("s1", "implement", 0.9, 0.5)
-    assert hint is not None
-    assert "/model sonnet" in hint[1]
+    manager.record_seat("s1", seated("claude-opus-5-5", "high", 10_000))
+    note, shown = manager.prompt_hint("s1", "implement", 0.9, 0.5)
+    assert shown is not None
+    assert "/model sonnet" in shown
+    # The recommendation is recomputed on every prompt; only the user-facing half of it
+    # is debounced, so the model is still told, and the status line still points at it.
+    repeat = manager.prompt_hint("s1", "implement", 0.9, 0.5)
+    assert repeat is not None
+    assert repeat[0] == note
+    assert repeat[1] is None
+    assert manager.recommended("s1") == "sonnet/medium"
+
+
+def test_the_hint_stops_and_clears_the_arrow_once_the_seat_matches(monkeypatch):
+    monkeypatch.setattr(manager.quota, "load", lambda: Snap(quota.YELLOW))
+    modes.set_manager("s1", True)
+    manager.record_seat("s1", seated("claude-opus-5-5", "high", 10_000))
+    assert manager.prompt_hint("s1", "implement", 0.9, 0.5) is not None
+    manager.record_seat("s1", PAYLOAD)  # the user typed both commands
     assert manager.prompt_hint("s1", "implement", 0.9, 0.5) is None
+    assert manager.recommended("s1") is None
 
 
 def test_the_commands_are_on_separate_lines_and_the_model_is_told_to_say_them(monkeypatch):
     monkeypatch.setattr(manager.quota, "load", lambda: Snap(quota.YELLOW))
     modes.set_manager("s1", True)
-    manager.record_seat("s1", {**PAYLOAD, "model": {"id": "claude-opus-5-5"},
-                               "effort": {"level": "high"}})
+    manager.record_seat("s1", seated("claude-opus-5-5", "high", 10_000))
     note, shown = manager.prompt_hint("s1", "implement", 0.9, 0.5)
     lines = [line.strip() for line in shown.splitlines()]
     # Pasted on one line they read as a model called "sonnet /effort low".
     assert "/model sonnet" in lines and any(line.startswith("/effort ") for line in lines)
     assert not any("/model" in line and "/effort" in line for line in lines)
-    assert "Open your reply with this recommendation" in note
+    # Last line, not first: the answer comes before the recommendation or neither is read.
+    assert "LAST line" in note
+    assert "nothing after it" in note
+
+
+def test_an_effort_only_note_asks_for_the_effort_alone(monkeypatch):
+    monkeypatch.setattr(manager.quota, "load", lambda: Snap(quota.YELLOW))
+    modes.set_manager("s1", True)
+    manager.record_seat("s1", seated("claude-opus-5-5", "xhigh", 250_000))
+    note, shown = manager.prompt_hint("s1", "implement", 0.9, 0.5)
+    assert "LAST line" in note
+    assert "/effort low" in note
+    # The model is already opus: asking for it would throw the cache away for nothing.
+    assert "/model" not in note
+    assert "/model" not in shown
 
 
 # ------------------------------------------------------------------ the seat
@@ -212,6 +325,18 @@ def test_a_seat_without_an_effort_says_only_the_model():
 
 def test_a_seat_with_an_effort_names_both_commands():
     assert manager.Seat("opus", "high").commands() == ["/model opus", "/effort high"]
+
+
+def test_asking_for_the_model_already_on_is_left_out():
+    # `/model` for the model the session is on is a cache-busting no-op.
+    assert manager.Seat("opus", "low").commands(manager.Seat("opus", "xhigh")) == [
+        "/effort low"]
+    # Already there: nothing to type.
+    assert manager.Seat("opus", "low").commands(manager.Seat("opus", "low")) == []
+    # Haiku takes no effort, so there is never an effort command to leave out.
+    assert manager.Seat("haiku", None).commands(manager.Seat("haiku", None)) == []
+    assert manager.Seat("sonnet", "low").commands(manager.Seat("opus", "high")) == [
+        "/model sonnet", "/effort low"]
 
 
 def test_the_launcher_carries_the_seat_into_the_next_session():
@@ -256,3 +381,26 @@ def test_the_hook_says_nothing_when_there_is_no_hint(hook, monkeypatch):
     output = hook("x" * 200, None)
     assert "systemMessage" not in output
     assert output["suppressOutput"] is True
+
+
+def test_the_hook_keeps_the_task_across_a_prompt_too_short_to_classify(hook, monkeypatch):
+    # "yes, go ahead" is not a task to classify, but it is the same work as the prompt
+    # above it -- so the seat advice keeps coming, from the task already stored.
+    ups.manager.remember_task("s1", "implement", 0.5)
+    monkeypatch.setattr(ups, "_classify_prompt", lambda *_a, **_k: None)
+    seen: list[str | None] = []
+    monkeypatch.setattr(ups.manager, "prompt_hint",
+                        lambda _s, kind, *_a: seen.append(kind) or ("NOTE", None))
+    output = hook("yes", None)
+    assert seen == ["implement"]
+    assert "NOTE" in output["hookSpecificOutput"]["additionalContext"]
+    # Nothing new to show the user this time, so no visible message.
+    assert "systemMessage" not in output
+    assert output["suppressOutput"] is True
+
+
+def test_the_hook_says_nothing_when_there_is_no_task_to_reuse(hook, monkeypatch):
+    monkeypatch.setattr(ups, "_classify_prompt", lambda *_a, **_k: None)
+    monkeypatch.setattr(ups.manager, "prompt_hint", lambda *_a, **_k: ("NOTE", "shown"))
+    output = hook("yes", None)
+    assert "systemMessage" not in output
