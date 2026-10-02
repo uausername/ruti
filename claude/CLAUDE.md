@@ -189,10 +189,22 @@ Claude Code gives no way to switch the running session's model from outside: no 
 can return a model or effort, and `settings.json` edits are not picked up mid-session.
 So `ruti mode manager on` does what can be done:
 
-* The prompt hook classifies a substantial prompt (the same call the `route` hint
-  makes) and, when the seat is wrong for it, shows the user one line with the exact
-  `/model` and `/effort` to type -- once per change of recommendation, not on every
-  prompt. The status line shows the pending recommendation as `->sonnet/medium`.
+* The prompt hook recomputes the recommendation on every prompt, from the seat the
+  status line recorded, the current band and the size of the context -- nothing is
+  carried over from the last prompt. An effort-only change on the model the session is
+  already on is preferred, because the prompt cache survives an effort change on Opus
+  5.5, Sonnet 5.5 and Fable 5.1; a model switch has to be worth more than re-reading
+  the context costs, and at a small context or an underpowered seat it wins anyway. Only
+  the commands that are actually needed are named -- `/effort` alone when the model is
+  already right. A prompt too short to classify ("yes, go ahead") reuses the last
+  classified task for up to 30 minutes, so the advice keeps coming through the turn you
+  act on it.
+* The user is shown the line once per change of recommendation, as a visible
+  `systemMessage`, and the status line shows the pending one as `->sonnet/medium` until
+  it is typed (then the arrow goes away). The model is told the same thing on every
+  prompt and to **make it the last line of its reply** -- after everything else,
+  nothing after it -- repeating it until the seat matches, in the user's language,
+  each command in its own code span: `Recommendation: /model sonnet then /effort medium`.
 * A flow handoff opens the next session directly on the seat its next steps call for
   (`claude --model ... --effort ...`): there it is fully automatic.
 
@@ -200,7 +212,7 @@ You cannot type `/model` or `/effort` yourself; do not claim to have switched. W
 line says **boundary** rather than **now**, the model switch re-reads the whole context
 uncached (the cache is per model, and Opus and Sonnet cache reads cost the same), so it
 pays off at the next handoff, `/compact` or new session, not mid-task. An effort-only
-change is always cheap.
+change keeps the cache on Opus 5.5, Sonnet 5.5 and Fable 5.1, so it is always cheap.
 
 ### Standing a council
 
