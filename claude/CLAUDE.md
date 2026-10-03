@@ -166,16 +166,18 @@ remember setting.
 `ruti mode flow on` hands a long task to a fresh session instead of letting this one's
 context fill. At 50% context a hook tells you once: finish the step in hand, then pipe
 a handoff into `ruti flow handoff` (heredoc: `ruti flow handoff <<'EOF'` ... `EOF`) --
-Goal; Done; In progress, exactly where you stopped; Next steps in order; Key files,
-commands and state; Decisions and constraints; Instructions to your next self -- and
-end the turn. Write it for a reader with none of this conversation: that is who reads
-it. From 60% without a handoff, and always once one is written, every tool except
-`ruti` and TodoWrite is refused. The `Stop` hook then opens `claude` in a new window in
-the same directory and permission mode; that session starts with the handoff and this
-session's modes in its context, under this session's name with `(flow N/5)`
-appended, and with Remote Control on if it was on here. At most five sessions in a
-chain. `ruti mode flow off` drops a handoff not yet launched. With flow on, this
-replaces the 50% advice in "Context window watch" -- hand off instead of offering
+Title, 4-8 words naming the specific next piece of work (e.g. `Title: fix flow session
+names`), narrow rather than the project; Goal; Done; In progress, exactly where you
+stopped; Next steps in order; Key files, commands and state; Decisions and constraints;
+Instructions to your next self -- and end the turn. Write it for a reader with none of
+this conversation: that is who reads it. From 60% without a handoff, and always once one
+is written, every tool except `ruti` and TodoWrite is refused. The `Stop` hook then opens
+`claude` in a new window in the same directory and permission mode; that session starts
+with the handoff and this session's modes in its context, under the name its handoff's
+Title line gives with `(flow N/5)` appended -- unless you set a title yourself with
+`/rename`, which wins -- and with Remote Control on if it was on here. At most five
+sessions in a chain. `ruti mode flow off` drops a handoff not yet launched. With flow on,
+this replaces the 50% advice in "Context window watch" -- hand off instead of offering
 `/compact`.
 
 ### Manager mode
