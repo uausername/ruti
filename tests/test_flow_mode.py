@@ -369,7 +369,8 @@ def test_cli_mode_flow_and_handoff(monkeypatch):
     result = invoke(["flow", "handoff"], "Goal: x")
     assert result.exit_code != 0 and "flow mode is off" in result.output
     assert invoke(["mode", "flow", "on"]).exit_code == 0
-    result = invoke(["flow", "handoff"], "Цель: довести до конца\nДальше: тесты")
+    result = invoke(["flow", "handoff"],
+                    "Title: довести до конца\nЦель: довести до конца\nДальше: тесты")
     assert result.exit_code == 0, result.output
     path = modes.flow_state(SID)["handoff"]
     assert "Цель: довести до конца" in open(path, encoding="utf-8").read()
