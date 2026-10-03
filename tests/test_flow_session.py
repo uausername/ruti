@@ -63,7 +63,8 @@ def test_a_renamed_session_outranks_the_auto_title(tmp_path):
                       {"type": "ai-title", "aiTitle": "Auto again", "sessionId": SID},
                       {"type": "summary", "summary": "not a title record"})
     assert flow.transcript_facts(str(path)) == {"remote_control": False,
-                                                "title": "my-name"}
+                                                "title": "my-name",
+                                                "custom_title": "my-name"}
 
 
 def test_the_last_custom_title_is_the_one(tmp_path):
@@ -75,7 +76,18 @@ def test_the_last_custom_title_is_the_one(tmp_path):
 def test_only_an_auto_title_is_used_when_nothing_was_named(tmp_path):
     path = transcript(tmp_path, {"type": "ai-title", "aiTitle": "Auto title"})
     assert flow.transcript_facts(str(path)) == {"remote_control": False,
-                                                "title": "Auto title"}
+                                                "title": "Auto title",
+                                                "custom_title": None}
+
+
+def test_the_custom_title_is_kept_apart_from_the_generated_one(tmp_path):
+    """`title` says what the session is called; `custom_title` says whether the user chose
+    it, which is what decides whether it may be carried on to the next session."""
+    named = transcript(tmp_path, {"type": "ai-title", "aiTitle": "Как выбрана модель"},
+                       {"type": "custom-title", "customTitle": "fix flow names"})
+    assert flow.transcript_facts(str(named))["custom_title"] == "fix flow names"
+    generated = transcript(tmp_path, {"type": "ai-title", "aiTitle": "Как выбрана модель"})
+    assert flow.transcript_facts(str(generated))["custom_title"] is None
 
 
 def test_a_cyrillic_title_round_trips(tmp_path):
@@ -117,7 +129,7 @@ def test_an_ordinary_transcript_says_neither(tmp_path):
 
 
 def test_nothing_to_read_is_not_an_error(tmp_path):
-    empty = {"remote_control": False, "title": None}
+    empty = {"remote_control": False, "title": None, "custom_title": None}
     assert flow.transcript_facts(None) == empty
     assert flow.transcript_facts("") == empty
     assert flow.transcript_facts(str(tmp_path / "never-written.jsonl")) == empty
@@ -149,6 +161,64 @@ def test_no_goal_section_means_no_title_to_carry():
 
 
 # --------------------------------------------------------------------- the title
+
+
+@pytest.mark.parametrize("text", [
+    "Title: Fix X",
+    "**Title:** Fix X",
+    "## Title: Fix X",
+    "- Title - Fix X",
+    "# Handoff\n\nTitle \u2013 `Fix X`  \n",
+    "> Title: \"Fix   X\"\n",
+])
+def test_the_title_line_of_the_handoff_is_read_in_any_markdown_shape(text):
+    assert flow.handoff_title(text) == "Fix X"
+
+
+def test_no_title_line_means_no_title_to_carry():
+    assert flow.handoff_title("Goal: ship the parser\n") is None
+    assert flow.handoff_title("") is None
+    assert flow.handoff_title("Title:\n") is None  # the value has to be on the same line
+    assert flow.handoff_title("Title\nGoal: ship the parser\n") is None
+
+
+def test_a_word_that_merely_starts_with_title_is_not_one():
+    assert flow.handoff_title("Titles are narrow, not the project.\n") is None
+    assert flow.handoff_title("Title of the session: whatever it began as\n") is None
+
+
+def test_the_next_session_is_named_for_the_work_it_will_do():
+    assert flow.session_title(None, "Title: fix flow names\nGoal: big project", 2) \
+        == "fix flow names (flow 2/5)"
+
+
+def test_a_long_handoff_title_is_cut_at_a_word():
+    text = "Title: " + " ".join(["alpha"] * 20)
+    result = flow.session_title(None, text, 1)
+    base = result[: -len(" (flow 1/5)")]
+    assert base == " ".join(["alpha"] * 10)  # whole words only, no "alph"
+    assert len(base) <= flow.HANDOFF_TITLE_MAX
+
+
+def test_the_old_name_is_only_used_when_the_handoff_says_nothing():
+    handoff = "Done: yesterday\n\nKey files: ruti/flow.py\n"
+    assert flow.session_title("Fix auth (flow 1/5)", handoff, 2) == "Fix auth (flow 2/5)"
+    assert flow.session_title("Fix auth (flow 1/5)", "Title: fix flow names", 2) \
+        == "fix flow names (flow 2/5)"
+    assert flow.session_title("Fix auth (flow 1/5)", "Goal: ship the parser", 2) \
+        == "ship the parser (flow 2/5)"
+
+
+def test_a_name_the_user_chose_beats_the_handoff():
+    assert flow.session_title("Fix auth", "Title: fix flow names", 2,
+                              custom="my own name") == "my own name (flow 2/5)"
+
+
+def test_a_name_a_previous_hop_wrote_is_not_the_user_speaking():
+    """`claude --name` wrote it on the way in, so it describes the work already handed off
+    and must not stick to every hop after that."""
+    assert flow.session_title("Fix auth", "Title: fix flow names", 3,
+                              custom="old work (flow 1/5)") == "fix flow names (flow 3/5)"
 
 
 def test_the_old_name_goes_on_with_the_hop_counted():
@@ -201,7 +271,10 @@ def test_nothing_is_added_when_there_is_nothing_to_carry():
 def test_stop_carries_both_across_from_the_transcript(tools, tmp_path):
     on()
     path = flow.write_handoff(SID, "Goal: ship the parser", "C:/work")
+    # A custom title is the one kind of old name the handoff does not outrank: the user
+    # chose it, so it is what the next session is called.
     transcript(tmp_path, {"type": "ai-title", "aiTitle": "Auto title"},
+               {"type": "custom-title", "customTitle": "my-name"},
                {"type": "bridge-session", "sessionId": SID, "bridgeSessionId": "cse_1"})
     spawn = Spawn()
     result = flow.stop(SID, {"permission_mode": "auto", "cwd": "C:/work",
@@ -210,9 +283,46 @@ def test_stop_carries_both_across_from_the_transcript(tools, tmp_path):
     hop = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))["hop"]
     script = path.with_suffix(".ps1").read_text(encoding="utf-8-sig")
     assert "--remote-control" in script
-    assert f"Auto title (flow {hop}/{flow.MAX_HOPS})" in script
+    assert f"my-name (flow {hop}/{flow.MAX_HOPS})" in script
     assert "Remote Control" in result["systemMessage"]
     assert len(spawn.calls) == 1
+
+
+def test_stop_names_the_next_session_for_the_work_the_handoff_names(tools, tmp_path):
+    on()
+    path = flow.write_handoff(SID, "Title: fix flow names\nGoal: ship the parser", "C:/work")
+    transcript(tmp_path, {"type": "ai-title", "aiTitle": "Какая модель и усилие"})
+    spawn = Spawn()
+    result = flow.stop(SID, {"permission_mode": "auto",
+                             "transcript_path": str(tmp_path / "transcript.jsonl")},
+                       spawn=spawn)
+    hop = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))["hop"]
+    script = path.with_suffix(".ps1").read_text(encoding="utf-8-sig")
+    assert f"'--name' 'fix flow names (flow {hop}/{flow.MAX_HOPS})'" in script
+    assert "Какая модель" not in script
+    assert 'Named "fix flow names' in result["systemMessage"]
+
+
+def test_stop_does_not_carry_the_previous_hop_s_name_on(tools, tmp_path):
+    """Hop 2 of a chain was named by hop 1's `--name`; that is a description of the work
+    already handed off, so hop 2 is named by its own handoff instead."""
+    on(sid="s0")
+    first = flow.write_handoff("s0", "Goal: ship the parser", "C:/work")
+    flow.stop("s0", {"permission_mode": "auto"}, spawn=Spawn())
+    # What opens the second window: the next session starts from hop 1's handoff.
+    flow.session_start({"session_id": SID, "source": "startup"},
+                       env={flow.HANDOFF_ENV: str(first)})
+    transcript(tmp_path, {"type": "custom-title",
+                          "customTitle": f"ship the parser (flow 1/{flow.MAX_HOPS})"})
+    on()
+    path = flow.write_handoff(SID, "Title: fix flow names", "C:/work")
+    flow.stop(SID, {"permission_mode": "auto",
+                    "transcript_path": str(tmp_path / "transcript.jsonl")}, spawn=Spawn())
+    hop = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))["hop"]
+    assert hop == 2
+    script = path.with_suffix(".ps1").read_text(encoding="utf-8-sig")
+    assert f"'--name' 'fix flow names (flow 2/{flow.MAX_HOPS})'" in script
+    assert f"ship the parser (flow 1/{flow.MAX_HOPS})" not in script
 
 
 def test_stop_without_a_transcript_falls_back_to_the_handoff(tools):
