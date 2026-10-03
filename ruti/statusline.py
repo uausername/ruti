@@ -257,6 +257,11 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
                 current = manager.current_seat(session_id)
                 if target and (current is None or target != current.label()):
                     segments.append(_colour("->" + target, "36"))
+                elif current is not None and manager.matched(session_id) == current.label():
+                    # The advice was worked out for the seat the session is on and agrees
+                    # with it. Shown only while that is still the seat: after a switch the
+                    # mark goes until the next prompt has been ranked again.
+                    segments.append(_colour("seat✓", "90"))
     except Exception:
         pass
 

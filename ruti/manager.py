@@ -461,7 +461,7 @@ def prompt_hint(session_id: str | None, kind: str, kind_confidence: float,
             return None
         verdict = advice.switch.get("verdict")
         if verdict == "stay":
-            clear_recommendation(session_id)
+            clear_recommendation(session_id, advice.current)
             return None
         if verdict not in ("now", "boundary"):
             return None
@@ -602,7 +602,7 @@ def record_seat(session_id: str | None, payload: dict[str, Any]) -> None:
         now = time.time()
         data[session_id] = {**record, "at": now,
                             **{key: previous[key]
-                               for key in ("recommended", "task")
+                               for key in ("recommended", "task", "matched")
                                if key in previous}}
         write_json(SEATS_FILE, {sid: entry for sid, entry in data.items()
                                 if _fresh(entry, now)})
@@ -649,6 +649,7 @@ def remember_recommendation(session_id: str | None, seat: Seat) -> bool:
             return False
         now = time.time()
         entry["recommended"] = seat.label()
+        entry.pop("matched", None)
         entry.setdefault("at", now)
         data[session_id] = entry
         write_json(SEATS_FILE, {sid: other for sid, other in data.items()
@@ -658,22 +659,30 @@ def remember_recommendation(session_id: str | None, seat: Seat) -> bool:
         return False
 
 
-def clear_recommendation(session_id: str | None) -> None:
+def clear_recommendation(session_id: str | None, matched: Seat | None = None) -> None:
     """Drop the stored recommendation, so the status line stops pointing at a move made.
 
     Called when the advice comes back "stay" -- a pending arrow for a seat the session is
-    already on is worse than no arrow. Writes only when there is something to drop, and
-    never raises: this is on the prompt hook's path.
+    already on is worse than no arrow. `matched` is that seat: it is stored so the status
+    line can say the recommendation was checked and agrees, since silence alone cannot be
+    told from a mode that is not running. Writes only when something changes, and never
+    raises: this is on the prompt hook's path.
     """
     try:
         if not session_id:
             return
         data = _load()
         entry = data.get(session_id)
-        if not isinstance(entry, dict) or "recommended" not in entry:
+        if not isinstance(entry, dict):
             return
-        data[session_id] = {key: value for key, value in entry.items()
-                            if key != "recommended"}
+        label = matched.label() if matched is not None else None
+        if "recommended" not in entry and entry.get("matched") == label:
+            return
+        kept = {key: value for key, value in entry.items()
+                if key not in ("recommended", "matched")}
+        if label:
+            kept["matched"] = label
+        data[session_id] = kept
         now = time.time()
         write_json(SEATS_FILE, {sid: other for sid, other in data.items()
                                 if _fresh(other, now)})
@@ -731,6 +740,12 @@ def last_task(session_id: str | None,
     if time.time() - at > max_age:
         return None
     return kind, float(difficulty)
+
+
+def matched(session_id: str | None) -> str | None:
+    """The seat the last advice found the session already on, as a label."""
+    value = _entry(session_id).get("matched")
+    return value if isinstance(value, str) and value else None
 
 
 def recommended(session_id: str | None) -> str | None:

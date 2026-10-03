@@ -287,6 +287,40 @@ def test_the_hint_stops_and_clears_the_arrow_once_the_seat_matches(monkeypatch):
     manager.record_seat("s1", PAYLOAD)  # the user typed both commands
     assert manager.prompt_hint("s1", "implement", 0.9, 0.5) is None
     assert manager.recommended("s1") is None
+    # ...and the match is recorded, so the status line can say it was checked.
+    assert manager.matched("s1") == "sonnet/medium"
+
+
+def test_a_new_recommendation_supersedes_the_match_and_a_repaint_keeps_it(monkeypatch):
+    monkeypatch.setattr(manager.quota, "load", lambda: Snap(quota.YELLOW))
+    modes.set_manager("s1", True)
+    manager.record_seat("s1", PAYLOAD)
+    assert manager.prompt_hint("s1", "implement", 0.9, 0.5) is None
+    assert manager.matched("s1") == "sonnet/medium"
+    manager.record_seat("s1", PAYLOAD)
+    assert manager.matched("s1") == "sonnet/medium"
+    manager.record_seat("s1", seated("claude-opus-5-5", "high", 10_000))
+    assert manager.prompt_hint("s1", "implement", 0.9, 0.5) is not None
+    assert manager.matched("s1") is None
+
+
+def test_the_status_line_marks_a_matched_seat_and_only_while_it_is_the_seat(monkeypatch):
+    from ruti import statusline
+
+    monkeypatch.setattr(statusline, "_refresh_facts", lambda: {
+        "at": time.time(), "proxy": True, "loaded": [], "gpu": None})
+    monkeypatch.setattr(statusline, "_running_delegate", lambda: None)
+    monkeypatch.setattr(statusline, "_route_segment", lambda _sid: (None, None))
+    monkeypatch.setattr(manager.quota, "load", lambda: Snap(quota.YELLOW))
+    snapshot = quota.Quota(five_hour=quota.Window(10.0, time.time() + 3600), seven_day=None,
+                           captured_at=time.time())
+    modes.set_manager("s1", True)
+    manager.record_seat("s1", PAYLOAD)
+    manager.prompt_hint("s1", "implement", 0.9, 0.5)
+    assert "seat✓" in statusline.render({"session_id": "s1"}, snapshot)
+    # The user moves off it: the mark must not claim a check that was for another seat.
+    manager.record_seat("s1", seated("claude-opus-5-5", "high", 10_000))
+    assert "seat✓" not in statusline.render({"session_id": "s1"}, snapshot)
 
 
 def test_the_commands_are_on_separate_lines_and_the_model_is_told_to_say_them(monkeypatch):
