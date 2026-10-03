@@ -29,14 +29,21 @@ it, which is the one moment in ruti where a model switch costs nothing: the cont
 not been read yet.
 
 The new session is named after the work it is about to do, which the handoff says in
-its own first section: the manager writes `Title:` knowing what comes next. The old
-session's title cannot say that -- it is generated from how that session began -- but a
-name the user set themselves with `/rename` still wins, and that name is read out of the
-old session's transcript, the JSONL file whose path the Stop hook is handed in
+its own first section: the manager writes `Title:` knowing what comes next. A name the
+user set themselves with `/rename` still wins, and that name is read out of the old
+session's transcript, the JSONL file whose path the Stop hook is handed in
 `transcript_path`; so is Remote Control, which the user turned on with
 `/remote-control`. A fresh session would otherwise take its name from the continuation
 prompt, so every flow session would be called the same thing, and Remote Control would
 silently be off in the window that takes the task over.
+
+That title is enforced where the handoff is written, not asked for in the instructions,
+because instructions go stale inside a running session: one that wrote its handoff from
+the section list as it read it hours earlier ended up named from its Goal, cut mid-word
+("...(answer in Russia\u2026 (flow 2/5)"). So `ruti flow handoff` refuses a handoff without a
+usable `Title:`, keeps the text it was given so only `--title` has to follow, and
+`session_title` never falls back to the Goal at all -- the project folder's own name
+describes a session better than a prose sentence cut at 60 characters.
 """
 
 from __future__ import annotations
@@ -60,6 +67,9 @@ MAX_HOPS = 5
 FLOW_DIR = STATE_ROOT / "flow"
 HANDOFF_ENV = "RUTI_FLOW_HANDOFF"
 KEEP_SECONDS = 14 * 86400
+# A refused handoff's text, kept for one day: long enough for the model that wrote it to
+# add the one missing line, short enough not to outlive the session it belongs to.
+DRAFT_SECONDS = 86400
 
 # Where Claude Code keeps per-folder state, trust among it.
 CLAUDE_CONFIG = Path.home() / ".claude.json"
@@ -82,14 +92,21 @@ _FLOW_SUFFIX = re.compile(r"\s*\(flow \d+/\d+\)\s*$")
 # suffix goes on rather than being left to the overall cap with a half-word at the end.
 HANDOFF_TITLE_MAX = 60
 
+# What a title has to be to be usable as a session name. The upper word and character
+# bounds exist because `--name` goes into a window title and a launcher line, both of
+# which are read at a glance; the lower bound because one word is not a description.
+TITLE_MIN_WORDS, TITLE_MAX_WORDS, TITLE_MAX_CHARS = 2, 10, 70
+# The words that make a title an instruction to carry on rather than a name of the work
+# ahead -- which is what the window would then say, in every hop of the chain. Matched at
+# the start only: "fix the handoff template" names work, "continue" does not.
+_TITLE_BAD_START = re.compile(
+    r"(continue|resume|handoff|hand-off|carry on|\u043f\u0440\u043e\u0434\u043e\u043b\u0436|"
+    r"\u0432\u043e\u0437\u043e\u0431\u043d\u043e\u0432)", re.IGNORECASE)
+
 # Markdown punctuation at the edge of a heading or list item, which says nothing about
 # what the line is for.
 _MD_MARKERS = "#*_>`- \t"
 _WHITESPACE = re.compile(r"\s+")
-_GOAL_HEAD = re.compile(r"goal(?![0-9a-z])", re.IGNORECASE)
-# What a heading may put between its word and its text: "**Goal:** Ship it", "-- Goal --".
-# Dashes count as separators because a goal is prose, not a number.
-_GOAL_GAP = ":\u2013\u2014- \t"
 # The word boundary is what keeps "Titles are ..." from being read as a title, and the
 # separator is required: "Title of the session: ..." is prose, not the title itself.
 _TITLE_HEAD = re.compile(r"title(?![0-9a-z])[ \t]*[:\u2013\u2014-]", re.IGNORECASE)
@@ -99,12 +116,22 @@ _LEAD_MD = "*_`# \t"
 
 # Title first, because it is read back out of the written handoff and becomes the name of
 # the session that continues: what that session will do, which the old session's own title
-# cannot say -- it says how this one began.
-SECTIONS = ("Title (4-8 words naming the specific next piece of work -- narrow, not the "
-            "project, not how this session began; e.g. `Title: fix flow session names`); "
+# cannot say -- it says how this one began. Enforced, not asked for: a handoff without one
+# is refused, and the text kept.
+SECTIONS = ("Title (first line `Title: <the specific next piece of work>`, 2-10 words, in "
+            "the language you and the user speak, never `Continue ...` -- `ruti flow "
+            "handoff` refuses a handoff without one); "
             "Goal; Done; In progress (exactly where you stopped); Next steps, in order; "
             "Key files, commands and state; Decisions and constraints; Instructions to "
             "your next self")
+
+# Shown to the model whose handoff was refused. It is the one thing the writer has to add
+# and the one thing it cannot guess: the name of the session this handoff opens.
+HANDOFF_TITLE_HELP = (
+    "A handoff must name the session that continues it: a first line `Title: <2-10 words "
+    "naming the specific next piece of work>`, in the language you and the user speak. "
+    "Narrow, not general -- `Title: fix flow session names`, not `Continue the project`."
+)
 
 # The handoff has to get through the same gate that refuses everything else, and a
 # heredoc is exactly what `wait._ruti_only` rejects as chaining. So this one shape is let
@@ -180,8 +207,46 @@ def pre_tool_use(session_id: str, payload: dict[str, Any]) -> dict[str, Any] | N
 def _prune(now: float) -> None:
     try:
         for path in FLOW_DIR.iterdir():
-            if now - path.stat().st_mtime > KEEP_SECONDS:
+            # A draft is a handoff nobody has sent yet: worth a day, not a fortnight,
+            # because the session that wrote it is long gone by then.
+            keep = DRAFT_SECONDS if path.name.endswith("-draft.md") else KEEP_SECONDS
+            if now - path.stat().st_mtime > keep:
                 path.unlink()
+    except OSError:
+        pass
+
+
+def _draft_path(session_id: str) -> Path:
+    return FLOW_DIR / f"{session_id}-draft.md"
+
+
+def save_draft(session_id: str, text: str) -> bool:
+    """Keep the handoff text that could not be written, so only its title is missing.
+
+    A refused handoff costs nothing to keep and a whole context to write again, so the
+    text is put aside before the error goes out; `ruti flow handoff --title "..."` then
+    finishes it with nothing to re-send. False when it could not be written at all --
+    which only means the completion has to send the text as well.
+    """
+    try:
+        FLOW_DIR.mkdir(parents=True, exist_ok=True)
+        _draft_path(session_id).write_text(text, encoding="utf-8")
+        return True
+    except OSError:
+        return False
+
+
+def load_draft(session_id: str) -> str | None:
+    try:
+        text = _draft_path(session_id).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return text if text.strip() else None
+
+
+def clear_draft(session_id: str) -> None:
+    try:
+        _draft_path(session_id).unlink()
     except OSError:
         pass
 
@@ -276,37 +341,13 @@ def transcript_facts(path: str | None) -> dict[str, Any]:
     return facts
 
 
-def handoff_goal(text: str) -> str | None:
-    """The handoff's Goal, read out of the markdown the model wrote. None without one.
-
-    A title has to be one line, and the handoff is free prose under seven headings, so
-    this is a heading scan rather than a parse: the first line that says "goal" and the
-    text after it, or the first thing under the heading when the heading stands alone.
-    """
-    lines = str(text or "").splitlines()
-    for index, line in enumerate(lines):
-        plain = line.strip().strip(_MD_MARKERS)
-        head = _GOAL_HEAD.match(plain)
-        if not head:
-            continue
-        rest = plain[head.end():]
-        goal = _WHITESPACE.sub(" ", rest.lstrip(_GOAL_GAP).lstrip(_LEAD_MD)).strip()
-        if not goal:
-            for follow in lines[index + 1:]:
-                goal = _WHITESPACE.sub(" ", follow.strip(_MD_MARKERS)).strip()
-                if goal:
-                    break
-        return goal or None
-    return None
-
-
 def handoff_title(text: str) -> str | None:
     """The handoff's Title line, read out of the markdown the model wrote. None without one.
 
-    Like `handoff_goal`, a heading scan rather than a parse: markdown markers off both
-    ends, the word "title" with a separator after it, and the rest of that same line.
-    Unlike the goal, there is no look-ahead -- a title has to be on the line that says so
-    or the next heading's text would be read as the name of the session.
+    A heading scan rather than a parse: markdown markers off both ends, the word "title"
+    with a separator after it, and the rest of that same line. No look-ahead -- a title has
+    to be on the line that says so or the next heading's text would be read as the name of
+    the session.
     """
     for line in str(text or "").splitlines():
         plain = line.strip().strip(_MD_MARKERS)
@@ -318,6 +359,63 @@ def handoff_title(text: str) -> str | None:
     return None
 
 
+class TitleError(ValueError):
+    """The handoff has no title that can name the session that continues it."""
+
+
+def title_problem(title: str | None) -> str | None:
+    """Why `title` will not do as a session name, or None when it will.
+
+    One sentence, because it is read by the model that wrote the handoff, next to what to
+    do about it: a title is the name of a window, so it has to be short, and it has to
+    name work rather than instruct the reader to carry on.
+    """
+    title = _WHITESPACE.sub(" ", str(title or "")).strip()
+    if not title:
+        return "there is no title"
+    words = len(title.split())
+    if not TITLE_MIN_WORDS <= words <= TITLE_MAX_WORDS:
+        return f"a title is {TITLE_MIN_WORDS}-{TITLE_MAX_WORDS} words, this is {words}"
+    if len(title) > TITLE_MAX_CHARS:
+        return f"a title is at most {TITLE_MAX_CHARS} characters"
+    if _TITLE_BAD_START.match(title):
+        return ("a title names the work ahead, not an instruction to continue -- say WHAT "
+                "it will work on")
+    return None
+
+
+def _without_title_line(text: str) -> str:
+    """`text` with its first `Title:` line gone, whether or not that line was where the
+    title belongs -- one Title line, whichever of the two the writer meant."""
+    kept = []
+    dropped = False
+    for line in str(text or "").splitlines():
+        # Only the first: the same words further down are the writer's own content (a task
+        # called "Title: ..."), and dropping those would silently cut text out of a handoff.
+        if not dropped and _TITLE_HEAD.match(line.strip().strip(_MD_MARKERS)):
+            dropped = True
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def prepare_handoff(text: str, title: str | None = None) -> str:
+    """`text` with a valid `Title:` as its first line, or `TitleError` naming the problem.
+
+    The `title` argument is the writer's own answer (`--title`) and wins over the line in
+    the text, so the whole handoff does not have to be sent again to fix one word in it.
+    Whitespace is collapsed because the name goes into a window title, and the existing
+    line is removed rather than left under the new one: two titles in one handoff means
+    the next session is named after whichever the reader happened to find first.
+    """
+    chosen = _WHITESPACE.sub(" ", str(title or "")).strip() or handoff_title(text) or ""
+    chosen = _WHITESPACE.sub(" ", chosen).strip()
+    problem = title_problem(chosen)
+    if problem:
+        raise TitleError(problem)
+    return f"Title: {chosen}\n\n{_without_title_line(text)}".strip()
+
+
 def _word_cut(value: str, limit: int) -> str:
     """`value` shortened to `limit` at a whole word, not mid-word."""
     if len(value) <= limit:
@@ -327,21 +425,28 @@ def _word_cut(value: str, limit: int) -> str:
     return (head[:space] if space > 0 else head).rstrip()
 
 
-def session_title(previous: str | None, handoff_text: str, hop: int,
-                  custom: str | None = None) -> str:
+def session_title(handoff_text: str, hop: int, *, custom: str | None = None,
+                  folder: str | None = None) -> str:
     """What `--name` to open the next session under: the narrowest description of the work
-    there will be, from the handoff's Title, its Goal, or the old session's own name.
+    there will be -- a name the user set, else the handoff's Title, else the project
+    folder, else nothing in particular.
 
     What the next session will do comes first, because that is what a name is for, and the
-    manager writing the handoff is the only one who knows it. The old session's title is
-    last before the fallback: it is generated from how that session *began*, so it
-    describes work already done. A custom title is the user's own and outranks all of it
-    -- unless it carries a hop's suffix, which means the previous hop put it there with
-    `--name` and it would stick to every hop after that, naming none of them.
+    manager writing the handoff is the only one who knows it. A custom title is the user's
+    own and outranks it -- unless it carries a hop's suffix, which means the previous hop
+    put it there with `--name` and it would stick to every hop after that, naming none of
+    them.
+
+    The handoff's Goal is never used, however good the handoff's Title is: a Goal is prose
+    written as an instruction to the next session ("Continue the HACCP work ... answer in
+    Russian"), and cutting that to fit a window title once produced a name ending
+    mid-word. A Title that would not pass the same gate is skipped rather than used -- a
+    handoff written before there was a gate still gets a name, just not that one -- which
+    leaves the folder the session runs in, which at least says where the work is.
 
     The hop number is in the title because the window says nothing else about where it
-    sits in the chain, and the previous session's own suffix is removed first so the
-    count cannot stack across hops.
+    sits in the chain, and everything is cut at a word: half a word in a window title is
+    the failure this whole chain of choices exists to prevent.
     """
     base = ""
     if custom:
@@ -351,17 +456,16 @@ def session_title(previous: str | None, handoff_text: str, hop: int,
             base = own
     if not base:
         title = handoff_title(handoff_text)
-        if title:
+        if title and title_problem(title) is None:
             base = _word_cut(title, HANDOFF_TITLE_MAX)
-    if not base:
-        base = handoff_goal(handoff_text) or ""
-    if not base and previous:
-        base = _WHITESPACE.sub(" ", _FLOW_SUFFIX.sub("", str(previous))).strip()
+    if not base and folder:
+        base = _WHITESPACE.sub(" ", str(folder)).strip()
     if not base:
         base = "ruti flow"
     suffix = f" (flow {hop}/{MAX_HOPS})"
-    if len(base) + len(suffix) > TITLE_MAX:
-        base = base[: TITLE_MAX - len(suffix) - 1].rstrip() + "\u2026"
+    room = TITLE_MAX - len(suffix)
+    if len(base) > room:
+        base = _word_cut(base, room - 1) + "\u2026"
     return base + suffix
 
 
@@ -392,9 +496,10 @@ def stop(session_id: str, payload: dict[str, Any], *,
     seat = _seat_for(session_id, path)
     # Remote Control, and any name the user set themselves, are what was set up in the
     # session being left, so reading them is part of opening the continuation; the rest of
-    # the name comes from the handoff, which describes the work better. A naming problem
-    # must not cost the continuation itself: anything unreadable here just launches
-    # unnamed, without Remote Control, exactly as it did before.
+    # the name comes from the handoff, which describes the work better, and the folder it
+    # is written in, which at least says where. A naming problem must not cost the
+    # continuation itself: anything unreadable here just launches unnamed, without Remote
+    # Control, exactly as it did before.
     title: str | None = None
     remote_control = False
     try:
@@ -403,8 +508,8 @@ def stop(session_id: str, payload: dict[str, Any], *,
             text = path.read_text(encoding="utf-8")
         except OSError:
             text = ""
-        title = session_title(facts.get("title"), text, hop,
-                              custom=facts.get("custom_title"))
+        title = session_title(text, hop, custom=facts.get("custom_title"),
+                              folder=Path(cwd).name or None)
         remote_control = bool(facts.get("remote_control"))
     except Exception:
         title, remote_control = None, False

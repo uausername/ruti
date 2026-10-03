@@ -136,30 +136,6 @@ def test_nothing_to_read_is_not_an_error(tmp_path):
     assert flow.transcript_facts(str(tmp_path)) == empty  # a directory, not a transcript
 
 
-# -------------------------------------------------------------------- the goal
-
-
-@pytest.mark.parametrize("text", [
-    "## Goal\nShip the parser\n",
-    "**Goal:** Ship the parser",
-    "Goal: Ship the parser",
-    "# Handoff\n\n## Goal\n\n- Ship the parser\n",
-])
-def test_the_goal_is_read_out_of_the_handoff(text):
-    assert flow.handoff_goal(text) == "Ship the parser"
-
-
-def test_the_first_thing_under_a_bare_goal_heading_and_whitespace_collapsed():
-    assert flow.handoff_goal("Done: yesterday\n\n### Goal\n\n  Ship   the parser \n") \
-        == "Ship the parser"
-
-
-def test_no_goal_section_means_no_title_to_carry():
-    assert flow.handoff_goal("# Handoff\n\nDone: everything\n") is None
-    assert flow.handoff_goal("") is None
-    assert flow.handoff_goal("Goal:\n") is None
-
-
 # --------------------------------------------------------------------- the title
 
 
@@ -168,7 +144,7 @@ def test_no_goal_section_means_no_title_to_carry():
     "**Title:** Fix X",
     "## Title: Fix X",
     "- Title - Fix X",
-    "# Handoff\n\nTitle \u2013 `Fix X`  \n",
+    "# Handoff\n\nTitle – `Fix X`  \n",
     "> Title: \"Fix   X\"\n",
 ])
 def test_the_title_line_of_the_handoff_is_read_in_any_markdown_shape(text):
@@ -187,58 +163,66 @@ def test_a_word_that_merely_starts_with_title_is_not_one():
     assert flow.handoff_title("Title of the session: whatever it began as\n") is None
 
 
-def test_the_next_session_is_named_for_the_work_it_will_do():
-    assert flow.session_title(None, "Title: fix flow names\nGoal: big project", 2) \
+def test_the_next_session_is_named_for_the_work_the_handoff_names():
+    assert flow.session_title("Title: fix flow names\nGoal: big project", 2) \
         == "fix flow names (flow 2/5)"
+
+
+def test_the_goal_is_never_a_name():
+    """The bug this chain replaced: a Goal is prose written as an instruction, and cut to
+    a window title it ends mid-word ("...(answer in Russia… (flow 2/5)")."""
+    goal = "Goal: Continue the HACCP task-graph work for the founder (answer in Russian)"
+    assert flow.session_title(goal, 2) == "ruti flow (flow 2/5)"
+    assert flow.session_title(goal, 2, folder="haccp") == "haccp (flow 2/5)"
+
+
+def test_a_bad_legacy_title_is_skipped_rather_than_used():
+    """A handoff written before there was a gate still gets a name -- just not that one."""
+    text = "Title: Continue the HACCP task-graph work\nGoal: ship it"
+    assert flow.session_title(text, 2, folder="haccp") == "haccp (flow 2/5)"
+    assert flow.session_title("Title: oneword\nGoal: ship it", 2) == "ruti flow (flow 2/5)"
 
 
 def test_a_long_handoff_title_is_cut_at_a_word():
-    text = "Title: " + " ".join(["alpha"] * 20)
-    result = flow.session_title(None, text, 1)
+    long = " ".join(["abcdefg"] * 8)  # 8 words, 63 characters: past the 60 a title gets
+    assert flow.title_problem(long) is None
+    result = flow.session_title(f"Title: {long}", 1)
     base = result[: -len(" (flow 1/5)")]
-    assert base == " ".join(["alpha"] * 10)  # whole words only, no "alph"
+    assert base == " ".join(["abcdefg"] * 7)  # whole words only, no "abcd"
     assert len(base) <= flow.HANDOFF_TITLE_MAX
 
 
-def test_the_old_name_is_only_used_when_the_handoff_says_nothing():
-    handoff = "Done: yesterday\n\nKey files: ruti/flow.py\n"
-    assert flow.session_title("Fix auth (flow 1/5)", handoff, 2) == "Fix auth (flow 2/5)"
-    assert flow.session_title("Fix auth (flow 1/5)", "Title: fix flow names", 2) \
-        == "fix flow names (flow 2/5)"
-    assert flow.session_title("Fix auth (flow 1/5)", "Goal: ship the parser", 2) \
-        == "ship the parser (flow 2/5)"
+def test_the_folder_name_is_the_last_named_thing_before_the_generic_one():
+    assert flow.session_title("Done: yesterday", 1, folder="haccp") == "haccp (flow 1/5)"
+    assert flow.session_title("", 1, folder="  ") == "ruti flow (flow 1/5)"
+
+
+def test_with_nothing_at_all_to_go_on():
+    assert flow.session_title("", 3) == f"ruti flow (flow 3/{flow.MAX_HOPS})"
+    assert flow.session_title(None, 3) == f"ruti flow (flow 3/{flow.MAX_HOPS})"
 
 
 def test_a_name_the_user_chose_beats_the_handoff():
-    assert flow.session_title("Fix auth", "Title: fix flow names", 2,
+    assert flow.session_title("Title: fix flow names", 2,
                               custom="my own name") == "my own name (flow 2/5)"
 
 
 def test_a_name_a_previous_hop_wrote_is_not_the_user_speaking():
     """`claude --name` wrote it on the way in, so it describes the work already handed off
     and must not stick to every hop after that."""
-    assert flow.session_title("Fix auth", "Title: fix flow names", 3,
+    assert flow.session_title("Title: fix flow names", 3,
                               custom="old work (flow 1/5)") == "fix flow names (flow 3/5)"
 
 
-def test_the_old_name_goes_on_with_the_hop_counted():
-    assert flow.session_title("Fix auth (flow 1/5)", "", 2) == "Fix auth (flow 2/5)"
-
-
-def test_without_a_name_the_handoff_supplies_one():
-    assert flow.session_title(None, "Goal: Ship it", 2) == "Ship it (flow 2/5)"
-    assert flow.session_title("  ", "Goal: Ship it", 1) == "Ship it (flow 1/5)"
-
-
-def test_with_nothing_at_all_to_go_on():
-    assert flow.session_title(None, "", 3) == f"ruti flow (flow 3/{flow.MAX_HOPS})"
-
-
-def test_a_very_long_name_is_cut_to_fit():
-    result = flow.session_title("x" * 200, "", 2)
+def test_a_very_long_name_is_cut_at_a_word_never_mid_word():
+    long = " ".join(["alpha"] * 40)  # 199 characters
+    result = flow.session_title("", 2, custom=long)
+    base = result[: -len(" (flow 2/5)")]
     assert len(result) <= flow.TITLE_MAX
     assert result.endswith(f"(flow 2/{flow.MAX_HOPS})")
-    assert "\u2026" in result
+    assert base.endswith("\u2026")
+    assert base[:-1] in long and long.startswith(base[:-1])  # whole words, nothing cut
+    assert not base[:-1].endswith("alph")  # and no half of one
 
 
 # ----------------------------------------------------------------- the launcher
@@ -303,6 +287,18 @@ def test_stop_names_the_next_session_for_the_work_the_handoff_names(tools, tmp_p
     assert 'Named "fix flow names' in result["systemMessage"]
 
 
+def test_stop_names_it_from_the_folder_when_the_handoff_has_no_usable_title(tools):
+    """What a live handoff written before there was a gate gets: the folder, not its Goal
+    cut at 60 characters."""
+    on()
+    path = flow.write_handoff(SID, "Goal: Continue the HACCP work (answer in Russian)",
+                              "C:/work/haccp")
+    flow.stop(SID, {"permission_mode": "auto"}, spawn=Spawn())
+    script = path.with_suffix(".ps1").read_text(encoding="utf-8-sig")
+    assert "'--name' 'haccp (flow 1/5)'" in script
+    assert "HACCP" not in script
+
+
 def test_stop_does_not_carry_the_previous_hop_s_name_on(tools, tmp_path):
     """Hop 2 of a chain was named by hop 1's `--name`; that is a description of the work
     already handed off, so hop 2 is named by its own handoff instead."""
@@ -325,14 +321,14 @@ def test_stop_does_not_carry_the_previous_hop_s_name_on(tools, tmp_path):
     assert f"ship the parser (flow 1/{flow.MAX_HOPS})" not in script
 
 
-def test_stop_without_a_transcript_falls_back_to_the_handoff(tools):
+def test_stop_without_a_transcript_still_names_it_from_the_handoff(tools):
     on()
-    path = flow.write_handoff(SID, "Goal: ship the parser", "C:/work")
+    path = flow.write_handoff(SID, "Title: fix flow names\nGoal: ship the parser", "C:/work")
     result = flow.stop(SID, {"permission_mode": "auto"}, spawn=Spawn())
     hop = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))["hop"]
     script = path.with_suffix(".ps1").read_text(encoding="utf-8-sig")
     assert "--remote-control" not in script
-    assert f"'--name' 'ship the parser (flow {hop}/{flow.MAX_HOPS})'" in script
+    assert f"'--name' 'fix flow names (flow {hop}/{flow.MAX_HOPS})'" in script
     assert "Remote Control" not in result["systemMessage"]
 
 

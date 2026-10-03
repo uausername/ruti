@@ -896,10 +896,14 @@ def flow_group() -> None:
 @flow_group.command("handoff")
 @click.option("--file", "file_path", type=click.Path(exists=True, dir_okay=False),
               help="Read the handoff from a file instead of stdin.")
-def flow_handoff(file_path: str | None) -> None:
-    """Write this session's handoff -- Goal, Done, In progress, Next steps, Key files,
-    Decisions, Instructions -- for the next session to continue from."""
+@click.option("--title", default=None,
+              help="The session's name; or put `Title: ...` as the first line.")
+def flow_handoff(file_path: str | None, title: str | None) -> None:
+    """Write this session's handoff -- Title (2-10 words naming the next piece of work),
+    Goal, Done, In progress, Next steps, Key files, Decisions, Instructions -- for the next
+    session to continue from, named after it."""
     import os
+    import sys
     from pathlib import Path
 
     from . import flow as flow_mod
@@ -910,19 +914,40 @@ def flow_handoff(file_path: str | None) -> None:
                                    "first")
     if file_path:
         data = Path(file_path).read_bytes()
-    else:
+    elif not sys.stdin.isatty():
         data = click.get_binary_stream("stdin").read()
+    else:
+        # A terminal rather than a pipe: nothing was sent, and waiting on it would hang a
+        # session that only came here to add the title its handoff was refused for.
+        data = b""
     # Bytes, decoded here: a heredoc from Git Bash arrives as UTF-8 whatever the console
     # code page says, and reading it as cp1251 would mangle every Cyrillic word in it.
     try:
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError:
         text = data.decode(errors="replace")
+    if not text.strip() and not file_path:
+        # Nothing sent, so this is the second half of a refused handoff: its text is
+        # already on disk and only the title was missing.
+        text = flow_mod.load_draft(session_id) or ""
+    try:
+        text = flow_mod.prepare_handoff(text, title)
+    except flow_mod.TitleError as exc:
+        kept = ""
+        if text.strip() and flow_mod.save_draft(session_id, text):
+            kept = ('Your text is kept: run `ruti flow handoff --title "<the title>"` -- '
+                    'nothing else to send.')
+        raise click.ClickException(
+            f"the handoff was not written: {exc}.\n{flow_mod.HANDOFF_TITLE_HELP}\n{kept}"
+        ) from exc
     try:
         path = flow_mod.write_handoff(session_id, text, os.getcwd())
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
+    flow_mod.clear_draft(session_id)
     ui.ok(f"handoff written: {path}")
+    ui.say("[muted]session name: " + ui.literal(flow_mod.handoff_title(text) or "")
+           + " (flow N/5 is added)[/muted]")
     ui.say("[muted]end the turn now -- the Stop hook opens the next session[/muted]")
 
 
