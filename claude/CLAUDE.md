@@ -78,6 +78,14 @@ is where the saving actually comes from: **the subscription burn is driven by co
 length**, so the win is not that the delegate is cheaper, it is that its output never
 enters this window.
 
+`route`'s command already carries a `--timeout` sized to the task — keep it rather than
+dropping it back to the default. Tasks of 150–300 lines plus their tests take 8–15
+minutes, so a flat 900s kills runs that were on their last step. After reviewing a
+delegate's work, record what became of it: `ruti verdict ok` (used) or `ruti verdict
+bad` (rewritten or discarded). A run killed by its timeout counts for nothing until
+then — it is neither a success nor a failure — and the verdict is what `route`'s track
+record reads. The verdict comes after the review below, not instead of it.
+
 It also checks which model really answered — before the run with a probe, and after
 it from the proxy's own log of every request. If it reports `substituted: true`, some
 of the run's requests were served by a different model group than the alias (the

@@ -246,7 +246,7 @@ def test_a_proven_alias_outranks_an_unproven_one(ranking):
         round((0.6 + 0.4 * proven.speed) * proven.factor, 3)
     )
     assert good["track"] == {"runs": 8, "succeeded": 8, "median_s": 30.0,
-                             "excluded": 0, "factor": 1.2}
+                             "excluded": 0, "timed_out": 0, "factor": 1.2}
     assert any("track record" in reason for reason in good["reasons"])
     assert any("median 30s" in reason and "x1.20" in reason
                for reason in good["reasons"])

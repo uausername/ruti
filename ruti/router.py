@@ -46,6 +46,22 @@ RESPONSE_HEADROOM = 4000
 TRIVIAL_LOC = 40
 TRIVIAL_FILES = 2
 
+# How long a delegate is allowed for a given task, rather than one flat budget for all
+# of them. Measured on this machine: a 150-300 line change plus its tests takes 8-15
+# minutes, and one full test run is about a minute -- so a flat 900s killed runs that
+# were on their last step, and the manager then finished the work and used it anyway.
+# 300s covers starting up and one test cycle; 3s a line is generous against that 8-15
+# minute range; 60s a file covers reading, editing and running what it changed.
+# Clamped at both ends because the estimate is rough: 600s is enough for anything
+# trivial (which is not delegated anyway), and past 45 minutes a delegate that has not
+# finished is usually stuck rather than slow.
+TIMEOUT_BASE_S = 300
+TIMEOUT_SECONDS_PER_LINE = 3
+TIMEOUT_SECONDS_PER_FILE = 60
+TIMEOUT_MIN_S = 600
+TIMEOUT_MAX_S = 2700
+TIMEOUT_ROUND_S = 60
+
 # At or below this difficulty a brief is specific enough that a free model can carry
 # it: boilerplate, a refactor, a single-file implementation spelled out in detail. A
 # metered executor buys nothing there that a free one would not, so it ranks below
@@ -175,6 +191,22 @@ class Task:
         return self.loc <= TRIVIAL_LOC and self.files <= TRIVIAL_FILES
 
 
+def suggested_timeout(task: Task) -> int:
+    """Seconds to allow a delegate for this task: 300 + 3 per line + 60 per file,
+    clamped to [600, 2700], rounded up to a whole minute.
+
+    `route` knows how big the task is and used to say nothing about `--timeout`, so the
+    delegate ran under `delegate`'s flat default whatever it was given. See the
+    `TIMEOUT_*` constants above for where the numbers come from; rounded up to a minute
+    because a budget of 903s says the estimate was never really made.
+    """
+    seconds = (TIMEOUT_BASE_S
+               + TIMEOUT_SECONDS_PER_LINE * max(0, task.loc)
+               + TIMEOUT_SECONDS_PER_FILE * max(0, task.files))
+    seconds = min(TIMEOUT_MAX_S, max(TIMEOUT_MIN_S, seconds))
+    return -(-seconds // TIMEOUT_ROUND_S) * TIMEOUT_ROUND_S
+
+
 def apply_classification(task: Task, guess: "jev.Classification") -> tuple[Task, list[str]]:
     """Fold a classifier's guess into a task, but only where it makes routing safer.
 
@@ -286,7 +318,8 @@ def _local_candidates(task: Task) -> list[Candidate]:
             speed=0.55 if resident else 0.4,  # a swap costs several seconds
             capability=0.35,  # small local models; honest about the ceiling
             coding="coder" in model.key.lower(),
-            command=f"ruti delegate --model {identifier} --task-file <file>",
+            command=(f"ruti delegate --model {identifier} "
+                     f"--timeout {suggested_timeout(task)} --task-file <file>"),
         )
         candidate.reasons.append("runs on this machine: no subscription cost, no data leaves")
         if resident:
@@ -327,7 +360,8 @@ def _remote_candidates(task: Task) -> list[Candidate]:
             router=openrouter.is_router_record(record),
             provider=record.get("provider"),
             model=record.get("model"),
-            command=f"ruti delegate --model {alias} --task-file <file>",
+            command=(f"ruti delegate --model {alias} "
+                     f"--timeout {suggested_timeout(task)} --task-file <file>"),
         )
         candidate.reasons.append(f"{record['model']} -- {_money_reason(candidate)}")
         if candidate.router:
@@ -363,7 +397,8 @@ def _remote_candidates(task: Task) -> list[Candidate]:
             speed=0.75,
             capability=0.7,
             free=None,  # a bare config.yaml entry says nothing about its price
-            command=f"ruti delegate --model {alias} --task-file <file>",
+            command=(f"ruti delegate --model {alias} "
+                     f"--timeout {suggested_timeout(task)} --task-file <file>"),
         )
         candidate.reasons.append(f"configured in config.yaml -- {_money_reason(candidate)}")
         out.append(candidate)
@@ -490,6 +525,14 @@ def rank(task: Task, snapshot: quota.Quota | None = None, *,
             candidate.reasons.append(
                 f"no track record of its own yet: {track_record.excluded} past run(s) "
                 "were answered by another model"
+            )
+        elif track_record is not None and track_record.timed_out > 0:
+            # Held, not failed: `runs` says nothing about this alias because nobody has
+            # reviewed those runs yet, and saying nothing would read as never asked.
+            candidate.reasons.append(
+                f"no track record of its own yet: {track_record.timed_out} past run(s) "
+                "hit their timeout and count for nothing until reviewed -- "
+                "`ruti verdict ok|bad --run <id>`"
             )
 
         # Hard gates.
@@ -623,6 +666,7 @@ def rank(task: Task, snapshot: quota.Quota | None = None, *,
             "kind": task.kind, "files": task.files, "loc": task.loc,
             "estimated_tokens": needed, "difficulty": round(task.difficulty, 2),
             "trivial": task.trivial,
+            "timeout_s": suggested_timeout(task),
         },
         "modes": session_modes,
         "rankings": (
@@ -699,6 +743,7 @@ def _render(candidate: Candidate) -> dict[str, Any]:
                 "succeeded": candidate.track.succeeded,
                 "median_s": candidate.track.median_s,
                 "excluded": candidate.track.excluded,
+                "timed_out": candidate.track.timed_out,
                 "factor": round(candidate.track.factor, 3),
             }
             if candidate.track is not None else None

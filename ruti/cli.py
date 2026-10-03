@@ -1310,6 +1310,77 @@ def delegate(model: str, task: str | None, task_file: str | None, directory: str
     raise SystemExit(0 if outcome.ok else 1)
 
 
+@main.command()
+@click.argument("verdict", type=click.Choice(["ok", "bad"]))
+@click.option("--run", "run_id", default=None,
+              help="Which delegation, by the `run_id` in its summary. Default: this "
+                   "session's latest.")
+@click.option("--note", default=None, help="Why, in a few words. Kept in the ledger.")
+@click.option("--json", "as_json", is_flag=True)
+def verdict(verdict: str, run_id: str | None, note: str | None, as_json: bool) -> None:
+    """Record the manager's review of a delegation, so the alias's track record counts
+    what was actually used.
+
+    Only the manager knows whether a delegate's work was kept: a run killed by its own
+    timeout leaves files on disk and reports `ok: false`, and the alias loses ranking for
+    work that was used. This is the half of the record only a reader can supply, and
+    `track` reads it back.
+    """
+    if run_id:
+        run = _delegation_by_id(run_id)
+        if run is None:
+            raise click.ClickException(
+                f"no delegation with run id {ui.literal(run_id)} in the ledger"
+            )
+    else:
+        run = _last_delegation_here()
+        if run is None:
+            raise click.ClickException(
+                "no delegation in this session to give a verdict on -- pass --run"
+            )
+
+    model = run.get("model") or "unknown"
+    fields = {"run_id": run["run_id"], "verdict": verdict, "model": model}
+    if note:
+        fields["note"] = note
+    ledger.record("verdict", **fields)
+
+    if as_json:
+        ui.emit_json(fields)
+        return
+    ui.say(f"verdict {verdict} for {model} run {run['run_id']}")
+
+
+def _delegations() -> list[dict]:
+    return [e for e in ledger.read_events() if e.get("event") == "delegation"]
+
+
+def _delegation_by_id(run_id: str) -> dict | None:
+    """The delegation with this `run_id`, in any session.
+
+    Scoped to nothing but the id: `--run` exists precisely for the case where the run
+    being reviewed is not the last one this session did -- a verdict given hours later
+    after reading the diff, or for a run in the session that has since ended.
+    """
+    for entry in reversed(_delegations()):
+        if entry.get("run_id") == run_id:
+            return entry
+    return None
+
+
+def _last_delegation_here() -> dict | None:
+    """This session's latest delegation that can be given a verdict on.
+
+    Delegations without a `run_id` are skipped: they predate the field, so a verdict
+    could never be matched back to the run it was about.
+    """
+    session_id = sessions.current_session_id()
+    for entry in reversed(_delegations()):
+        if entry.get("run_id") and entry.get("session") == session_id:
+            return entry
+    return None
+
+
 def _say_effective_model(outcome: delegate_mod.Outcome) -> None:
     """`pareto-code -> anthropic/claude-fable-5-1`, and what it cost if that is known."""
     alias = outcome.model_requested.split("/")[-1]
