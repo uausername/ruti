@@ -40,8 +40,10 @@ subscription window.
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from . import modes, quota
@@ -87,6 +89,17 @@ EFFORT_BURN: dict[str, float] = {
 # Kinds whose judgement must not be handed to a model that cannot see the consequences.
 # A cheap seat here is not cheaper, it is wrong.
 MANAGER_ONLY_KINDS = ("security", "review")
+
+# Claude Code's `/advisor` (saved as `advisorModel` in the user settings, behind an
+# experimental env flag) brings a stronger model to the decision points of a task, so
+# the seat itself may be one effort notch cheaper. Only where the advisor may be called
+# at all: never for manager-only kinds, and not past YELLOW, where the global rules
+# forbid advisor calls. Only an Opus-class advisor counts.
+ADVISOR_RELIEF = 0.10
+ADVISOR_KINDS = ("implement", "refactor", "debug")
+ADVISOR_ENV = "CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL"
+ADVISOR_KILL_ENV = "CLAUDE_CODE_DISABLE_ADVISOR_TOOL"
+CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
 
 # Below this many tokens in the context window, re-reading it uncached on a model switch
 # costs less than carrying the wrong seat for the rest of the task.
@@ -395,6 +408,11 @@ def advise(*, kind: str | None, difficulty: float | None, session_id: str | None
         difficulty = router.KIND_DIFFICULTY.get(kind, 0.5)
         difficulty_source = "kind"
     required = 0.45 + 0.5 * difficulty
+    advisor = advisor_model()
+    advised = (advisor is not None and kind in ADVISOR_KINDS
+               and band in (quota.GREEN, quota.YELLOW))
+    if advised:
+        required -= ADVISOR_RELIEF
 
     if current is None:
         current = current_seat(session_id)
@@ -432,9 +450,31 @@ def advise(*, kind: str | None, difficulty: float | None, session_id: str | None
         current=current,
         switch=_verdict(best, current, required, tokens, effort_first),
         task={"kind": kind, "difficulty": round(difficulty, 2),
-              "required": round(required, 2), "source": difficulty_source},
+              "required": round(required, 2), "source": difficulty_source,
+              "advisor": advisor, "advisor_relief": ADVISOR_RELIEF if advised else 0.0},
         band=band,
     )
+
+
+def advisor_model(settings_path: Path | None = None) -> str | None:
+    """The Opus-class model `/advisor` is set to, or None when it is off or weaker.
+
+    The flag may come from the environment or from the settings' own `env` block, which
+    is where Claude Code reads it from too; the kill switch wins over either.
+    """
+    data = read_json(settings_path or CLAUDE_SETTINGS, default={})
+    if not isinstance(data, dict):
+        return None
+    env = data.get("env") if isinstance(data.get("env"), dict) else {}
+
+    def on(name: str) -> bool:
+        value = os.environ.get(name, env.get(name, ""))
+        return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+    if on(ADVISOR_KILL_ENV) or not on(ADVISOR_ENV):
+        return None
+    model = model_alias(data.get("advisorModel"))
+    return model if model in ("opus", "fable") else None
 
 
 def prompt_hint(session_id: str | None, kind: str, kind_confidence: float,

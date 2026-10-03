@@ -33,6 +33,21 @@ def advise(band, **kwargs):
     return manager.advise(snapshot=Snap(band), **kwargs)
 
 
+@pytest.fixture(autouse=True)
+def no_advisor(tmp_path, monkeypatch):
+    """The real user settings may name an advisor; no test should depend on that."""
+    monkeypatch.setattr(manager, "CLAUDE_SETTINGS", tmp_path / "settings.json")
+    monkeypatch.delenv(manager.ADVISOR_ENV, raising=False)
+    monkeypatch.delenv(manager.ADVISOR_KILL_ENV, raising=False)
+
+
+def with_advisor(tmp_path, model="opus", flag="1"):
+    import json
+    env = {manager.ADVISOR_ENV: flag} if flag else {}
+    (tmp_path / "settings.json").write_text(
+        json.dumps({"advisorModel": model, "env": env}), encoding="utf-8")
+
+
 def by_label(advice):
     return {entry.seat.label(): entry for entry in advice.ranked}
 
@@ -438,3 +453,38 @@ def test_the_hook_says_nothing_when_there_is_no_task_to_reuse(hook, monkeypatch)
     monkeypatch.setattr(ups.manager, "prompt_hint", lambda *_a, **_k: ("NOTE", "shown"))
     output = hook("yes", None)
     assert "systemMessage" not in output
+
+
+def test_an_opus_advisor_lowers_what_implementation_requires(tmp_path):
+    plain = advise(quota.GREEN).task["required"]
+    with_advisor(tmp_path)
+    advised = advise(quota.GREEN)
+    assert advised.task["advisor"] == "opus"
+    assert advised.task["required"] == pytest.approx(plain - manager.ADVISOR_RELIEF)
+
+
+@pytest.mark.parametrize("kind", ["security", "review", "analyze"])
+def test_an_advisor_gives_no_relief_outside_its_kinds(tmp_path, kind):
+    plain = advise(quota.GREEN, kind=kind).task["required"]
+    with_advisor(tmp_path)
+    assert advise(quota.GREEN, kind=kind).task["required"] == plain
+
+
+@pytest.mark.parametrize("band", [quota.ORANGE, quota.RED])
+def test_an_advisor_gives_no_relief_past_yellow(tmp_path, band):
+    plain = advise(band).task["required"]
+    with_advisor(tmp_path)
+    assert advise(band).task["advisor_relief"] == 0.0
+    assert advise(band).task["required"] == plain
+
+
+@pytest.mark.parametrize("model,flag", [("sonnet", "1"), ("opus", ""), ("opus", "0")])
+def test_a_weak_or_disabled_advisor_does_not_count(tmp_path, model, flag):
+    with_advisor(tmp_path, model=model, flag=flag)
+    assert manager.advisor_model() is None
+
+
+def test_the_kill_switch_wins(tmp_path, monkeypatch):
+    with_advisor(tmp_path)
+    monkeypatch.setenv(manager.ADVISOR_KILL_ENV, "1")
+    assert manager.advisor_model() is None
