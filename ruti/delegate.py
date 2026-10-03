@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -72,6 +73,14 @@ class Outcome:
     load_error: str | None = None
     lines_written: int = 0
     broken_files: list[str] = field(default_factory=list)
+    # Set at the start of every run, so the summary, the ledger event and `ruti verdict
+    # --run` all name the same run even when it produced nothing. Short on purpose: it
+    # is read aloud and typed back by hand.
+    run_id: str = ""
+    # Whether the run was killed by its own timeout. A timed-out run is not a failure --
+    # the work may be on disk and the manager may use it -- but nothing can decide that
+    # without looking, and `track` must not count it either way until someone does.
+    timed_out: bool = False
 
     @property
     def ok(self) -> bool:
@@ -81,6 +90,8 @@ class Outcome:
     def summary(self) -> dict[str, Any]:
         return {
             "ok": self.ok,
+            "run_id": self.run_id,
+            "timed_out": self.timed_out,
             "model_requested": self.model_requested,
             "model_answering": self.model_answering,
             "model_effective": self.model_effective,
@@ -98,6 +109,13 @@ class Outcome:
             **({"error": self.error} if self.error else {}),
             **({"load_error": self.load_error} if self.load_error else {}),
             **({"tail": self.tail} if self.tail else {}),
+            # Only a timed-out run needs a next step, and the step is the same every
+            # time: the diff is on disk and only a human reading it can say whether the
+            # work was used. Naming the run id here is what makes that one command
+            # copyable rather than something to be reconstructed from the ledger.
+            **({"next": (f"timed out -- review the diff, then record the result: "
+                         f"ruti verdict ok|bad --run {self.run_id}")}
+               if self.timed_out else {}),
         }
 
 
@@ -228,6 +246,9 @@ def run(
     ensure_dirs()
     alias = model.split("/")[-1]
     outcome = Outcome(model_requested=model, router=_router_alias(alias))
+    # Before anything can fail: every run is named, so a verdict can be given for one
+    # that died before it wrote a file as well as for one that wrote a lot of them.
+    outcome.run_id = uuid.uuid4().hex[:8]
     # `route` ranks a local model that is not resident as "would load in a few
     # seconds", so the load has to happen here: a request for an unloaded `local-*`
     # alias does not fail, the proxy's fallback quietly answers from a remote model.
@@ -297,6 +318,11 @@ def run(
     except proc.ToolTimeout as exc:
         outcome.error = str(exc)
         outcome.exit_code = -1
+        # Not a failure, on its own: the budget ran out, not necessarily the work. What
+        # the child had already written is still on disk, and whether it is usable is a
+        # question only reading the diff can answer -- so `ok` stays False and the run
+        # is marked, rather than being scored as a broken model.
+        outcome.timed_out = True
         # Whatever the child printed before it was killed -- often the only clue to
         # what it was stuck doing (indexing the repo, waiting on a prompt, ...). Write
         # it to the same log a normal run would have produced rather than leaving no
@@ -494,6 +520,11 @@ def _record(outcome: Outcome, log_path: Path) -> None:
     ledger.record(
         "delegation",
         model=outcome.model_requested,
+        # What `ruti verdict --run` is given, and what `track` matches a later verdict
+        # against. Absent on ledger lines written before this field existed, which is why
+        # `track` treats a run with no id as though it had never been reviewed.
+        run_id=outcome.run_id,
+        timed_out=outcome.timed_out,
         tier="local" if alias.startswith("local-") else "remote",
         ok=outcome.ok,
         substituted=outcome.substituted,

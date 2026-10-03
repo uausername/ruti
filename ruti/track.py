@@ -13,7 +13,7 @@ how long it took, how many files it changed and which model really answered, so 
 history exists and goes unused. This module reads it and turns it into the two numbers
 the ranking actually wants: how often an alias finishes the job, and how long it takes.
 
-Three things it refuses to do:
+Four things it refuses to do:
 
 * **Count a run another model answered.** A fallback that serves a request for
   `laguna-s-2.1` says nothing about `laguna-s-2.1`, and a router's pick is nobody's
@@ -23,6 +23,11 @@ Three things it refuses to do:
 * **Read "exited 0" as success.** A run that reported ok and changed no file did not do
   the job: the manager writes it again by hand and has paid for the round trip twice.
   Seen on this machine: a delegation reported ok and had changed nothing.
+* **Count a run nobody has looked at.** A run killed by its own timeout is not a
+  failure -- the work may be on disk, and the manager very often finished and used it --
+  but it is also not evidence that the model works, because nobody has read the diff.
+  Those runs are held in their own counter until `ruti verdict` says what became of
+  them, and only then does the record count them either way.
 * **Learn from a very long past.** Sixty days, and the last twenty runs: a model that
   was rate-limited through last month's outage is not evidence about today, and twenty
   runs is enough to notice a change without one bad afternoon deciding the routing.
@@ -58,6 +63,10 @@ class Record:
     succeeded: int = 0
     median_s: float | None = None  # None when nothing succeeded, which is not "fast"
     excluded: int = 0  # runs that measured some other model, see `_answered_elsewhere`
+    # Runs killed by their own timeout and not yet reviewed (`ruti verdict`). Kept out
+    # of `runs` entirely: they are neither a success nor a failure, and the manager is
+    # the only one who can say which.
+    timed_out: int = 0
 
     @property
     def reliability(self) -> float:
@@ -103,19 +112,25 @@ def records(events: list[dict[str, Any]], registry: list[dict[str, Any]],
     log itself -- audited on this machine, 7 past runs had requests answered by
     gemini-flash while 6 of them were recorded as not substituted, one of them a `free`
     router run counted as that router's success.
+
+    Verdicts (`ruti verdict`, see `_verdicts`) are read out of the same `events` list
+    and applied per run: a reviewed run counts as the manager called it, however it
+    exited, and an unreviewed timed-out run counts as nothing at all.
     """
     registered = {
         str(r["alias"]): r for r in registry
         if isinstance(r, dict) and r.get("alias")
     }
+    verdicts = _verdicts(events)
     kept: dict[str, list[tuple[float, bool, float | None]]] = {}
     excluded: dict[str, int] = {}
+    held: dict[str, int] = {}
 
     for event in events:
-        run = _run(event)
+        run = _run(event, verdicts)
         if run is None:
             continue
-        alias, at, succeeded = run
+        alias, at, succeeded, awaiting_verdict = run
         # The registry is keyed by the bare alias while the ledger is keyed by the
         # executor name (`ruti-router/laguna-s-2.1`) -- the same split `delegate` makes
         # when it works out which tier a run was.
@@ -123,12 +138,16 @@ def records(events: list[dict[str, Any]], registry: list[dict[str, Any]],
                 or _fallback_in_log(event, alias, at, usage_log)):
             excluded[alias] = excluded.get(alias, 0) + 1
             continue
+        if awaiting_verdict:
+            held[alias] = held.get(alias, 0) + 1
+            continue
         kept.setdefault(alias, []).append((at, succeeded, _duration(event)))
 
     out: dict[str, Record] = {}
-    # An alias whose every run was answered elsewhere still gets an entry, or `runs == 0`
-    # could not be told apart from "never asked", and the two deserve different words.
-    for alias in set(kept) | set(excluded):
+    # An alias whose every run was answered elsewhere -- or whose every run hit its
+    # timeout and is still unreviewed -- still gets an entry, or `runs == 0` could not
+    # be told apart from "never asked", and the two deserve different words.
+    for alias in set(kept) | set(excluded) | set(held):
         runs = sorted(kept.get(alias, []), key=lambda run: run[0])[-MAX_RUNS:]
         succeeded = [run for run in runs if run[1]]
         measured = sorted(run[2] for run in succeeded if run[2] is not None)
@@ -137,6 +156,7 @@ def records(events: list[dict[str, Any]], registry: list[dict[str, Any]],
             succeeded=len(succeeded),
             median_s=statistics.median(measured) if measured else None,
             excluded=excluded.get(alias, 0),
+            timed_out=held.get(alias, 0),
         )
     return out
 
@@ -173,17 +193,26 @@ def _fallback_in_log(event: dict[str, Any], executor: str, at: float,
                for entry in usage.in_window(usage_log, alias, started, at))
 
 
-def _run(event: Any) -> tuple[str, float, bool] | None:
-    """The fields a delegation event must have, and whether it did the job.
+def _run(event: Any, verdicts: dict[str, str] | None = None
+        ) -> tuple[str, float, bool, bool] | None:
+    """The fields a delegation event must have, whether it did the job, and whether it
+    is being held for want of a verdict.
 
-    `ok` alone is not that: a run that exited cleanly and changed no file did the work
-    twice over, once for the delegate and once for the manager rewriting it by hand.
-    Both conditions are required, and the event is dropped entirely if either field is
-    missing or the wrong type.
+    `ok` alone is not "did the job": a run that exited cleanly and changed no file did
+    the work twice over, once for the delegate and once for the manager rewriting it by
+    hand. Both conditions are required, and the event is dropped entirely if either field
+    is missing or the wrong type.
+
+    A verdict outranks both. It is the manager saying what became of the run, which is
+    the only thing the ledger cannot know: a run stopped by its timeout wrote files and
+    reported `ok: false`, and whether that work was used is not derivable from here.
+    Unreviewed, such a run is returned with `timed_out` set -- excluded from `runs`
+    rather than counted as a failure.
 
     The ledger is append-only and has grown fields over time, so a line can be short.
     Skipping one is right: a line that cannot say what was run is not evidence about an
     alias, and a wrong number read out of it would be applied to every ranking after.
+    A line written before `run_id` existed is never judged either way, exactly as before.
     """
     if not isinstance(event, dict) or event.get("event") != "delegation":
         return None
@@ -192,7 +221,29 @@ def _run(event: Any) -> tuple[str, float, bool] | None:
     if (not isinstance(alias, str) or not alias or not _number(at)
             or not isinstance(ok, bool) or not _number(files)):
         return None
-    return alias, float(at), ok and files > 0
+
+    called = (verdicts or {}).get(event.get("run_id"))
+    if called is not None:
+        return alias, float(at), called == "ok", False
+    return alias, float(at), ok and files > 0, event.get("timed_out") is True
+
+
+def _verdicts(events: list[dict[str, Any]]) -> dict[str, str]:
+    """Every verdict in `events`, latest per run id.
+
+    The ledger is append-only and a run can be looked at twice -- `ok` after the diff
+    turned out to be complete, `bad` once it did not -- so the last word on a run is the
+    one that counts. `read_events` returns oldest first, so simply overwriting in order
+    leaves the latest verdict standing.
+    """
+    out: dict[str, str] = {}
+    for event in events:
+        if not isinstance(event, dict) or event.get("event") != "verdict":
+            continue
+        run_id, called = event.get("run_id"), event.get("verdict")
+        if isinstance(run_id, str) and run_id and called in ("ok", "bad"):
+            out[run_id] = called
+    return out
 
 
 def _duration(event: dict[str, Any]) -> float | None:
