@@ -192,9 +192,47 @@ def test_stop_waits_out_the_reset_and_then_resumes():
     assert not modes.wait_state(SID).get("paused")
 
 
-def test_stop_without_a_pause_returns_at_once():
+def test_stop_without_a_pause_returns_at_once_below_the_pause_line():
     modes.set_wait(SID, True)
-    assert wait.stop(SID, snap(96), sleep=lambda s: 1 / 0) is None
+    # Between the notice and 95% an ordinary stop must not put the session to sleep: that
+    # is what `ruti mode wait pause` is for.
+    assert wait.stop(SID, snap(93), sleep=lambda s: 1 / 0) is None
+    assert not modes.wait_state(SID).get("paused")
+
+
+def test_stop_at_the_pause_line_waits_even_if_no_tool_was_ever_refused():
+    # The checkpoint was written and the turn ended without another tool call, so the
+    # refusal that normally writes the mark never happened.
+    modes.set_wait(SID, True)
+    s = snap(96, resets_in=600)
+    assert not modes.wait_state(SID).get("paused")
+    now = [time.time()]
+    slept = []
+
+    def fake_sleep(seconds):
+        slept.append(seconds)
+        now[0] += seconds
+
+    out = wait.stop(SID, s, sleep=fake_sleep, clock=lambda: now[0])
+    assert out["decision"] == "block"
+    assert 600 <= sum(slept) <= 600 + wait.RESUME_MARGIN_SECONDS + 1
+    assert not modes.wait_state(SID).get("paused")
+
+
+def test_stop_at_the_pause_line_does_nothing_for_a_passed_reset():
+    modes.set_wait(SID, True)
+    # A window whose reset has passed counts as 0%, however high the stale reading was.
+    assert wait.stop(SID, snap(96, resets_in=-10), sleep=lambda s: 1 / 0) is None
+
+
+def test_the_stop_hook_leaves_a_session_with_wait_mode_off_alone(monkeypatch):
+    from ruti import quota
+    from ruti.hooks import wait_gate
+
+    modes.set_wait(SID, False)
+    monkeypatch.setattr(quota, "load", lambda: snap(96))
+    monkeypatch.setattr(wait, "stop", lambda *a, **k: 1 / 0)
+    assert wait_gate.handle({"hook_event_name": "Stop", "session_id": SID}) is None
 
 
 def test_turning_wait_off_mid_sleep_releases_the_session():

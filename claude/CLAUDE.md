@@ -147,9 +147,10 @@ before 95%, start nothing large, keep the task list current. At 95% every tool c
 except `ruti` and TodoWrite is refused -- write a checkpoint in your reply (done, in
 progress and where it stopped, remaining steps in order) and end the turn. The `Stop`
 hook then waits out the reset and resumes the session with an instruction to continue
-from that checkpoint. If you stop before 95% instead, run `ruti mode wait pause` first:
-only a pause arms the Stop hook, so a turn that just ends waits for the user.
-`ruti mode wait off` releases a pause. Because running out then
+from that checkpoint, whether or not a tool call was refused first: a turn that ends
+with the window at 95% or more counts as paused. If you stop *before* 95% instead, run
+`ruti mode wait pause` first: only a pause arms the Stop hook below that line, so a turn
+that just ends waits for the user. `ruti mode wait off` releases a pause. Because running out then
 costs a pause rather than the session, wait mode also lifts ORANGE's "no Opus" rule;
 the prompt hook's "Manager for this band" line says which applies.
 
