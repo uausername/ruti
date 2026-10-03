@@ -187,9 +187,22 @@ def post_tool_use(session_id: str, snapshot: quota.Quota) -> dict[str, Any] | No
 def stop(session_id: str, snapshot: quota.Quota, *,
          sleep: Callable[[float], None] = time.sleep,
          clock: Callable[[], float] = time.time) -> dict[str, Any] | None:
-    """If this session paused in the current window, wait out the reset, then resume."""
+    """If this session paused in the current window, wait out the reset, then resume.
+
+    A session at the pause line counts as paused whether or not a tool call was ever
+    refused. The refusal is what normally writes the mark, but a manager that has seen
+    the notice can write its checkpoint and end the turn without calling another tool --
+    seen live in a second session, which then sat waiting for the user while the first
+    resumed. Below the line nothing changes: from the notice to 95% an ordinary stop
+    must not put the session to sleep, which is why `ruti mode wait pause` exists.
+    """
     state = modes.wait_state(session_id)
     key = window_key(snapshot)
+    if key and state.get("paused") != key:
+        used = effective_used(snapshot)
+        if used is not None and used >= PAUSE_AT:
+            state = {**state, "paused": key, "noticed": key}
+            modes.set_wait_state(session_id, state)
     if not state.get("paused") or state.get("paused") != key:
         return None
 
