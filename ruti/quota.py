@@ -400,6 +400,21 @@ def load() -> Quota:
     )
 
 
+def _stale(new: Any, old: Any) -> bool:
+    """Whether `new` is an out-of-date reading of a window `old` already records."""
+    if not isinstance(new, dict) or not isinstance(old, dict):
+        return False
+    try:
+        new_reset, old_reset = float(new["resets_at"]), float(old["resets_at"])
+        new_used, old_used = float(new["used_percentage"]), float(old["used_percentage"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    # `resets_at` jitters by a second or so between readings of the same window.
+    if new_reset < old_reset - 60:
+        return True
+    return abs(new_reset - old_reset) <= 60 and new_used < old_used
+
+
 def capture(payload: dict[str, Any]) -> Quota:
     """Persist a status-line payload, appending to the burn-rate history."""
     limits = payload.get("rate_limits") or {}
@@ -418,6 +433,18 @@ def capture(payload: dict[str, Any]) -> Quota:
         previous = {}
     history = [tuple(entry) for entry in (previous.get("history") or [])]
 
+    # Every open session repaints, and one that has not had an API response for a while
+    # keeps reporting what it last saw: two sessions side by side wrote 37, 32, 37, 32
+    # every few seconds, the history filled with the saw-tooth, and the burn rate --
+    # read as "it went down, so a reset" -- vanished. Usage never falls inside a window,
+    # so a lower or older reading of a window already recorded is someone's stale view.
+    if _stale(five_new, previous.get("five_hour")):
+        five_new = None
+    if _stale(seven_new, previous.get("seven_day")):
+        seven_new = None
+    if not five_new and not seven_new:
+        return load()
+
     # The same, one window at a time: a session can carry the weekly window without the
     # five-hour one -- seen live, on every repaint of a second open session -- and
     # blanking the five-hour reading for that sent every band back to UNKNOWN. A window
@@ -426,7 +453,7 @@ def capture(payload: dict[str, Any]) -> Quota:
     # should instead of passing for live.
     captured = now if five_new else float(previous.get("captured_at_epoch") or now)
 
-    five = limits.get("five_hour") or {}
+    five = five_new or {}
     if five.get("used_percentage") is not None:
         value = float(five["used_percentage"])
         # Only record a genuine change; the status line fires far more often than
