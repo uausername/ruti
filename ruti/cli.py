@@ -1315,9 +1315,13 @@ def delegate(model: str, task: str | None, task_file: str | None, directory: str
 @click.option("--run", "run_id", default=None,
               help="Which delegation, by the `run_id` in its summary. Default: this "
                    "session's latest.")
+@click.option("--at", "at", type=float, default=None,
+              help="Which delegation, by its ledger `at` timestamp -- for runs logged "
+                   "before `run_id` existed. Matched within a second, in any session.")
 @click.option("--note", default=None, help="Why, in a few words. Kept in the ledger.")
 @click.option("--json", "as_json", is_flag=True)
-def verdict(verdict: str, run_id: str | None, note: str | None, as_json: bool) -> None:
+def verdict(verdict: str, run_id: str | None, at: float | None, note: str | None,
+            as_json: bool) -> None:
     """Record the manager's review of a delegation, so the alias's track record counts
     what was actually used.
 
@@ -1326,7 +1330,15 @@ def verdict(verdict: str, run_id: str | None, note: str | None, as_json: bool) -
     work that was used. This is the half of the record only a reader can supply, and
     `track` reads it back.
     """
-    if run_id:
+    if run_id and at is not None:
+        raise click.ClickException("pass --run or --at, not both")
+    if at is not None:
+        run = _delegation_at(at)
+        if run is None:
+            raise click.ClickException(
+                f"no delegation within a second of {at} in the ledger"
+            )
+    elif run_id:
         run = _delegation_by_id(run_id)
         if run is None:
             raise click.ClickException(
@@ -1340,7 +1352,9 @@ def verdict(verdict: str, run_id: str | None, note: str | None, as_json: bool) -
             )
 
     model = run.get("model") or "unknown"
-    fields = {"run_id": run["run_id"], "verdict": verdict, "model": model}
+    # A run without an id is named by its exact ledger `at`, which `track` matches.
+    ref = {"run_id": run["run_id"]} if run.get("run_id") else {"at_ref": run["at"]}
+    fields = {**ref, "verdict": verdict, "model": model}
     if note:
         fields["note"] = note
     ledger.record("verdict", **fields)
@@ -1348,7 +1362,7 @@ def verdict(verdict: str, run_id: str | None, note: str | None, as_json: bool) -
     if as_json:
         ui.emit_json(fields)
         return
-    ui.say(f"verdict {verdict} for {model} run {run['run_id']}")
+    ui.say(f"verdict {verdict} for {model} run {run.get('run_id') or run['at']}")
 
 
 def _delegations() -> list[dict]:
@@ -1366,6 +1380,13 @@ def _delegation_by_id(run_id: str) -> dict | None:
         if entry.get("run_id") == run_id:
             return entry
     return None
+
+
+def _delegation_at(at: float) -> dict | None:
+    """The delegation logged nearest to `at`, if one is within a second of it."""
+    near = [e for e in _delegations()
+            if isinstance(e.get("at"), (int, float)) and abs(e["at"] - at) <= 1.0]
+    return min(near, key=lambda e: abs(e["at"] - at), default=None)
 
 
 def _last_delegation_here() -> dict | None:

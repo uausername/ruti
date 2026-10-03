@@ -245,3 +245,16 @@ def test_report_never_claims_how_undelegated_work_was_done(write, recommended, t
     _route(write, recommended)
     out = _report("--routes")
     assert text in out and "as recommended" not in out
+
+
+def test_a_delegation_still_running_on_the_recommended_alias_is_following_it(write):
+    # The ledger line comes when the run ends; until then the hook must not say that
+    # nothing has been delegated (#34).
+    from ruti import delegate
+    _route(write, "ruti-router/free")
+    delegate._mark_running("ruti-router/other", 600)
+    assert ledger.unfollowed_route(S) is not None
+    delegate._mark_running("ruti-router/free", 600)
+    assert ledger.unfollowed_route(S) is None
+    delegate._mark_running("ruti-router/free", -1)  # expired: a killed run
+    assert ledger.unfollowed_route(S) is not None

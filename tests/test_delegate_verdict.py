@@ -284,3 +284,28 @@ def test_the_verdict_decides_what_the_track_record_says(session):
     assert _invoke(["verdict", "ok"])[0].exit_code == 0
     record = track.load()[ALIAS]
     assert (record.runs, record.succeeded, record.timed_out) == (1, 1, 0)
+
+
+def test_at_names_a_run_logged_before_run_id_existed(session):
+    ledger.record("delegation", model=ALIAS, ok=False, files_changed=3,
+                  duration_s=900, session="old")
+    at = next(e["at"] for e in ledger.read_events() if e["event"] == "delegation")
+    assert track.load()[ALIAS].succeeded == 0
+    result, text = _invoke(["verdict", "ok", "--at", str(round(at, 1))])
+    assert result.exit_code == 0, text
+    event = [e for e in ledger.read_events() if e["event"] == "verdict"][-1]
+    assert event["at_ref"] == at and "run_id" not in event
+    record = track.load()[ALIAS]
+    assert (record.runs, record.succeeded) == (1, 1)
+
+
+def test_at_with_nothing_near_it_is_refused(session):
+    ledger.record("delegation", model=ALIAS, ok=False, files_changed=3, duration_s=900)
+    result, text = _invoke(["verdict", "ok", "--at", "12345"])
+    assert result.exit_code != 0 and "12345" in text
+    assert not [e for e in ledger.read_events() if e["event"] == "verdict"]
+
+
+def test_at_and_run_together_are_refused(session):
+    result, text = _invoke(["verdict", "ok", "--at", "1", "--run", "r1"])
+    assert result.exit_code != 0 and "not both" in text

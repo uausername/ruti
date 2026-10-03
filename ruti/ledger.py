@@ -261,6 +261,12 @@ def unfollowed_route(session_id: str | None) -> dict[str, Any] | None:
     route = last_route(session_id)
     if not route or route["outcome"] in ("followed", "in_session"):
         return None
+    # A delegation to the recommended alias still running is the route being followed:
+    # its ledger line is only written when it ends, which can be fifteen minutes later.
+    from .delegate import _running_alias
+    running = _running_alias()
+    if running and running == _alias_of(route.get("recommended") or ""):
+        return None
     return route
 
 

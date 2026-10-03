@@ -212,7 +212,8 @@ def _run(event: Any, verdicts: dict[str, str] | None = None
     The ledger is append-only and has grown fields over time, so a line can be short.
     Skipping one is right: a line that cannot say what was run is not evidence about an
     alias, and a wrong number read out of it would be applied to every ranking after.
-    A line written before `run_id` existed is never judged either way, exactly as before.
+    A line written before `run_id` existed counts exactly as before until a verdict names
+    it by its `at` (`ruti verdict --at`).
     """
     if not isinstance(event, dict) or event.get("event") != "delegation":
         return None
@@ -222,7 +223,7 @@ def _run(event: Any, verdicts: dict[str, str] | None = None
             or not isinstance(ok, bool) or not _number(files)):
         return None
 
-    called = (verdicts or {}).get(event.get("run_id"))
+    called = (verdicts or {}).get(_verdict_key(event.get("run_id"), at))
     if called is not None:
         return alias, float(at), called == "ok", False
     return alias, float(at), ok and files > 0, event.get("timed_out") is True
@@ -240,10 +241,20 @@ def _verdicts(events: list[dict[str, Any]]) -> dict[str, str]:
     for event in events:
         if not isinstance(event, dict) or event.get("event") != "verdict":
             continue
-        run_id, called = event.get("run_id"), event.get("verdict")
-        if isinstance(run_id, str) and run_id and called in ("ok", "bad"):
-            out[run_id] = called
+        key, called = _verdict_key(event.get("run_id"), event.get("at_ref")), event.get("verdict")
+        if key is not None and called in ("ok", "bad"):
+            out[key] = called
     return out
+
+
+def _verdict_key(run_id: Any, at: Any) -> str | None:
+    """A run's id, or for a line written before ids existed, its exact ledger `at`
+    (`ruti verdict --at` stores the matched event's own value as `at_ref`)."""
+    if isinstance(run_id, str) and run_id:
+        return run_id
+    if _number(at):
+        return f"at:{float(at)!r}"
+    return None
 
 
 def _duration(event: dict[str, Any]) -> float | None:
