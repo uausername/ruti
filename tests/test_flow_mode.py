@@ -378,6 +378,27 @@ def test_cli_mode_flow_and_handoff(monkeypatch):
     assert modes.flow_state(SID)["handoff"] is None
 
 
+def test_an_early_handoff_is_refused_and_kept_until_early_is_said(monkeypatch):
+    """Live find: a session on a 1M window handed off at 16%, counting its 161K tokens
+    against the 200K it assumed."""
+    monkeypatch.setattr(sessions, "current_session_id", lambda: SID)
+    on(16)
+    result = invoke(["flow", "handoff"], "Title: task events org id\nGoal: x")
+    assert result.exit_code != 0 and "16%" in result.output and "--early" in result.output
+    assert not modes.flow_state(SID).get("handoff")
+    result = invoke(["flow", "handoff", "--early", "clean boundary, next task is large"])
+    assert result.exit_code == 0, result.output
+    path = modes.flow_state(SID)["handoff"]
+    assert "Goal: x" in open(path, encoding="utf-8").read()
+    meta = json.loads(open(path[:-3] + ".json", encoding="utf-8").read())
+    assert meta["early"] == "clean boundary, next task is large"
+
+
+def test_the_prompt_line_says_how_full_the_context_is():
+    on(16)
+    assert "Context now: 16% used" in flow.prompt_note(SID)
+
+
 # ------------------------------------------- what the new session inherits (live finds)
 
 
