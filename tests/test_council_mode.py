@@ -161,3 +161,25 @@ def test_the_summary_names_the_level():
     assert "council:auto" in modes.active_summary(
         {"coding": False, "free": "off", "council": "auto"})
     assert modes.active_summary({"coding": False, "free": "off", "council": "off"}) == ""
+
+
+def test_an_answer_with_no_content_is_a_failed_opinion(monkeypatch):
+    """Live find: a reasoning model that spent max_tokens thinking returned content null,
+    and the judge crashed calling .strip() on it."""
+    import io
+    import json as _json
+
+    body = _json.dumps({"choices": [{"message": {"content": None},
+                                     "finish_reason": "length"}]}).encode()
+
+    class Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(council.urllib.request, "urlopen",
+                        lambda *a, **k: Response(body))
+    opinion = council.ask("m", "q")
+    assert not opinion.ok and "finish_reason=length" in opinion.error

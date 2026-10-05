@@ -107,7 +107,14 @@ def ask(model: str, question: str, *, timeout: float = DEFAULT_TIMEOUT,
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
-        text = payload["choices"][0]["message"]["content"]
+        choice = payload["choices"][0]
+        text = choice["message"].get("content")
+        if not isinstance(text, str) or not text.strip():
+            # A reasoning model that spent max_tokens thinking answers with content null:
+            # an answer with nothing in it, not one to print or judge.
+            return Opinion(model=model, ok=False,
+                           error=f"empty answer (finish_reason={choice.get('finish_reason')})",
+                           duration_s=time.monotonic() - started)
         return Opinion(model=model, ok=True, text=text,
                         duration_s=time.monotonic() - started)
     except urllib.error.HTTPError as exc:

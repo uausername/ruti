@@ -898,7 +898,9 @@ def flow_group() -> None:
               help="Read the handoff from a file instead of stdin.")
 @click.option("--title", default=None,
               help="The session's name; or put `Title: ...` as the first line.")
-def flow_handoff(file_path: str | None, title: str | None) -> None:
+@click.option("--early", "early", default=None, metavar="REASON",
+              help="Hand off although the context is far from full, saying why.")
+def flow_handoff(file_path: str | None, title: str | None, early: str | None) -> None:
     """Write this session's handoff -- Title (2-10 words naming the next piece of work),
     Goal, Done, In progress, Next steps, Key files, Decisions, Instructions -- for the next
     session to continue from, named after it."""
@@ -940,8 +942,23 @@ def flow_handoff(file_path: str | None, title: str | None) -> None:
         raise click.ClickException(
             f"the handoff was not written: {exc}.\n{flow_mod.HANDOFF_TITLE_HELP}\n{kept}"
         ) from exc
+    early = (early or "").strip() or None
+    used = flow_mod.context_watch.used(session_id)
+    if not early and used is not None and used < flow_mod.EARLY_AT:
+        # Kept like a refused title: if the hand-off really is wanted, nothing is re-sent.
+        kept = flow_mod.save_draft(session_id, text)
+        raise click.ClickException(
+            f"the handoff was not written: the context is only {used:.0f}% used (the status "
+            f"line's measure, not your token count) -- below {flow_mod.EARLY_AT:.0f}% a full "
+            "context is not a reason. Keep working here, unless all of these hold: nothing "
+            "is in progress (work committed, tests green); the next task is large and does "
+            "not need this conversation's detail; and carrying this context into it costs "
+            "more than a fresh start (every request re-reads it). Then: "
+            '`ruti flow handoff --early "<why>"`'
+            + (" -- your text is kept, nothing else to send." if kept else ".")
+        )
     try:
-        path = flow_mod.write_handoff(session_id, text, os.getcwd())
+        path = flow_mod.write_handoff(session_id, text, os.getcwd(), early=early)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     flow_mod.clear_draft(session_id)

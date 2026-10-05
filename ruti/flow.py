@@ -62,6 +62,10 @@ from .config import STATE_ROOT, read_json, write_json
 
 FLOW_AT = context_watch.WARN_PERCENT
 FORCE_AT = 60.0
+# Below this, `ruti flow handoff` refuses without `--early`. A model counts its own tokens
+# against the window it assumes, not the one it has: on a 1M window a session at 161K
+# tokens (16%) once handed off believing its context was "almost exhausted".
+EARLY_AT = 40.0
 MAX_HOPS = 5
 
 FLOW_DIR = STATE_ROOT / "flow"
@@ -251,8 +255,9 @@ def clear_draft(session_id: str) -> None:
         pass
 
 
-def write_handoff(session_id: str, text: str, cwd: str) -> Path:
-    """Save the handoff and what the next session needs besides it."""
+def write_handoff(session_id: str, text: str, cwd: str, *, early: str | None = None) -> Path:
+    """Save the handoff and what the next session needs besides it. `early` is why it was
+    written before the context needed it, kept so an early hand-off can be audited."""
     text = (text or "").strip()
     if not text:
         raise ValueError("the handoff is empty -- nothing for the next session to go on")
@@ -272,6 +277,7 @@ def write_handoff(session_id: str, text: str, cwd: str) -> Path:
         "hop": int(state.get("hop") or 0) + 1,
         "modes": modes.current(session_id),
         "written_at": now,
+        **({"early": early} if early else {}),
     })
     modes.set_flow_state(session_id, {**state, "handoff": str(path), "launched": False})
     return path
@@ -734,6 +740,11 @@ def prompt_note(session_id: str | None) -> str:
         return (f"ruti flow: this session has handed off ({state['handoff']}) -- tools are "
                 "refused here; `ruti mode flow off` releases it.")
     hop = int(state.get("hop") or 0)
-    return (f"ruti flow mode is ON (hop {hop} of {MAX_HOPS}): at {FLOW_AT:.0f}% context you "
+    line = (f"ruti flow mode is ON (hop {hop} of {MAX_HOPS}): at {FLOW_AT:.0f}% context you "
             "will be asked to hand off with `ruti flow handoff`; a fresh session then "
             "continues in a new window.")
+    used = context_watch.used(session_id)
+    if used is not None:
+        line += (f" Context now: {used:.0f}% used, as the status line measures it -- trust "
+                 "this over your own token count; do not hand off before you are asked.")
+    return line
