@@ -56,7 +56,7 @@ Claude Code  (subscription, OAuth, untouched)
      ├── ruti delegate   → runs opencode, returns a summary instead of a transcript
      ├── ruti model use  → loads/evicts local models, sized to actually fit the GPU
      ├── ruti provider   → adds API providers, testing the key before writing anything
-     ├── ruti openrouter → the pareto-code / free routers and free coding models, from the live catalogue
+     ├── ruti openrouter → the free router and the coding shortlist (free + cheap metered), from the live catalogue
      ├── ruti mode       → coding / free toggles for the session, shown in the status line
      ├── ruti report     → whether any of this is actually paying for itself
      └── ruti doctor     → finds the failures that are otherwise silent
@@ -64,7 +64,7 @@ Claude Code  (subscription, OAuth, untouched)
                     ▼
             LiteLLM proxy  :4000        ← loopback only, auto-starts at logon
                     ├──► LM Studio :1234   → local models   (free, private)
-                    ├──► OpenRouter        → pareto-code, free router, hundreds of :free models
+                    ├──► OpenRouter        → free router, coding shortlist, hundreds of :free models
                     └──► Gemini / any provider you add      (free tiers, cheap tiers)
 ```
 
@@ -84,14 +84,14 @@ manager is always aware of its own budget without spending a tool call to ask.
 | **Budget-aware routing** | Five bands from GREEN to CRITICAL, driven by burn rate as well as level |
 | **Silent failures made loud** | A "local" request answered by a remote fallback is reported, not ignored |
 | **A session-scoped kill switch** | `ruti off`/`ruti on` disable and re-enable `route`/`delegate` for the current Claude Code session only — nothing persists to another session or project |
-| **A coding mode** | `ruti mode coding on` tells the manager, on every prompt, to reach for OpenRouter's `pareto-code` router and coding-tuned models when it delegates — because `ruti` is used for more than code, and the hint only makes sense while you are writing some |
+| **A coding mode** | `ruti mode coding on` tells the manager, on every prompt, to reach for the registered coding-tuned models when it delegates — because `ruti` is used for more than code, and the hint only makes sense while you are writing some |
 | **A free mode, soft or hard** | `ruti mode free soft` deprioritises paid metered APIs and warns before one is used; `ruti mode free hard` rules them out entirely. The subscription, local models and Anthropic subagents are money-free and unaffected |
 | **A wait mode** | `ruti mode wait on` rides the five-hour window to its edge instead of off it: at 90% the manager is told to assess its open tasks, at 95% tool calls are refused and it writes a checkpoint, and after the reset the `Stop` hook resumes the same session by itself. Shown as `wait` / `paused->HH:MM` |
 | **A flow mode** | `ruti mode flow on` hands a long task to a fresh session before this one's context fills: at 50% the manager is told to write a handoff with `ruti flow handoff`, from 60% tools are refused until it does, and the `Stop` hook opens `claude` in a new Windows Terminal window with the handoff and the session's modes. At most five sessions in a chain. Shown as `flow` / `flow→` |
 | **Default modes** | `ruti defaults set coding=on free=soft wait=on` gives every session those modes unless it sets its own with `ruti mode ...`; `ruti defaults` shows them, `ruti defaults clear` restores the built-in ones |
 | **A council mode** | `ruti mode council auto` lets a typed decision model judge, per question, whether a call is ambiguous *and* expensive enough to be worth several paid answers — and refuse when it is not. Visible in the status line the whole time it is on |
 | **Rankings that do not go stale** | In coding mode `ruti route` reads OpenRouter's per-language token ranking for the project's language (detected from the files, or `--language`) over the last three days, and ranks the models you already have by it — the leader up to x1.30, an unranked one untouched. `ruti openrouter suggest` lists the leaders you have not registered yet, priced; the prompt hook mentions one at most once a day. Nothing is installed unasked |
-| **OpenRouter coding models, one command** | `ruti openrouter models` merges a vetted shortlist with OpenRouter's live catalogue; `ruti openrouter setup` registers the `pareto-code` / `free` routers and any `:free` models you pick as routable aliases |
+| **OpenRouter coding models, one command** | `ruti openrouter models` merges a vetted shortlist with OpenRouter's live catalogue; `ruti openrouter setup` registers the `free` router and the coding shortlist as routable aliases |
 
 ## Command reference
 
@@ -115,7 +115,7 @@ commands makes the output machine-parseable for scripting.
 | Command | What it does | Why it earns a place in your workflow |
 |---|---|---|
 | `ruti off` / `ruti on` | Disables/re-enables `route` and `delegate` for the current session's `CLAUDE_CODE_SESSION_ID` — nothing else. | A kill switch that can't leak into your next project by accident. Useful the moment you want Claude to just write the code itself for a while, without deregistering anything permanent. |
-| `ruti mode coding {on\|off}` | Turns on a prompt-hook hint telling the manager to prefer OpenRouter's `pareto-code` router and other coding-tuned models when it delegates. | `ruti` isn't only for programming sessions, so this hint should only fire while you're actually writing code — and it should survive this session's own context compaction, which a purely verbal instruction to Claude cannot. |
+| `ruti mode coding {on\|off}` | Turns on a prompt-hook hint telling the manager to prefer the registered coding-tuned models when it delegates. | `ruti` isn't only for programming sessions, so this hint should only fire while you're actually writing code — and it should survive this session's own context compaction, which a purely verbal instruction to Claude cannot. |
 | `ruti mode free {off\|soft\|hard}` | `soft` flags and deprioritises paid metered APIs in `route`'s ranking; `hard` makes `route` rule them out entirely and `delegate` refuse to run them. Local models, the Anthropic subscription, and self are always money-free and untouched either way. | Lets you decide, per session, whether "cheap" is good enough or you want a hard guarantee that nothing billed gets touched — without editing any config. |
 | `ruti defaults [set KEY=VALUE...\|clear [KEY...]]` | Shows or changes the modes a session has when it has not set them itself. A session's own `ruti mode ...` always wins. | Modes are per session on purpose, but most sessions on a machine want the same ones — this saves setting them by hand every time without making any of them global. |
 | `ruti mode flow {on\|off}`, `ruti flow handoff` | Hand the task to a fresh session at 50% context: the handoff is written by the manager, the new window is opened by the `Stop` hook, and the new session inherits the handoff, the modes, the permission mode, Remote Control and its own name — taken from the `Title:` line the handoff's author writes for exactly that work, with `(flow N/5)` appended (a name you set yourself with `/rename` wins; a handoff with no Title falls back to the project folder's name, never to its Goal). A handoff without a valid `Title:` (first line or `--title`, 2-10 words, not `Continue ...`) is refused, its text kept, so only `ruti flow handoff --title "..."` follows. | `/compact` keeps whatever a summariser chose to keep; flow keeps exactly what the manager writes down for its successor — and does it at 50%, while there is still room to write it well. The name is enforced where the handoff is written because instructions go stale in a running session, and a name cut out of a prose Goal mid-word is worse than the folder's. |
@@ -137,7 +137,7 @@ commands makes the output machine-parseable for scripting.
 | `ruti provider list [--json]` / `ruti provider test [ALIAS] [--json]` / `ruti provider remove ALIAS [--yes]` | Show what's registered, re-run the key checks for one or all providers, or remove a provider (the key itself stays in `.env` unless you say otherwise). | Providers drift — keys expire, tiers change. These give you a live read instead of trusting a config file you wrote weeks ago. |
 | `ruti openrouter models [--free/--all] [--coding/--any] [--refresh] [--json]` | Shows the recommended coding models: a hand-checked shortlist merged live against OpenRouter's own `/api/v1/models` catalogue, defaulting to free, tool-capable models only. | A pasted "top free coding models" list off the internet is half real at best — this checks every slug against the live catalogue so a model that's vanished shows as `missing` instead of 404ing mid-delegation. |
 | `ruti openrouter suggest [--language L] [--limit N] [--refresh] [--json]` | Reads OpenRouter's per-language token ranking (the last three days) for the project's language and lists the models in it that ruti has not registered, with their share, price per million tokens, context and whether free mode allows them; also shows where the registered aliases stand. Registers nothing. | Models and their standing change weekly. A shortlist written last month cannot say that the model most TypeScript is being written with right now is one you have never registered, and at what price. |
-| `ruti openrouter setup [--models ...] [--key-stdin] [--skip-verify] [--yes]` | Registers the `pareto-code` and `free` OpenRouter routers, plus any `:free` models you pick, as routable proxy aliases — after testing the key for chat and tool-call support. | The "coding harness" switch on the plumbing side. Without it, `coding` mode has nothing coding-tuned to point at, and `free hard` mode has no zero-cost remote option to fall back to. |
+| `ruti openrouter setup [--models ...] [--key-stdin] [--skip-verify] [--yes]` | Registers the `free` OpenRouter router and the coding shortlist (or the models you pick) as routable proxy aliases — after testing the key for chat and tool-call support. | The "coding harness" switch on the plumbing side. Without it, `coding` mode has nothing coding-tuned to point at, and `free hard` mode has no zero-cost remote option to fall back to. |
 
 ### Visibility — know what's actually happening before you trust it
 
@@ -176,7 +176,7 @@ pip install -e . --no-deps
 # 2. Keys
 cp litellm\.env.example litellm\.env    # then put your real keys in it
 
-# 2b. OpenRouter coding models (optional) - registers pareto-code, the free
+# 2b. OpenRouter coding models (optional) - registers the free
 #     router, and the free :free models you pick; needs an OpenRouter key.
 ruti openrouter models        # see what is on offer
 ruti openrouter setup         # register a set, then restart the proxy

@@ -330,6 +330,6 @@ def coding_note(free_level: str, aliases: list[tuple[str, bool | None]] | None =
                 + (f"; the metered ones ({paid}) only after warning the user." if paid else "."))
     if not free and not paid:
         return ("ruti coding mode is ON, but no coding alias is registered -- "
-                "`ruti openrouter setup` registers `pareto-code` and free coding models.")
+                "`ruti openrouter setup` registers the coding shortlist.")
     listed = ", ".join(part for part in (paid, free) if part)
     return f"{lead} the coding-tuned aliases ({listed}) over general-purpose ones."

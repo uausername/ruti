@@ -96,8 +96,8 @@ error instead of quietly borrowing Gemini; a failure like that is a reason to pi
 another executor, and `ruti doctor --fix` if it repeats.
 
 `model_effective` is the model that actually did the work. For a router alias such as
-`pareto-code` it is the router's own pick, which can be a frontier model billed in USD
-— "no subscription quota" is not "free". `unknown` means the proxy could not say; the
+`free` it is the router's own pick; a metered alias is billed in USD — "no
+subscription quota" is not "free". `unknown` means the proxy could not say; the
 `usage.note` field says why. Read `route`'s `metered` / `pays_in` before picking a
 metered executor for work a free one could do.
 
@@ -123,7 +123,7 @@ Two session-scoped modes, set the same way `ruti off` is and shown in the status
 * `ruti mode coding on` — a hint, not a gate. While it is on, `route` ranks
   coding-tuned aliases up and the prompt hook names the registered ones to reach for
   when you delegate — only the zero-cost ones under `free hard`, which refuses
-  `pareto-code`. Turn it on when the session's work is programming; leave it off for
+  metered ones. Turn it on when the session's work is programming; leave it off for
   everything else ruti is used for.
 * `ruti mode free soft|hard` — keep delegation on zero-cost models. `soft`
   deprioritises paid metered APIs in `ruti route` and warns before `ruti delegate`
@@ -132,8 +132,9 @@ Two session-scoped modes, set the same way `ruti off` is and shown in the status
   and unaffected — this is only about paid provider keys.
 
 `ruti openrouter models` lists the recommended coding models (ruti's shortlist plus
-OpenRouter's live catalogue); `ruti openrouter setup` registers the routers
-(`pareto-code`, `free`) and any free models you pick as routable aliases. Neither the
+OpenRouter's live catalogue); `ruti openrouter setup` registers the `free`
+router and the shortlisted coding models (zero-cost ones and cheap metered ones) as
+routable aliases. Neither the
 modes nor the registration touch this file.
 
 In coding mode `route` also reads OpenRouter's per-language token ranking for the
