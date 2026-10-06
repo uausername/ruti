@@ -241,9 +241,15 @@ def test_key(provider: str, model: str, api_key: str, *, api_base: str | None = 
     try:
         response = litellm.completion(
             model=qualified,
-            messages=[{"role": "user", "content": "Report the status 'ready'."}],
+            messages=[{"role": "user", "content":
+                       "Call the report_status tool with status 'ready'. Do not answer "
+                       "in text."}],
             tools=_PROBE_TOOL,
-            tool_choice="required",
+            # "auto", as opencode sends it. "required" tested something opencode never
+            # asks for, and failed live: pareto-code routes to Claude with thinking on,
+            # which rejects a forced tool choice (BadRequest), and nemotron-3-ultra
+            # answered a forced choice in prose but calls the tool under "auto".
+            tool_choice="auto",
             api_key=api_key,
             api_base=api_base,
             max_tokens=PROBE_MAX_TOKENS,

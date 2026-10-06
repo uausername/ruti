@@ -39,7 +39,10 @@ from . import jev
 from .config import PROXY_BASE
 
 DEFAULT_TIMEOUT = 120.0
-DEFAULT_MAX_TOKENS = 1024
+# Reasoning models spend their thinking out of the same budget: at 1024, four of thirteen
+# came back with content null and finish_reason=length (2026-10-05). The question asks
+# for brevity; this only has to leave room to think before answering.
+DEFAULT_MAX_TOKENS = 8192
 
 # Each opinion is cut to this before being shown to the judge. Jev holds 32k tokens of
 # state; a handful of 1024-token answers fits easily, but a local model told to ramble
