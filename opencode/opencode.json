@@ -9,8 +9,8 @@
         "apiKey": "not-used-locally"
       },
       "models": {
-        "deepseek-v4-flash-0731": {
-          "name": "Deepseek V4 Flash 0731"
+        "deepseek-v4.1-flash": {
+          "name": "Deepseek V4.1 Flash"
         },
         "dots-3-note-preview": {
           "name": "Dots 3 Note Preview"
@@ -27,14 +27,11 @@
         "glm-5.3-flash": {
           "name": "Glm 5.3 Flash"
         },
-        "inkling-small": {
-          "name": "Inkling Small"
+        "gpt-6-luna": {
+          "name": "Gpt 6 Luna"
         },
         "laguna-s-2.1": {
           "name": "Laguna S 2.1"
-        },
-        "ling-3.0-flash-fin": {
-          "name": "Ling 3.0 Flash Fin"
         },
         "local-llama-31-8b": {
           "name": "Llama 31 8B (local)"
@@ -45,6 +42,9 @@
         "local-qwen3-4b": {
           "name": "Qwen3 4B (local)"
         },
+        "mimo-v2.6-flash": {
+          "name": "Mimo V2.6 Flash"
+        },
         "nemotron-3-ultra-550b-a55b": {
           "name": "Nemotron 3 Ultra 550B A55B"
         },
@@ -53,12 +53,6 @@
         },
         "pareto-code": {
           "name": "Pareto Code"
-        },
-        "qwen3.8-27b": {
-          "name": "Qwen3.8 27B"
-        },
-        "space-bunny-alpha": {
-          "name": "Space Bunny Alpha"
         }
       }
     }

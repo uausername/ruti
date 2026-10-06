@@ -55,17 +55,23 @@ CODING_MODELS: frozenset[str] = frozenset({
 # 2026-09-18 the free part held none at all -- one was a finance-tuned model -- so
 # coding mode had nothing zero-cost to prefer. `north-mini-code` was dropped on
 # 2026-09-26 for poor delegation results; the three after `laguna` replaced it.
-# `space-bunny-alpha` is a stealth model: zero-priced, but temporary by nature.
+# Revised 2026-10-06 from OpenRouter's programming rankings (7 days, nine languages):
+# `space-bunny-alpha` (a stealth model, 25 of 44 OpenRouter delegations) left the
+# catalogue; `inkling-small:free` answers 403 outside "agentic harnesses" it
+# recognises. The paid part is the cheap end of the leaderboard -- under $1.50/M output,
+# 1M context, tool calls: deepseek-v4.1-flash (#2 by share), glm-5.3-flash (#3),
+# mimo-v2.6-flash (#5), gpt-6-luna (#6).
 DEFAULT_SHORTLIST: tuple[str, ...] = (
     PARETO_CODE,
     FREE_ROUTER,
     "poolside/laguna-s-2.1:free",
     "nvidia/nemotron-3-ultra-550b-a55b:free",
-    "stealth/space-bunny-alpha",
-    "z-ai/glm-5.3-flash",
-    "thinkingmachines/inkling-small:free",
     "nvidia/nemotron-3.5-lightning:free",
     "dots-studio/dots-3-note-preview:free",
+    "deepseek/deepseek-v4.1-flash",
+    "z-ai/glm-5.3-flash",
+    "xiaomi/mimo-v2.6-flash",
+    "openai/gpt-6-luna",
 )
 
 # Below this an OpenCode delegation cannot even hold its own 8k-token system prompt
