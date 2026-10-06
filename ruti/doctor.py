@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
 from typing import Callable
 
-from . import jev, litellm_cfg, lmstudio, planner, tls
+from . import jev, litellm_cfg, lmstudio, model_review, planner, tls
 from .config import (
     CA_BUNDLE, LITELLM_ENV, LITELLM_GENERATED, LITELLM_START_SCRIPT, REPO_ROOT,
     SCHEDULED_TASK, load_dotenv,
@@ -1107,8 +1107,30 @@ def _check_jev() -> Check:
                  detail=f"{when}; ${result['cost_usd']:.6f} for that probe")
 
 
-CHECKS = (
-    _check_statusline,
+def _check_openrouter_models() -> Check:
+    """Registered OpenRouter models against the live catalogue: gone, no longer free,
+    pricier, or without tool calls.
+
+    Found live: `space-bunny-alpha` did 25 of 44 OpenRouter delegations, left the
+    catalogue, and stayed registered until a council run failed on it along with three
+    other dead aliases. Reported, never acted on -- removing or replacing a model is the
+    user's call (`ruti provider remove`, `ruti openrouter models`). The catalogue is
+    cached for six hours, so this costs a download at most that often.
+    """
+    findings = model_review.check()
+    if findings is None:
+        return Check("openrouter models", OK, "catalogue unreachable -- not checked")
+    if not findings:
+        return Check("openrouter models", OK, "registered models match the catalogue")
+    return Check(
+        "openrouter models", WARN, f"{len(findings)} registered model(s) need attention",
+        detail=("; ".join(f"{f.alias}: {f.message}" for f in findings)
+                + " -- `ruti provider remove <alias>` drops one, `ruti openrouter models` "
+                "lists replacements"),
+    )
+
+
+CHECKS = (    _check_statusline,
     _check_tls,
     _check_git_tls,
     _check_proxy_bind,
@@ -1120,6 +1142,7 @@ CHECKS = (
     _check_opencode_drift,
     _check_env_permissions,
     _check_jev,
+    _check_openrouter_models,
 )
 
 
