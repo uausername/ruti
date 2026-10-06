@@ -2026,10 +2026,10 @@ def openrouter_suggest(language: str | None, limit: int, refresh: bool, as_json:
 @click.option("--yes", is_flag=True, help="Take the defaults and do not ask before writing.")
 def openrouter_setup(slugs_csv: str | None, key_stdin: bool, skip_verify: bool,
                      coding: bool, no_restart: bool, yes: bool) -> None:
-    """Register the OpenRouter coding routers and free models as routable aliases.
+    """Register the OpenRouter coding shortlist and the free router as routable aliases.
 
-    This is the 'coding harness' switch on the plumbing side: afterwards `pareto-code`
-    and `free` (plus any free models you pick) are selectable through the proxy and
+    This is the 'coding harness' switch on the plumbing side: afterwards the `free`
+    router and the shortlisted coding models are selectable through the proxy and
     OpenCode, and the proxy is restarted to serve them. Turn the per-session hint on
     separately with `ruti mode coding on`.
     """

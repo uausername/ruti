@@ -10,11 +10,11 @@ registers the ones you pick as LiteLLM aliases.
 The catalogue endpoint needs no key. It is cached because it is ~1 MB of JSON and the
 list changes on the order of days, not seconds.
 
-Two of the "models" here are not models at all. `openrouter/pareto-code` and
-`openrouter/free` are OpenRouter routing endpoints: each dynamically picks a real
-model per request (Pareto picks a strong coding model within a cost tier; the free
-router rotates zero-cost models to spread rate limits). They are registered as
-aliases like anything else, just flagged so the rest of ruti can reason about them.
+One of the "models" here is not a model at all. `openrouter/free` is an OpenRouter
+routing endpoint: it picks a real model per request, rotating zero-cost models to
+spread rate limits. It is registered as an alias like anything else, just flagged so
+the rest of ruti can reason about it. (`openrouter/pareto-code` is still recognised
+as a router but no longer offered -- see `PARETO_CODE`.)
 """
 
 from __future__ import annotations
@@ -33,7 +33,11 @@ CATALOG_CACHE = STATE_ROOT / "openrouter-catalog.json"
 CATALOG_TTL_SECONDS = 6 * 3600
 
 # OpenRouter's own routing endpoints -- verified against
-# openrouter.ai/docs/guides/routing/routers. Not single models.
+# openrouter.ai/docs/guides/routing/routers. Not single models. Pareto is still known
+# here so an alias registered by hand is reasoned about as a router, but it is no longer
+# offered: without `min_coding_score` it routes to its High tier, and in practice that
+# was Fable every time -- frontier prices with no per-request cap, the opposite of what
+# delegation is for. Dropped 2026-10-06.
 PARETO_CODE = "openrouter/pareto-code"
 FREE_ROUTER = "openrouter/free"
 ROUTERS: tuple[str, ...] = (PARETO_CODE, FREE_ROUTER)
@@ -43,7 +47,6 @@ ROUTERS: tuple[str, ...] = (PARETO_CODE, FREE_ROUTER)
 # name is not evidence: `north-mini-code` qualifies because Cohere ships it as an
 # agentic coding model, not because of the suffix. Checked 2026-09-18.
 CODING_MODELS: frozenset[str] = frozenset({
-    PARETO_CODE,
     "cohere/north-mini-code:free",
     "poolside/laguna-s-2.1:free",
     "poolside/laguna-xs-2.1:free",
@@ -62,7 +65,6 @@ CODING_MODELS: frozenset[str] = frozenset({
 # 1M context, tool calls: deepseek-v4.1-flash (#2 by share), glm-5.3-flash (#3),
 # mimo-v2.6-flash (#5), gpt-6-luna (#6).
 DEFAULT_SHORTLIST: tuple[str, ...] = (
-    PARETO_CODE,
     FREE_ROUTER,
     "poolside/laguna-s-2.1:free",
     "nvidia/nemotron-3-ultra-550b-a55b:free",
