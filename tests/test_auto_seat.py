@@ -106,3 +106,13 @@ def test_no_task_to_judge_holds_and_every_plan_is_journalled(tmp_path):
     assert out["apply"] is False and "no task" in out["held"]
     lines = (tmp_path / "auto-seat.jsonl").read_text(encoding="utf-8").splitlines()
     assert json.loads(lines[-1])["session"] == "s1"
+
+
+def test_a_prompt_of_sixty_characters_is_classified_and_a_shorter_one_is_not():
+    sit("claude-sonnet-5-5", "low")
+    out = auto_seat.plan("s1", "y" * auto_seat.MIN_PROMPT_CHARS, classify=guess("debug", 0.6, 0.9))
+    assert out["task"]["source"] == "fresh"
+    shorter = auto_seat.plan("s1", "y" * (auto_seat.MIN_PROMPT_CHARS - 1),
+                             classify=guess("debug", 0.6, 0.9))
+    assert shorter["task"]["source"] == "reused"
+    assert auto_seat.MIN_PROMPT_CHARS == 60
