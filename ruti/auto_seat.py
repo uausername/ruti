@@ -37,8 +37,11 @@ DEFAULT_MODE = "on"
 DOWN_MAX_DIFFICULTY = 0.35
 DOWN_MIN_CONFIDENCE = 0.8
 
-# The same bar the prompt hook uses before it spends a classifier call on a prompt.
-MIN_PROMPT_CHARS = 120
+# Shorter prompts than this reuse the last task instead of spending a classifier call.
+# Lower than the prompt hook's bar (120): most follow-ups in a live session are short, and
+# a move down still needs a confident, fresh classification, so a noisier guess on a short
+# prompt can only ever raise the seat.
+MIN_PROMPT_CHARS = 60
 CLASSIFY_TIMEOUT = 4.0
 
 # How long a recommendation counts as "the previous one" for the two-in-a-row rule.
