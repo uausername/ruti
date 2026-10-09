@@ -501,7 +501,13 @@ def prompt_hint(session_id: str | None, kind: str, kind_confidence: float,
             return None
         verdict = advice.switch.get("verdict")
         if verdict == "stay":
-            clear_recommendation(session_id, advice.current)
+            # The earlier "say it every reply" is still in the model's context and nothing
+            # else would withdraw it, so the prompt that finds the seat matched says so
+            # once. After that the hook is silent again.
+            if clear_recommendation(session_id, advice.current):
+                return (f"ruti manager: the session is now on {best.seat.label()}, the "
+                        "seat recommended earlier. Stop ending replies with "
+                        "`Recommendation: ...`; no seat change is needed.", None)
             return None
         if verdict not in ("now", "boundary"):
             return None
@@ -699,25 +705,27 @@ def remember_recommendation(session_id: str | None, seat: Seat) -> bool:
         return False
 
 
-def clear_recommendation(session_id: str | None, matched: Seat | None = None) -> None:
+def clear_recommendation(session_id: str | None, matched: Seat | None = None) -> bool:
     """Drop the stored recommendation, so the status line stops pointing at a move made.
 
     Called when the advice comes back "stay" -- a pending arrow for a seat the session is
     already on is worse than no arrow. `matched` is that seat: it is stored so the status
     line can say the recommendation was checked and agrees, since silence alone cannot be
-    told from a mode that is not running. Writes only when something changes, and never
-    raises: this is on the prompt hook's path.
+    told from a mode that is not running. True when a recommendation was pending, which
+    is the one prompt the model has to be told it no longer applies. Writes only when
+    something changes, and never raises: this is on the prompt hook's path.
     """
     try:
         if not session_id:
-            return
+            return False
         data = _load()
         entry = data.get(session_id)
         if not isinstance(entry, dict):
-            return
+            return False
         label = matched.label() if matched is not None else None
-        if "recommended" not in entry and entry.get("matched") == label:
-            return
+        pending = "recommended" in entry
+        if not pending and entry.get("matched") == label:
+            return False
         kept = {key: value for key, value in entry.items()
                 if key not in ("recommended", "matched")}
         if label:
@@ -726,8 +734,9 @@ def clear_recommendation(session_id: str | None, matched: Seat | None = None) ->
         now = time.time()
         write_json(SEATS_FILE, {sid: other for sid, other in data.items()
                                 if _fresh(other, now)})
+        return pending
     except Exception:
-        pass
+        return False
 
 
 # How long the last classified task stands in for a prompt too short to classify. A

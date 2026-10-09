@@ -159,16 +159,16 @@ def test_a_five_hour_projection_that_fits_the_window_carries_no_arrow(monkeypatc
 # ------------------------------------------------------------- what line 1 is for
 
 
-def test_context_fill_rides_with_the_budget_and_before_the_modes():
+def test_context_fill_rides_with_the_budget_and_the_modes_have_their_own_line():
     # It is about this turn, not about the session's settings, and it belongs on the
-    # line that is never cut off -- so it precedes the modes, not the machine state.
+    # line that is never cut off -- the modes are the third line, below the machine.
     modes.set_coding("s1", True)
-    line = statusline.render(
-        {"session_id": "s1", "context_window": {"used_percentage": 20}}, quota_at())
+    lines = plain(statusline.render(
+        {"session_id": "s1", "context_window": {"used_percentage": 20}},
+        quota_at())).split("\n")
 
-    budget = plain(line).split("\n")[0]
-    assert "code" in budget and "20% ctx" in budget
-    assert budget.index("20% ctx") < budget.index("code")
+    assert "20% ctx" in lines[0] and "code" not in lines[0]
+    assert "code" in lines[2]
 
 
 # --------------------------------------------------------------------- doctor badge

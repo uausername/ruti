@@ -300,6 +300,11 @@ def test_the_hint_stops_and_clears_the_arrow_once_the_seat_matches(monkeypatch):
     manager.record_seat("s1", seated("claude-opus-5-5", "high", 10_000))
     assert manager.prompt_hint("s1", "implement", 0.9, 0.5) is not None
     manager.record_seat("s1", PAYLOAD)  # the user typed both commands
+    # The model was told to repeat the recommendation, so the first prompt that finds the
+    # seat matched withdraws it explicitly -- to the model only -- and then goes silent.
+    note, shown = manager.prompt_hint("s1", "implement", 0.9, 0.5)
+    assert "Stop ending replies" in note
+    assert shown is None
     assert manager.prompt_hint("s1", "implement", 0.9, 0.5) is None
     assert manager.recommended("s1") is None
     # ...and the match is recorded, so the status line can say it was checked.
@@ -336,6 +341,20 @@ def test_the_status_line_marks_a_matched_seat_and_only_while_it_is_the_seat(monk
     # The user moves off it: the mark must not claim a check that was for another seat.
     manager.record_seat("s1", seated("claude-opus-5-5", "high", 10_000))
     assert "seat✓" not in statusline.render({"session_id": "s1"}, snapshot)
+
+
+def test_the_status_line_shows_the_mode_itself_even_with_nothing_pending(monkeypatch):
+    from ruti import statusline
+
+    monkeypatch.setattr(statusline, "_refresh_facts", lambda: {
+        "at": time.time(), "proxy": True, "loaded": [], "gpu": None})
+    monkeypatch.setattr(statusline, "_running_delegate", lambda: None)
+    monkeypatch.setattr(statusline, "_route_segment", lambda _sid: (None, None))
+    snapshot = quota.Quota(five_hour=quota.Window(10.0, time.time() + 3600), seven_day=None,
+                           captured_at=time.time())
+    assert "mgr" not in statusline.render({"session_id": "s1"}, snapshot)
+    modes.set_manager("s1", True)
+    assert "mgr" in statusline.render({"session_id": "s1"}, snapshot)
 
 
 def test_the_commands_are_on_separate_lines_and_the_model_is_told_to_say_them(monkeypatch):

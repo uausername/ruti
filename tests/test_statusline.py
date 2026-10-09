@@ -295,7 +295,7 @@ def test_render_never_raises_even_with_a_hostile_payload(monkeypatch):
 
 
 def test_the_budget_is_one_line_and_the_rest_of_the_state_another():
-    first, second = plain(statusline.render(
+    first, second, _modes = plain(statusline.render(
         {"session_id": "s1", "context_window": {"used_percentage": 20},
          "model": {"display_name": "Opus 5.5"}}, five_hour_quota())).split("\n")
     # What the budget allows, on the line that must never be cut off.
@@ -312,3 +312,53 @@ def test_a_weekly_window_that_sets_the_band_says_so():
     # Nothing to explain when the five-hour window is what the band follows.
     line = plain(statusline.render({"session_id": "s1"}, five_hour_quota(60.0)))
     assert "(7d)" not in line
+
+
+# ------------------------------------------------------------- three lines, `ruti show`
+
+
+def test_the_modes_are_a_third_line_of_their_own():
+    from ruti import modes
+
+    modes.set_coding("s1", True)
+    lines = plain(statusline.render({"session_id": "s1"}, five_hour_quota())).splitlines()
+    assert len(lines) == 3
+    assert "ctx" not in lines[2] and "code" in lines[2]
+    assert "code" not in lines[0] and "proxy" in lines[1]
+
+
+def test_show_trims_the_lower_lines_and_none_hides_them_all():
+    from ruti import modes
+
+    modes.set_coding("s1", True)
+    for lines, expected in ((3, 3), (2, 2), (1, 1), (0, 0)):
+        modes.set_view("s1", lines)
+        out = plain(statusline.render({"session_id": "s1"}, five_hour_quota()))
+        assert len(out.splitlines()) == expected
+    modes.set_view("s1", 1)
+    assert "proxy" not in plain(statusline.render({"session_id": "s1"}, five_hour_quota()))
+
+
+def test_show_defaults_to_all_and_is_per_session():
+    from ruti import modes
+
+    assert modes.view("s1") == 3 and modes.view(None) == 3
+    modes.set_view("s1", 1)
+    assert modes.view("s1") == 1 and modes.view("s2") == 3
+    with pytest.raises(ValueError):
+        modes.set_view("s1", 4)
+
+
+def test_the_show_command_sets_the_view(monkeypatch):
+    from click.testing import CliRunner
+
+    from ruti import cli, modes
+
+    monkeypatch.setenv(sessions.ENV_VAR, "s1")
+    runner = CliRunner()
+    assert runner.invoke(cli.main, ["show", "2"]).exit_code == 0
+    assert modes.view("s1") == 2
+    assert runner.invoke(cli.main, ["hide"]).exit_code == 0
+    assert modes.view("s1") == 0
+    assert runner.invoke(cli.main, ["show", "all"]).exit_code == 0
+    assert modes.view("s1") == 3
