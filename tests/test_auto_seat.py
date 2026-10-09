@@ -143,3 +143,25 @@ def test_the_manager_mark_shows_what_the_manager_may_do(monkeypatch):
         third = out.split("\n")[2]
         assert (mark in third) and (mark + " " in third or third.endswith(mark) or "mgr" in third)
         assert ("⚡" in third) == (value == "on") and ("mgr~" in third) == (value == "shadow")
+
+
+def test_the_word_seat_is_always_there_while_auto_seat_looks_after_the_seat(monkeypatch):
+    import time
+
+    from ruti import modes, statusline
+
+    monkeypatch.setattr(statusline, "_refresh_facts", lambda: {
+        "at": time.time(), "proxy": True, "loaded": [], "gpu": None})
+    monkeypatch.setattr(statusline, "_running_delegate", lambda: None)
+    monkeypatch.setattr(statusline, "_route_segment", lambda _sid: (None, None))
+    snapshot = quota.Quota(five_hour=quota.Window(10.0, time.time() + 3600), seven_day=None,
+                           captured_at=time.time())
+    modes.set_manager("s1", True)
+    sit("claude-sonnet-5-5", "high")
+    first = statusline.render({"session_id": "s1"}, snapshot).split("\n")[0]
+    assert "seat" in first and "seat✓" not in first       # managed, not yet checked
+    manager.clear_recommendation("s1", manager.current_seat("s1"))
+    assert "seat✓" in statusline.render({"session_id": "s1"}, snapshot).split("\n")[0]
+    auto_seat.set_mode("shadow")
+    manager.record_seat("s1", seated("claude-opus-5-5", "high", 10_000))
+    assert "seat" not in statusline.render({"session_id": "s1"}, snapshot).split("\n")[0]

@@ -740,9 +740,10 @@ def clear_recommendation(session_id: str | None, matched: Seat | None = None) ->
 
 
 # How long the last classified task stands in for a prompt too short to classify. A
-# "yes, go ahead" is the same work as the prompt before it; half an hour is longer than
-# any one turn of it and short enough that the next task is classified fresh.
-TASK_MAX_AGE = 1800.0
+# "yes, go ahead" is the same work as the prompt before it. Six hours spans a working
+# session including its pauses; what the limit is for is that a task left over from
+# yesterday must not rank seats for today's one-word prompt.
+TASK_MAX_AGE = 6 * 3600.0
 
 
 def remember_task(session_id: str | None, kind: str, difficulty: float) -> None:

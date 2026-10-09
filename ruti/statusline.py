@@ -273,6 +273,15 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
                     # with it. Shown only while that is still the seat: after a switch the
                     # mark goes until the next prompt has been ranked again.
                     segments.append(_colour("seat✓", "90"))
+                elif current is not None:
+                    # Nothing pending and no check on record for this seat -- e.g. just
+                    # after the manager moved it itself. With auto-seat on the seat is
+                    # being looked after, and the bare word says so: it is the
+                    # difference between "managed" and "the manager is not running".
+                    from . import auto_seat
+
+                    if auto_seat.mode() == "on":
+                        segments.append(_colour("seat", "90"))
     except Exception:
         pass
 
