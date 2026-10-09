@@ -332,7 +332,14 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
             # The seat hint above appears only while it differs from the running seat,
             # so without a mark of its own the mode reads as off whenever they agree.
             if active.get("manager"):
-                mode_segments.append(_colour("mgr", "36"))
+                # A mark for what the manager may do about it: `⚡` when it changes the
+                # model and effort itself (`ruti seat mode on`), `~` when it only journals
+                # what it would have done, bare when it only recommends.
+                from . import auto_seat
+
+                auto = auto_seat.mode()
+                mark = "⚡" if auto == "on" else "~" if auto == "shadow" else ""
+                mode_segments.append(_colour("mgr" + mark, "36"))
 
             # Shown always, not only while active, unlike the modes above: the whole
             # point is to be able to tell "off" from "silent because irrelevant" at a

@@ -116,3 +116,30 @@ def test_a_prompt_of_sixty_characters_is_classified_and_a_shorter_one_is_not():
                              classify=guess("debug", 0.6, 0.9))
     assert shorter["task"]["source"] == "reused"
     assert auto_seat.MIN_PROMPT_CHARS == 60
+
+
+def test_a_seat_that_fits_is_recorded_as_checked_so_the_status_line_can_say_so():
+    sit("claude-sonnet-5-5", "low")
+    out = auto_seat.plan("s1", LONG, classify=guess())
+    assert out["verdict"] == "stay"
+    assert manager.matched("s1") == "sonnet/low"
+
+
+def test_the_manager_mark_shows_what_the_manager_may_do(monkeypatch):
+    import time
+
+    from ruti import modes, statusline
+
+    monkeypatch.setattr(statusline, "_refresh_facts", lambda: {
+        "at": time.time(), "proxy": True, "loaded": [], "gpu": None})
+    monkeypatch.setattr(statusline, "_running_delegate", lambda: None)
+    monkeypatch.setattr(statusline, "_route_segment", lambda _sid: (None, None))
+    snapshot = quota.Quota(five_hour=quota.Window(10.0, time.time() + 3600), seven_day=None,
+                           captured_at=time.time())
+    modes.set_manager("s1", True)
+    for value, mark in (("on", "mgr⚡"), ("shadow", "mgr~"), ("off", "mgr")):
+        auto_seat.set_mode(value)
+        out = statusline.render({"session_id": "s1"}, snapshot)
+        third = out.split("\n")[2]
+        assert (mark in third) and (mark + " " in third or third.endswith(mark) or "mgr" in third)
+        assert ("⚡" in third) == (value == "on") and ("mgr~" in third) == (value == "shadow")
