@@ -34,7 +34,7 @@ FULL_EVERY = 12
 # Classifying costs about a second and a half of wall clock before the model even
 # starts reading, so it is not worth spending on "yes", "continue" or "fix the typo".
 # A prompt that actually describes work to be routed is longer than this.
-MIN_PROMPT_CHARS = 120
+MIN_PROMPT_CHARS = 60
 
 # A classification is only useful where the skip is documented to happen: substantial
 # work, begun without a ranking. Below this the guess is too close to call to nag over.
