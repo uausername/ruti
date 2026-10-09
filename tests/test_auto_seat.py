@@ -44,8 +44,8 @@ def sit(model_id, effort, tokens=10_000):
     manager.record_seat("s1", seated(model_id, effort, tokens))
 
 
-def test_the_default_is_shadow_and_off_does_nothing():
-    assert auto_seat.mode() == "shadow"
+def test_the_default_is_on_and_off_does_nothing():
+    assert auto_seat.mode() == "on"
     auto_seat.set_mode("off")
     out = auto_seat.plan("s1", LONG, classify=guess())
     assert out["action"] == {} and out["apply"] is False
@@ -55,6 +55,7 @@ def test_the_default_is_shadow_and_off_does_nothing():
 
 def test_shadow_names_the_move_and_on_applies_it():
     sit("claude-sonnet-5-5", "low")
+    auto_seat.set_mode("shadow")
     shadow = auto_seat.plan("s1", LONG, classify=guess("debug", 0.6, 0.9))
     assert shadow["direction"] == "up" and shadow["action"].get("effort")
     assert shadow["apply"] is False

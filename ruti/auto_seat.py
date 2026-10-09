@@ -18,7 +18,7 @@ The rules are deliberately lopsided, because a wrong move costs differently each
   current seat is underpowered); at "boundary" the line stays a recommendation.
 
 Every plan is journalled, applied or not, so the decisions can be read afterwards and
-judged against what actually happened -- the mode starts as `shadow` for that reason.
+judged against what actually happened -- the journal is written in every mode but `off`.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from . import manager, modes
 from .config import read_json, write_json
 
 MODES = ("off", "shadow", "on")
-DEFAULT_MODE = "shadow"
+DEFAULT_MODE = "on"
 
 # A move down is only taken for work this easy, on a kind the classifier is this sure of.
 DOWN_MAX_DIFFICULTY = 0.35
