@@ -1,0 +1,107 @@
+"""When the session may change its own seat: up at once, down only with good reason.
+
+`manager.advise` is exercised for real (band stubbed, the advisor off); only the
+classifier is replaced, since what is pinned here is the policy that sits on its answer.
+"""
+
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from ruti import auto_seat, manager, quota
+
+LONG = "x" * 150
+
+
+class Snap:
+    def __init__(self, band):
+        self.band = band
+
+
+def seated(model_id, effort, tokens):
+    return {"model": {"id": model_id}, "effort": {"level": effort},
+            "context_window": {"context_window_size": 1_000_000, "used_percentage": 5,
+                               "current_usage": {"input_tokens": tokens}}}
+
+
+def guess(kind="boilerplate", difficulty=0.1, confidence=0.9):
+    return lambda *_a, **_k: SimpleNamespace(
+        kind=kind, difficulty=difficulty, kind_confidence=confidence,
+        difficulty_confidence=0.9)
+
+
+@pytest.fixture(autouse=True)
+def quiet(tmp_path, monkeypatch):
+    monkeypatch.setattr(manager, "CLAUDE_SETTINGS", tmp_path / "settings.json")
+    monkeypatch.delenv(manager.ADVISOR_ENV, raising=False)
+    monkeypatch.setattr(manager.quota, "load", lambda: Snap(quota.YELLOW))
+
+
+def sit(model_id, effort, tokens=10_000):
+    manager.record_seat("s1", seated(model_id, effort, tokens))
+
+
+def test_the_default_is_shadow_and_off_does_nothing():
+    assert auto_seat.mode() == "shadow"
+    auto_seat.set_mode("off")
+    out = auto_seat.plan("s1", LONG, classify=guess())
+    assert out["action"] == {} and out["apply"] is False
+    with pytest.raises(ValueError):
+        auto_seat.set_mode("sometimes")
+
+
+def test_shadow_names_the_move_and_on_applies_it():
+    sit("claude-sonnet-5-5", "low")
+    shadow = auto_seat.plan("s1", LONG, classify=guess("debug", 0.6, 0.9))
+    assert shadow["direction"] == "up" and shadow["action"].get("effort")
+    assert shadow["apply"] is False
+    auto_seat.set_mode("on")
+    live = auto_seat.plan("s1", LONG, classify=guess("debug", 0.6, 0.9))
+    assert live["apply"] is True and live["action"] == shadow["action"]
+
+
+def test_a_move_down_waits_for_the_same_advice_twice_in_a_row():
+    auto_seat.set_mode("on")
+    sit("claude-opus-5-5", "high")
+    first = auto_seat.plan("s1", LONG, classify=guess())
+    assert first["direction"] == "down" and first["apply"] is False
+    assert "two prompts" in first["held"]
+    second = auto_seat.plan("s1", LONG, classify=guess())
+    assert second["apply"] is True and second["action"]
+
+
+def test_a_move_down_needs_a_confident_classification_and_an_easy_task():
+    auto_seat.set_mode("on")
+    sit("claude-opus-5-5", "high")
+    for _ in range(2):
+        unsure = auto_seat.plan("s1", LONG, classify=guess(confidence=0.75))
+    assert unsure["apply"] is False and "confident" in unsure["held"]
+    for _ in range(2):
+        hard = auto_seat.plan("s1", LONG, classify=guess("implement", 0.5, 0.95))
+    assert hard["apply"] is False
+
+
+def test_a_task_reused_from_the_last_prompt_never_cheapens_the_seat():
+    auto_seat.set_mode("on")
+    sit("claude-opus-5-5", "high")
+    manager.remember_task("s1", "boilerplate", 0.1)
+    for _ in range(2):
+        out = auto_seat.plan("s1", "yes, go ahead")
+    assert out["task"]["source"] == "reused" and out["apply"] is False
+
+
+def test_a_model_switch_with_a_large_context_stays_a_recommendation():
+    auto_seat.set_mode("on")
+    sit("claude-opus-5-5", "high", tokens=400_000)
+    out = auto_seat.plan("s1", LONG, classify=guess())
+    assert out["apply"] is False and out["action"].get("model") is None
+
+
+def test_no_task_to_judge_holds_and_every_plan_is_journalled(tmp_path):
+    out = auto_seat.plan("s1", "ok")
+    assert out["apply"] is False and "no task" in out["held"]
+    lines = (tmp_path / "auto-seat.jsonl").read_text(encoding="utf-8").splitlines()
+    assert json.loads(lines[-1])["session"] == "s1"

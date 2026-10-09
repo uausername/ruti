@@ -12,6 +12,7 @@ from . import doctor as doctor_mod
 from . import install as install_mod
 from . import providers as providers_mod
 from . import usage as usage_mod
+from . import auto_seat as auto_seat_mod
 from . import modes as modes_mod
 from . import openrouter as openrouter_mod
 from . import rankings as rankings_mod
@@ -600,6 +601,37 @@ def on() -> None:
         ui.ok("ruti re-enabled for this session")
     else:
         ui.say("[muted]ruti was already enabled for this session[/muted]")
+
+
+# ------------------------------------------------------------------------ seat auto
+
+
+@main.group("seat")
+def seat_group() -> None:
+    """Letting the session change its own model and effort (the `ruti-seat` mod)."""
+
+
+@seat_group.command("mode")
+@click.argument("value", type=click.Choice(auto_seat_mod.MODES), required=False)
+def seat_mode(value: str | None) -> None:
+    """`on` applies the manager's advice, `shadow` only journals it, `off` does neither."""
+    if value is None:
+        ui.say(f"  auto seat : {auto_seat_mod.mode()}")
+        return
+    auto_seat_mod.set_mode(value)
+    ui.ok(f"auto seat: {value}")
+
+
+@seat_group.command("plan")
+@click.option("--session", "session_id", default=None,
+              help="The session's id (the mod passes it; its environment has none).")
+@click.option("--json", "as_json", is_flag=True, default=True)
+def seat_plan(session_id: str | None, as_json: bool) -> None:
+    """What the session should do about its seat for the prompt on stdin."""
+    import sys
+
+    prompt = sys.stdin.read()
+    ui.emit_json(auto_seat_mod.plan(session_id or sessions.current_session_id() or "", prompt))
 
 
 # --------------------------------------------------------------------- show / hide
