@@ -410,6 +410,18 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
     except Exception:
         pass
 
+    # The OpenRouter balance, from a cache a background process keeps (`balance`): the
+    # status line never waits on the network for it. Absent until the first fetch lands.
+    try:
+        from . import balance
+
+        credits = balance.cached()
+        if credits:
+            text, colour = balance.segment(credits)
+            segments.append(_colour(text, colour))
+    except Exception:
+        pass
+
     gpu = facts.get("gpu")
     if gpu:
         segments.append(f"gpu {gpu['free_mib'] / 1024:.1f}G free")

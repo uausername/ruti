@@ -338,6 +338,12 @@ def main() -> int:
         doctor.refresh_in_background()
     except Exception:
         pass
+    try:
+        from ruti import balance
+
+        balance.refresh_in_background()
+    except Exception:
+        pass
     return 0
 
 
