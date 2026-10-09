@@ -31,6 +31,9 @@ FACTS_TTL_SECONDS = 30.0
 # hung one costs a frame rather than the session.
 HTTP_TIMEOUT = 0.4
 
+# How long the `✓`/`✗` after a route recommendation stays on the line.
+ROUTE_OUTCOME_TTL = 1800.0
+
 BAND_COLOUR = {
     quota.GREEN: "32", quota.YELLOW: "33", quota.ORANGE: "38;5;208",
     quota.RED: "31", quota.CRITICAL: "1;31", quota.UNKNOWN: "35",
@@ -159,6 +162,14 @@ def _route_segment(session_id: str | None) -> tuple[str | None, dict[str, Any] |
             return None, None
         target = _short(route.get("recommended") or "") or "none"
         outcome = route["outcome"]
+        # What came of the ranking is news for a while, then it is history: a failure
+        # from an hour ago, shown for the rest of the session, reads as a model that is
+        # down today. After this long only the recommendation is left, dimmed.
+        moments = [route.get("at"), (route.get("delegation") or {}).get("at")]
+        newest = max((m for m in moments if isinstance(m, (int, float))), default=None)
+        if newest is not None and time.time() - newest > ROUTE_OUTCOME_TTL:
+            run = route.get("delegation") if outcome == "followed" else None
+            return _colour(f"→ {target}", "90"), run
         if outcome == "followed":
             run = route["delegation"]
             if run.get("substituted"):

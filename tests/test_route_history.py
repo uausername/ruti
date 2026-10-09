@@ -147,9 +147,22 @@ def test_the_summary_says_in_session_not_this_session(write):
     assert "ruti report --routes" in out
 
 
-def _segment(write_events):
-    text, run = statusline._route_segment(S)
+def _segment(write_events, ttl=10**9):
+    # The events the fixture writes are an hour old; the fade has its own test below.
+    saved, statusline.ROUTE_OUTCOME_TTL = statusline.ROUTE_OUTCOME_TTL, ttl
+    try:
+        text, run = statusline._route_segment(S)
+    finally:
+        statusline.ROUTE_OUTCOME_TTL = saved
     return (text and re.sub(r"\x1b\[[0-9;]*m", "", text), run)
+
+
+def test_an_old_outcome_fades_to_the_bare_recommendation(write):
+    _route(write, "ruti-router/free")
+    run = _delegation(write, "ruti-router/free", ok=False)
+    assert _segment(write, ttl=1800)[0] == "→ free"      # the events are an hour old
+    assert _segment(write, ttl=1800)[1]["at"] == run["at"]
+    assert _segment(write)[0] == "→ free ✗"                # still news within the window
 
 
 @pytest.mark.parametrize("delegation, expected", [
@@ -185,6 +198,7 @@ def test_status_line_does_not_repeat_the_run_the_route_segment_shows(write, monk
     monkeypatch.setattr(statusline, "_refresh_facts", lambda: {"proxy": True, "loaded": []})
     monkeypatch.setattr(statusline, "_running_delegate", lambda: None)
     monkeypatch.setattr("ruti.modes.current", lambda _s: {"coding": False, "free": "off"})
+    monkeypatch.setattr(statusline, "ROUTE_OUTCOME_TTL", 10**9)   # the events are an hour old
 
     _route(write, "ruti-router/free")
     _delegation(write, "ruti-router/free")
