@@ -602,6 +602,39 @@ def on() -> None:
         ui.say("[muted]ruti was already enabled for this session[/muted]")
 
 
+# --------------------------------------------------------------------- show / hide
+
+_VIEW_CHOICES = {"all": modes_mod.VIEW_ALL, "1": 1, "2": 2, "0": 0, "none": 0}
+
+
+@main.command("show")
+@click.argument("what", type=click.Choice([*_VIEW_CHOICES, "toggle"]), required=False)
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def show(what: str | None, as_json: bool) -> None:
+    """How much of ruti's status line this session shows: `all` (three lines), `2`, `1`
+    (the budget line only) or `none`; `toggle` hides it, or brings all of it back. Without
+    an argument, says what it is now."""
+    session_id = _session_or_die()
+    if what == "toggle":
+        what = "all" if modes_mod.view(session_id) == 0 else "none"
+    if what is not None:
+        modes_mod.set_view(session_id, _VIEW_CHOICES[what])
+    lines = modes_mod.view(session_id)
+    if as_json:
+        ui.emit_json({"session": session_id, "lines": lines, "hidden": lines == 0})
+    elif what is None:
+        ui.say(f"  status line : {'hidden' if lines == 0 else f'{lines} of 3 lines'}")
+    else:
+        ui.ok(f"status line: {what} -- repaints within a few seconds")
+
+
+@main.command("hide")
+def hide() -> None:
+    """Hide ruti's status line for this session; `ruti show all` brings it back."""
+    modes_mod.set_view(_session_or_die(), 0)
+    ui.ok("status line hidden -- `ruti show all` brings it back")
+
+
 # ------------------------------------------------------------------- defaults
 
 

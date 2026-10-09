@@ -176,6 +176,17 @@ def _route_segment(session_id: str | None) -> tuple[str | None, dict[str, Any] |
         return None, None
 
 
+def _visible_lines(payload: dict[str, Any]) -> int:
+    """How many of the lines `ruti show` has left on for this session: all three unless
+    it was told otherwise, and all three whenever that cannot be read."""
+    try:
+        from . import modes
+
+        return modes.view(payload.get("session_id"))
+    except Exception:
+        return 3
+
+
 def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
     segments: list[str] = []
     binding = snapshot.seven_day_binding
@@ -274,8 +285,9 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
         colour = "31" if ctx_used >= 85 else "33" if ctx_used >= context_watch.WARN_PERCENT else "32"
         segments.append(_colour(f"{ctx_used:.0f}% ctx", colour))
 
-    # Session task modes, shown only while active. Never let this raise -- a status
-    # line that throws is rendered as a traceback.
+    # Session task modes, shown only while active, on a line of their own. Never let this
+    # raise -- a status line that throws is rendered as a traceback.
+    mode_segments: list[str] = []
     try:
         session_id = payload.get("session_id")
         if session_id:
@@ -286,37 +298,41 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
                 # at all -- `route`/`delegate` refuse outright, and previously the only
                 # sign was a hook message that scrolls out of view within a prompt or
                 # two. Shown first, loudest, so it cannot be scrolled past unnoticed.
-                segments.append(_colour("OFF", "31"))
+                mode_segments.append(_colour("OFF", "31"))
 
             from . import modes
 
             active = modes.current(session_id)
             if active["coding"]:
-                segments.append(_colour("code", "36"))
+                mode_segments.append(_colour("code", "36"))
             if active["free"] == "soft":
-                segments.append(_colour("free", "32"))
+                mode_segments.append(_colour("free", "32"))
             elif active["free"] == "hard":
-                segments.append(_colour("free!", "33"))
+                mode_segments.append(_colour("free!", "33"))
             # Magenta, and the only mode shown that costs more rather than less --
             # worth reading at a glance before asking anything expensive.
             if active.get("council") == "on":
-                segments.append(_colour("council", "35"))
+                mode_segments.append(_colour("council", "35"))
             elif active.get("council") == "auto":
-                segments.append(_colour("council?", "35"))
+                mode_segments.append(_colour("council?", "35"))
             if active.get("wait"):
                 from . import quota as quota_mod, wait as wait_mod
 
                 snap = quota_mod.load()
                 paused = modes.wait_state(session_id).get("paused")
                 if paused and paused == wait_mod.window_key(snap):
-                    segments.append(_colour(f"paused->{wait_mod.reset_clock(snap)}", "33"))
+                    mode_segments.append(_colour(f"paused->{wait_mod.reset_clock(snap)}", "33"))
                 else:
-                    segments.append(_colour("wait", "34"))
+                    mode_segments.append(_colour("wait", "34"))
             if active.get("flow"):
                 # The arrow once this session has passed the task on: the window stays
                 # open, and should read as done rather than as still at work.
                 launched = modes.flow_state(session_id).get("launched")
-                segments.append(_colour("flow→" if launched else "flow", "36"))
+                mode_segments.append(_colour("flow→" if launched else "flow", "36"))
+            # The seat hint above appears only while it differs from the running seat,
+            # so without a mark of its own the mode reads as off whenever they agree.
+            if active.get("manager"):
+                mode_segments.append(_colour("mgr", "36"))
 
             # Shown always, not only while active, unlike the modes above: the whole
             # point is to be able to tell "off" from "silent because irrelevant" at a
@@ -325,13 +341,14 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
             from . import jev as jev_mod
 
             jev_on = active.get("jev", True) and jev_mod.configured()
-            segments.append(_colour("jev", "32") if jev_on else _colour("jev", "90"))
+            mode_segments.append(_colour("jev", "32") if jev_on else _colour("jev", "90"))
     except Exception:
         pass
 
-    # What the session is allowed and set to is one line, the state of the machine is
-    # another: together they no longer fit a terminal's width, and the right-hand end is
-    # what got cut off -- so the end that is cut is the machine's, not the budget's.
+    # Three lines: the budget and the seat, the state of the machine, and the modes the
+    # session is set to. They no longer fit a terminal's width on fewer, and the
+    # right-hand end is what got cut off -- so what is cut is the machine's, not the
+    # budget's. `ruti show` can drop the lower lines, or all of them.
     budget, segments = segments, []
 
     facts = _refresh_facts()
@@ -434,7 +451,8 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
     except Exception:
         pass
 
-    return "\n".join(" · ".join(line) for line in (budget, segments) if line)
+    lines = [line for line in (budget, segments, mode_segments) if line]
+    return "\n".join(" · ".join(line) for line in lines[:_visible_lines(payload)])
 
 
 def main() -> int:

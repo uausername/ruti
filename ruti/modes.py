@@ -184,6 +184,28 @@ def apply(session_id: str, values: dict[str, Any]) -> None:
         write_json(SESSIONS_FILE, data)
 
 
+# How many lines of the status line `ruti show` leaves on: 0 hides ruti's part of it
+# altogether. Not one of the modes -- it changes what is drawn, not what ruti does -- so
+# it has no default and is not part of `current`.
+VIEW_ALL = 3
+
+
+def view(session_id: str | None) -> int:
+    """The number of status-line lines this session shows, 0 to 3."""
+    if not session_id:
+        return VIEW_ALL
+    value = (_load().get(session_id) or {}).get("view")
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= VIEW_ALL:
+        return VIEW_ALL
+    return value
+
+
+def set_view(session_id: str, lines: int) -> None:
+    if isinstance(lines, bool) or not 0 <= lines <= VIEW_ALL:
+        raise ValueError(f"lines must be 0 to {VIEW_ALL}, not {lines!r}")
+    _update(session_id, "view", lines)
+
+
 def set_coding(session_id: str, on: bool) -> None:
     _update(session_id, "coding", bool(on))
 
