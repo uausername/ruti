@@ -169,6 +169,10 @@ def plan(session_id: str, prompt: str, *, classify: Callable[..., Any] | None = 
             # The seat fits: record that it was checked, so the status line can say
             # `seat✓` -- silence alone reads the same as a manager that is not running.
             manager.clear_recommendation(session_id, current)
+        elif verdict in ("now", "boundary"):
+            # Kept with its verdict, so the status line can tell a move that is applied
+            # from one that waits for the user.
+            manager.remember_recommendation(session_id, best.seat, verdict)
         if verdict in ("stay", "none"):
             return result
         if verdict == "boundary":

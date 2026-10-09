@@ -160,7 +160,7 @@ def test_a_switch_that_survives_the_effort_preference_is_deferred_to_a_boundary(
     # a switch: opus/low is within the margin a model switch has to beat. The switch
     # survives where the current model has no seat the band permits for this task.
     advice = advise(quota.ORANGE, kind="implement", current=manager.Seat("opus", "high"),
-                    context_tokens=100_000)
+                    context_tokens=200_000)
     assert advice.best.seat.model == "sonnet"
     assert advice.switch["verdict"] == "boundary"
 

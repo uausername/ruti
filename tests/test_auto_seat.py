@@ -165,3 +165,53 @@ def test_the_word_seat_is_always_there_while_auto_seat_looks_after_the_seat(monk
     auto_seat.set_mode("shadow")
     manager.record_seat("s1", seated("claude-opus-5-5", "high", 10_000))
     assert "seat" not in statusline.render({"session_id": "s1"}, snapshot).split("\n")[0]
+
+
+def _line_one(monkeypatch, session="s1"):
+    import time
+
+    from ruti import statusline
+
+    monkeypatch.setattr(statusline, "_refresh_facts", lambda: {
+        "at": time.time(), "proxy": True, "loaded": [], "gpu": None})
+    monkeypatch.setattr(statusline, "_running_delegate", lambda: None)
+    monkeypatch.setattr(statusline, "_route_segment", lambda _sid: (None, None))
+    snapshot = quota.Quota(five_hour=quota.Window(10.0, time.time() + 3600), seven_day=None,
+                           captured_at=time.time())
+    out = statusline.render({"session_id": session}, snapshot).split("\n")[0]
+    return __import__("re").sub(r"\x1b\[[0-9;]*m", "", out), out
+
+
+def test_a_move_the_manager_makes_itself_is_an_arrow_and_one_that_waits_is_yellow(monkeypatch):
+    from ruti import modes
+
+    modes.set_manager("s1", True)
+    # Effort only: applied by the mod, cyan `->`.
+    sit("claude-sonnet-5-5", "low")
+    auto_seat.plan("s1", LONG, classify=guess("debug", 0.6, 0.9))
+    plain, raw = _line_one(monkeypatch)
+    assert "->sonnet/" in plain and "\x1b[36m->" in raw and "⇢" not in plain
+    assert manager.recommended_verdict("s1") == "now"
+
+    # A model switch with a big context: held back, yellow `⇢ ... /compact`.
+    monkeypatch.setattr(manager.quota, "load", lambda: Snap(quota.ORANGE))  # no Opus here
+    sit("claude-opus-5-5", "high", tokens=400_000)
+    auto_seat.plan("s1", LONG, classify=guess("implement", 0.5, 0.9))
+    plain, raw = _line_one(monkeypatch)
+    assert manager.recommended_verdict("s1") == "boundary"
+    assert "⇢" in plain and "/compact" in plain and "\x1b[33m⇢" in raw and "->" not in plain
+
+
+def test_without_auto_seat_every_pending_move_is_yellow(monkeypatch):
+    from ruti import modes
+
+    modes.set_manager("s1", True)
+    auto_seat.set_mode("shadow")
+    sit("claude-sonnet-5-5", "low")
+    auto_seat.plan("s1", LONG, classify=guess("debug", 0.6, 0.9))
+    plain, raw = _line_one(monkeypatch)
+    assert "⇢sonnet/" in plain and "/compact" not in plain and "\x1b[33m⇢" in raw
+
+
+def test_the_context_a_model_switch_is_free_below_is_150k():
+    assert manager.SWITCH_FREE_TOKENS == 150_000
