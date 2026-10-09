@@ -103,7 +103,7 @@ CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
 
 # Below this many tokens in the context window, re-reading it uncached on a model switch
 # costs less than carrying the wrong seat for the rest of the task.
-SWITCH_FREE_TOKENS = 30_000
+SWITCH_FREE_TOKENS = 150_000
 
 # What a model switch has to be worth before it is taken over staying on the current one.
 # Effort is free on Opus 5.5, Sonnet 5.5 and Fable 5.1 -- the cache survives an effort
@@ -512,7 +512,7 @@ def prompt_hint(session_id: str | None, kind: str, kind_confidence: float,
         if verdict not in ("now", "boundary"):
             return None
 
-        changed = remember_recommendation(session_id, best.seat)
+        changed = remember_recommendation(session_id, best.seat, verdict)
         now = advice.current.label() if advice.current else "unknown"
         # One command per line: on one line they get pasted together, and
         # `/model sonnet /effort low` is read as a model called "sonnet /effort low".
@@ -648,7 +648,8 @@ def record_seat(session_id: str | None, payload: dict[str, Any]) -> None:
         now = time.time()
         data[session_id] = {**record, "at": now,
                             **{key: previous[key]
-                               for key in ("recommended", "task", "matched")
+                               for key in ("recommended", "recommended_verdict", "task",
+                                           "matched")
                                if key in previous}}
         write_json(SEATS_FILE, {sid: entry for sid, entry in data.items()
                                 if _fresh(entry, now)})
@@ -678,12 +679,15 @@ def context_tokens(session_id: str | None) -> int | None:
     return _stored_tokens(_entry(session_id))
 
 
-def remember_recommendation(session_id: str | None, seat: Seat) -> bool:
+def remember_recommendation(session_id: str | None, seat: Seat,
+                            verdict: str | None = None) -> bool:
     """Store `seat` as this session's recommendation; True if it is a new one.
 
     The debounce the prompt hint's user-facing half runs on: showing the same
     recommendation twice is how a line stops being read. The classified task in the same
-    record is carried across untouched -- it belongs to a different caller.
+    record is carried across untouched -- it belongs to a different caller. `verdict`
+    ("now" or "boundary") is kept beside it, because the status line draws a move that
+    waits for the user differently from one that is applied.
     """
     try:
         if not session_id:
@@ -692,9 +696,20 @@ def remember_recommendation(session_id: str | None, seat: Seat) -> bool:
         entry = data.get(session_id)
         entry = dict(entry) if isinstance(entry, dict) else {}
         if entry.get("recommended") == seat.label():
+            if verdict is None or entry.get("recommended_verdict") == verdict:
+                return False
+            entry["recommended_verdict"] = verdict
+            now = time.time()
+            data[session_id] = entry
+            write_json(SEATS_FILE, {sid: other for sid, other in data.items()
+                                    if _fresh(other, now)})
             return False
         now = time.time()
         entry["recommended"] = seat.label()
+        if verdict:
+            entry["recommended_verdict"] = verdict
+        else:
+            entry.pop("recommended_verdict", None)
         entry.pop("matched", None)
         entry.setdefault("at", now)
         data[session_id] = entry
@@ -727,7 +742,7 @@ def clear_recommendation(session_id: str | None, matched: Seat | None = None) ->
         if not pending and entry.get("matched") == label:
             return False
         kept = {key: value for key, value in entry.items()
-                if key not in ("recommended", "matched")}
+                if key not in ("recommended", "recommended_verdict", "matched")}
         if label:
             kept["matched"] = label
         data[session_id] = kept
@@ -802,3 +817,9 @@ def recommended(session_id: str | None) -> str | None:
     """The seat last recommended to this session, as a label."""
     value = _entry(session_id).get("recommended")
     return value if isinstance(value, str) and value else None
+
+
+def recommended_verdict(session_id: str | None) -> str | None:
+    """Whether the recommendation is a move to make `now` or one for a `boundary`."""
+    value = _entry(session_id).get("recommended_verdict")
+    return value if value in ("now", "boundary") else None

@@ -278,7 +278,18 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
                 target = manager.recommended(session_id)
                 current = manager.current_seat(session_id)
                 if target and (current is None or target != current.label()):
-                    segments.append(_colour("->" + target, "36"))
+                    from . import auto_seat
+
+                    # `->` is a move the manager makes itself (cyan); `⇢` in yellow is one
+                    # that waits for the user: a model switch held back by the size of
+                    # the context (`/compact` shrinks it, and the move is then taken on
+                    # the next prompt), or any move while auto-seat is not on.
+                    if manager.recommended_verdict(session_id) == "boundary":
+                        segments.append(_colour(f"⇢{target} /compact", "33"))
+                    elif auto_seat.mode() != "on":
+                        segments.append(_colour(f"⇢{target}", "33"))
+                    else:
+                        segments.append(_colour("->" + target, "36"))
                 elif current is not None and manager.matched(session_id) == current.label():
                     # The advice was worked out for the seat the session is on and agrees
                     # with it. Shown only while that is still the seat: after a switch the
