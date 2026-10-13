@@ -199,6 +199,20 @@ def capability(seat: Seat) -> float:
     return MODEL_CAPABILITY.get(seat.model, 0.0) + EFFORT_CAPABILITY.get(seat.effort, 0.0)
 
 
+def is_down(advice: Advice) -> bool:
+    """Whether the recommended seat is a step down from the current one, and the
+    current one already fits the task.
+
+    A move down is one auto-seat will refuse to take unless the classification is fresh
+    and confident and the task is easy, so the status line and the prompt hint need to
+    know about it.
+    """
+    required = float(advice.task["required"])
+    return (advice.current is not None and advice.best is not None
+            and capability(advice.current) >= required
+            and capability(advice.best.seat) < capability(advice.current))
+
+
 def burn(seat: Seat) -> float:
     # Haiku has no effort level, so it takes the neutral capability delta and the
     # neutral burn factor rather than being special-cased at every use.
@@ -478,7 +492,7 @@ def advisor_model(settings_path: Path | None = None) -> str | None:
 
 
 def prompt_hint(session_id: str | None, kind: str, kind_confidence: float,
-                difficulty: float) -> tuple[str, str | None] | None:
+                difficulty: float, fresh: bool = True) -> tuple[str, str | None] | None:
     """(what the model is told, what the user is shown), or None.
 
     Recomputed from scratch on every prompt: the band, the current seat and the size of
@@ -512,7 +526,13 @@ def prompt_hint(session_id: str | None, kind: str, kind_confidence: float,
         if verdict not in ("now", "boundary"):
             return None
 
-        changed = remember_recommendation(session_id, best.seat, verdict)
+        held = None
+        if verdict == "now" and is_down(advice):
+            from . import auto_seat
+            if auto_seat.mode() == "on":
+                held = auto_seat.down_hold(fresh, kind_confidence if fresh else None, difficulty)
+
+        changed = remember_recommendation(session_id, best.seat, "held" if held else verdict)
         now = advice.current.label() if advice.current else "unknown"
         # One command per line: on one line they get pasted together, and
         # `/model sonnet /effort low` is read as a model called "sonnet /effort low".
@@ -522,12 +542,17 @@ def prompt_hint(session_id: str | None, kind: str, kind_confidence: float,
                    f"(now {now}). Type, one at a time:\n{commands}")
         if verdict == "boundary":
             message += f"\n-- at the next boundary: {advice.switch['reason']}"
+        if held:
+            message += f"\n-- auto-seat will not make this move itself ({held}); switch yourself if you agree"
         # The last line of the reply, not the first: the first line of a reply is where
         # the work is, and a recommendation that displaces the answer gets ignored. The
         # `systemMessage` is the belt to this braces, since it was not shown in a live
         # CLI session at all.
         note = (f"ruti manager: {kind} work -> {best.seat.label()} (now {now}); "
-                f"{advice.switch['reason']}. The user switches; you cannot. Make this "
+                f"{advice.switch['reason']}. "
+                + (f"Auto-seat will not make this move itself ({held}); the user switches if they agree, you cannot. "
+                   if held else "The user switches; you cannot. ")
+                + "Make this "
                 "the LAST line of your reply -- after everything else, nothing after it "
                 "-- in the user's language, each command in its own code span: "
                 "`Recommendation: <command> then <command>`. Say it every reply until "
@@ -686,8 +711,8 @@ def remember_recommendation(session_id: str | None, seat: Seat,
     The debounce the prompt hint's user-facing half runs on: showing the same
     recommendation twice is how a line stops being read. The classified task in the same
     record is carried across untouched -- it belongs to a different caller. `verdict`
-    ("now" or "boundary") is kept beside it, because the status line draws a move that
-    waits for the user differently from one that is applied.
+    ("now" or "boundary" or "held") is kept beside it, because the status line draws a move
+    that waits for the user differently from one that is applied.
     """
     try:
         if not session_id:
@@ -820,6 +845,7 @@ def recommended(session_id: str | None) -> str | None:
 
 
 def recommended_verdict(session_id: str | None) -> str | None:
-    """Whether the recommendation is a move to make `now` or one for a `boundary`."""
+    """Whether the recommendation is a move to make `now`, one for a `boundary`, or `held`,
+    a move down auto-seat leaves to the user."""
     value = _entry(session_id).get("recommended_verdict")
-    return value if value in ("now", "boundary") else None
+    return value if value in ("now", "boundary", "held") else None

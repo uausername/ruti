@@ -294,6 +294,30 @@ def test_the_hint_names_the_seat_shows_it_once_and_then_repeats(monkeypatch):
     assert manager.recommended("s1") == "sonnet/medium"
 
 
+def test_the_hint_says_auto_seat_will_not_make_a_down_move(monkeypatch):
+    from ruti import auto_seat
+    monkeypatch.setattr(manager.quota, "load", lambda: Snap(quota.YELLOW))
+    modes.set_manager("s1", True)
+    auto_seat.set_mode("on")
+    manager.record_seat("s1", seated("claude-opus-5-5", "high", 10_000))
+    note, shown = manager.prompt_hint("s1", "implement", 0.9, 0.5, fresh=False)
+    assert "Auto-seat will not make this move itself" in note
+    assert "switch yourself if you agree" in shown
+    assert manager.recommended_verdict("s1") == "held"
+
+
+def test_the_hint_does_not_mention_auto_seat_when_it_is_off(monkeypatch):
+    from ruti import auto_seat
+    monkeypatch.setattr(manager.quota, "load", lambda: Snap(quota.YELLOW))
+    modes.set_manager("s1", True)
+    auto_seat.set_mode("off")
+    manager.record_seat("s1", seated("claude-opus-5-5", "high", 10_000))
+    note, shown = manager.prompt_hint("s1", "implement", 0.9, 0.5, fresh=False)
+    assert "Auto-seat will not make this move itself" not in note
+    assert "switch yourself if you agree" not in shown
+    assert manager.recommended_verdict("s1") == "now"
+
+
 def test_the_hint_stops_and_clears_the_arrow_once_the_seat_matches(monkeypatch):
     monkeypatch.setattr(manager.quota, "load", lambda: Snap(quota.YELLOW))
     modes.set_manager("s1", True)
@@ -458,7 +482,7 @@ def test_the_hook_keeps_the_task_across_a_prompt_too_short_to_classify(hook, mon
     monkeypatch.setattr(ups, "_classify_prompt", lambda *_a, **_k: None)
     seen: list[str | None] = []
     monkeypatch.setattr(ups.manager, "prompt_hint",
-                        lambda _s, kind, *_a: seen.append(kind) or ("NOTE", None))
+                        lambda _s, kind, *_a, **_k: seen.append(kind) or ("NOTE", None))
     output = hook("yes", None)
     assert seen == ["implement"]
     assert "NOTE" in output["hookSpecificOutput"]["additionalContext"]

@@ -283,10 +283,11 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
                     # `->` is a move the manager makes itself (cyan); `⇢` in yellow is one
                     # that waits for the user: a model switch held back by the size of
                     # the context (`/compact` shrinks it, and the move is then taken on
-                    # the next prompt), or any move while auto-seat is not on.
+                    # the next prompt), or any move while auto-seat is not on, or a move
+                    # down auto-seat holds for want of a fresh, confident, easy classification.
                     if manager.recommended_verdict(session_id) == "boundary":
                         segments.append(_colour(f"⇢{target} /compact", "33"))
-                    elif auto_seat.mode() != "on":
+                    elif manager.recommended_verdict(session_id) == "held" or auto_seat.mode() != "on":
                         segments.append(_colour(f"⇢{target}", "33"))
                     else:
                         segments.append(_colour("->" + target, "36"))
