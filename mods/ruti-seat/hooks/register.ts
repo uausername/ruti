@@ -33,8 +33,10 @@ async function userSettingsPath($: any): Promise<string> {
   return `${dir ?? `${home}/.claude`}/settings.json`
 }
 
+// Read from the file, not `$.settings.read`: that answers the engine's in-memory copy,
+// which already holds the previous switch's value, so it would be "restored" as the default.
 async function snapshotDefaults($: any): Promise<Kept> {
-  const user = await $.settings.read({ source: 'user' })
+  const user = JSON.parse(await $.fs.read(await userSettingsPath($)))
   const kept: Kept = {}
   for (const key of KEPT) kept[key] = user[key]
   return kept
