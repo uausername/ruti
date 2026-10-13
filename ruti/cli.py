@@ -628,9 +628,9 @@ def seat_mode(value: str | None) -> None:
 @click.option("--json", "as_json", is_flag=True, default=True)
 def seat_plan(session_id: str | None, as_json: bool) -> None:
     """What the session should do about its seat for the prompt on stdin."""
-    import sys
-
-    prompt = sys.stdin.read()
+    # The mod writes UTF-8; sys.stdin would decode it with the console code page
+    # (cp1251 here), doubling every Cyrillic letter and handing jev mojibake.
+    prompt = click.get_binary_stream("stdin").read().decode("utf-8", errors="replace")
     ui.emit_json(auto_seat_mod.plan(session_id or sessions.current_session_id() or "", prompt))
 
 
