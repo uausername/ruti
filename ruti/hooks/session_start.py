@@ -14,6 +14,13 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+import time
+
+# The hook is registered with a 25 s timeout, and past it Claude Code drops everything
+# the hook would have printed -- the flow continuation included. The time machine
+# goes last and gets what is left of this budget.
+TIME_MACHINE_DEADLINE = 18.0
 
 
 def build_report() -> tuple[str, str] | None:
@@ -70,11 +77,10 @@ def time_machine(payload: dict) -> tuple[str, str] | None:
 
     if not modes.current(str(payload.get("session_id") or "") or None).get("timemachine"):
         return None
-    root = timemachine.resolve_root(payload.get("cwd") or None)
-    proj = timemachine.project(root)
+    proj = timemachine.Project(timemachine.event_root(payload))
     if not proj.has_letters() or proj.self_wired():
         return None
-    text = timemachine.brief_text(root, source=str(payload.get("source") or "startup"))
+    text = timemachine.brief_text(proj, source=str(payload.get("source") or "startup"))
     if not text:
         return None
     first = text.splitlines()[0]
@@ -101,7 +107,27 @@ def _mark_start() -> None:
     sessions.prune()
 
 
+def _within(fn, payload: dict, seconds: float):
+    """fn(payload) in a daemon thread, or None when it is not done in `seconds`: git in
+    a huge or cold checkout must not cost the parts already computed."""
+    if seconds <= 0:
+        return None
+    box: list = []
+
+    def run() -> None:
+        try:
+            box.append(fn(payload))
+        except Exception:
+            pass
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    return box[0] if box else None
+
+
 def main() -> int:
+    started = time.monotonic()
     payload: dict = {}
     try:
         raw = sys.stdin.read()
@@ -134,12 +160,9 @@ def main() -> int:
     except Exception:
         pass
 
-    try:
-        letters = time_machine(payload)
-        if letters:
-            parts.append(letters)
-    except Exception:
-        pass
+    letters = _within(time_machine, payload, TIME_MACHINE_DEADLINE - (time.monotonic() - started))
+    if letters:
+        parts.append(letters)
 
     if not parts:
         return 0
