@@ -24,9 +24,14 @@ import sys
 
 
 def letter_for(payload: dict) -> dict | None:
-    """The time machine's letter for the file this Write/Edit is about to change."""
-    if payload.get("tool_name") not in ("Write", "Edit"):
+    """The time machine's letter for the file this Write/Edit -- or a Bash redirect
+    such as `cat >> docs/tasks.yaml` -- is about to change."""
+    tool = payload.get("tool_name")
+    if tool not in ("Write", "Edit", "Bash"):
         return None
+    if tool == "Bash" and ">" not in str((payload.get("tool_input") or {}).get("command") or "") \
+            and "tee" not in str((payload.get("tool_input") or {}).get("command") or ""):
+        return None  # most commands write nothing; skip loading any letters for them
     from ruti import timemachine
 
     root = timemachine.resolve_root(payload.get("cwd") or None)
