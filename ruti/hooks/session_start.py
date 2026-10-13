@@ -62,6 +62,24 @@ def build_report() -> tuple[str, str] | None:
     return user_message, model_context
 
 
+def time_machine(payload: dict) -> tuple[str, str] | None:
+    """Letters from this project's past, for a project that keeps them and does not
+    deliver them itself (`ruti.timemachine`). The user sees how long it has been since
+    the last session; the model gets the whole brief."""
+    from ruti import modes, timemachine
+
+    if not modes.current(str(payload.get("session_id") or "") or None).get("timemachine"):
+        return None
+    root = timemachine.resolve_root(payload.get("cwd") or None)
+    proj = timemachine.project(root)
+    if not proj.has_letters() or proj.self_wired():
+        return None
+    text = timemachine.brief_text(root)
+    if not text:
+        return None
+    return text.splitlines()[0], text
+
+
 def _mark_start() -> None:
     """Record where the window stood when this session began."""
     from ruti import ledger, quota
@@ -112,6 +130,13 @@ def main() -> int:
         report = build_report()
         if report:
             parts.append(report)
+    except Exception:
+        pass
+
+    try:
+        letters = time_machine(payload)
+        if letters:
+            parts.append(letters)
     except Exception:
         pass
 

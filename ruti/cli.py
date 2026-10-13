@@ -729,6 +729,23 @@ def defaults_clear(keys: tuple[str, ...]) -> None:
     ui.ok(f"cleared: {', '.join(keys)}" if keys else "all defaults back to built-in")
 
 
+# ----------------------------------------------------------------------- timemachine
+
+
+@main.command("timemachine", context_settings={"ignore_unknown_options": True,
+                                               "allow_extra_args": True,
+                                               "help_option_names": []})
+@click.argument("args", nargs=-1, type=click.UNPROCESSED)
+def timemachine(args: tuple[str, ...]) -> None:
+    """Letters from the project's future: brief | warn | travel | learn | expedition |
+    backtest | check | status | vendor [DIR]. `--root DIR` picks the project (default:
+    the git checkout around the working directory). The same engine runs vendored in a
+    project as `scripts/time-machine/tm.py`; `vendor` refreshes that copy."""
+    from . import timemachine as tm_mod
+
+    raise SystemExit(tm_mod.main(["ruti timemachine", *args]))
+
+
 # ----------------------------------------------------------------------- mode
 
 
@@ -765,6 +782,7 @@ def mode(ctx: click.Context, as_json: bool) -> None:
     ui.say(f"  wait   : {'[ok]on[/ok]' if state['wait'] else '[muted]off[/muted]'}")
     ui.say(f"  flow   : {'[ok]on[/ok]' if state['flow'] else '[muted]off[/muted]'}")
     ui.say(f"  manager: {'[ok]on[/ok]' if state['manager'] else '[muted]off[/muted]'}")
+    ui.say(f"  timemachine: {'[ok]on[/ok]' if state['timemachine'] else '[muted]off[/muted]'}")
     summary = modes_mod.active_summary(state)
     if summary:
         ui.say(f"\n[muted]active: {summary}[/muted]")
@@ -893,6 +911,18 @@ def mode_manager(state: str) -> None:
     ui.say("[muted]the model switch itself is the user's: no hook can change it, and a "
            "switch re-reads the context uncached, so a change of model is asked for at "
            "the next boundary[/muted]")
+
+
+@mode.command("timemachine")
+@click.argument("state", type=click.Choice(["on", "off"]))
+def mode_timemachine(state: str) -> None:
+    """Letters from the project's past. On: a project with docs/future-letters.yaml
+    gets a brief at session start (how long since the last session, the letters for
+    the work in its queue, ticking bombs) and a letter before each edit of a file
+    under one. A project that wires its own hook keeps it; ruti stays silent there."""
+    session_id = _session_or_die()
+    modes_mod.set_timemachine(session_id, state == "on")
+    ui.ok(f"time machine {state} -- see `ruti timemachine status` for this project")
 
 
 @mode.command("jev")
