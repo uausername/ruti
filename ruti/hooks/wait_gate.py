@@ -23,9 +23,9 @@ import json
 import re
 import sys
 
-# A cheap look before loading any letters: most commands write nothing. `\btee\b`, so
-# `committee` or `guarantee` in a command does not count.
-_WRITES = re.compile(r">|\btee\b")
+# A cheap look before loading any letters: most commands write nothing. `tee` as the
+# command word only, so `committee` or `scripts/tee.sh` does not count.
+_WRITES = re.compile(r">|(?<![\w./-])tee(?=\s)")
 
 
 def letter_for(payload: dict) -> dict | None:
@@ -39,7 +39,7 @@ def letter_for(payload: dict) -> dict | None:
     from ruti import timemachine
 
     proj = timemachine.Project(timemachine.event_root(payload))
-    if not proj.has_letters() or proj.self_wired():
+    if not proj.has_letters() or timemachine.wired_here(proj, payload):
         return None
     text = timemachine.warn_text(payload, proj)
     if not text:

@@ -59,8 +59,10 @@ CLASSES = {"process", "prod-drift", "device", "parity", "security", "silent-loss
            "assumption", "docs-lie", "ci", "hotspot", "bomb"}
 GUARDS = {"hook", "ci", "test", "prose", "none"}
 TOOLS = {"Write", "Edit", "Bash"}   # Bash: a redirect into the file (`cat >> f`, `tee -a f`)
-# `> f`, `>> "a b"`, `tee --append f`, `tee -ai f`; a target in quotes keeps its spaces
-REDIRECT_RE = re.compile(r"""(?:>>?|\btee\b(?:\s+-[-\w]*)*)\s*(?:"([^"]+)"|'([^']+)'|([^\s"';|&<>]+))""")
+# `> f`, `>> "a b"`, `tee --append f`, `tee -ai f`, `tee --output-error=warn f`; a target
+# in quotes keeps its spaces. `tee` is the command word only: not `scripts/tee.sh`.
+TEE = r"(?<![\w./-])tee(?=\s)"
+REDIRECT_RE = re.compile(r"""(?:>>?|""" + TEE + r"""(?:\s+-[-\w]*(?:=\S*)?)*)\s*(?:"([^"]+)"|'([^']+)'|([^\s"';|&<>]+))""")
 KEYS_REQUIRED = ("id", "title", "class", "severity", "warning", "precaution",
                  "evidence", "guard")
 KEYS_OPTIONAL = ("paths", "tools", "nodes", "while_open", "when", "mechanize")
@@ -72,6 +74,7 @@ WARN_PER_CALL = 2
 PROSE_DEBT = 3            # this much evidence under guard prose|none is a debt
 EXPEDITION_DEFAULT_DAYS = 30
 EXPEDITION_BRIEF_CAP = 40
+EXPEDITION_CLI_TIMEOUT = 60  # seconds; the brief keeps git's 10 inside a hook's timeout
 ID_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 DATE_RE = re.compile(r"\b(20\d\d-\d\d-\d\d)\b")
 PR_RE = re.compile(r"\(#(\d+)\)\s*$|^Merge pull request #(\d+) ")
@@ -100,6 +103,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "brief_bombs": "Ticking bombs (defused when the node closes): {items}",
         "brief_expedition": "🔭 Expedition: {n} fix(es) merged since {date}, {m} with no letter — `{cmd} expedition`, decide each, then `--mark`.",
         "brief_vendored": "⚠ The vendored engine {path} differs from ruti's — `ruti timemachine vendor`.",
+        "brief_expedition_failed": "🔭 Expedition: `git log` did not finish in time — `{cmd} expedition` by hand.",
         "brief_malformed": "⚠ Letters left out as malformed: {n} — `{cmd} check` names them.",
         "brief_unparsed": "⚠ {letters} does not parse — no letters delivered until it does: `{cmd} check`.",
         "brief_footer": "More: `{cmd} travel`. Before you edit a file under a letter, the hook will remind you.",
@@ -132,10 +136,12 @@ STRINGS: dict[str, dict[str, str]] = {
         "exp_none": "\nNothing new: no fix commit since the marker.",
         "exp_tail": "\nWhen decided: add evidence / letters, then `{cmd} expedition --mark` in the same PR.",
         "exp_marked": "expedition marker → {sha} ({date})",
+        "exp_git_failed": "ERROR: `git log` for the expedition failed or timed out ({err}) — not the same as \"nothing new\".",
         "exp_mark_failed": "ERROR: could not place the expedition marker in {path} — nothing written; add `expedition: {{last: …, date: …}}` by hand.",
         "ok": "OK: {n} letter(s), no violations.",
         "e_field": "{w}: missing `{k}`", "e_unknown": "{w}: unknown field(s) {keys}",
         "e_id": "{w}: id must be kebab-case", "e_dup": "{w}: duplicate id",
+        "e_shape": "{w}: a field has the wrong type (warning/precaution are text; paths/tools/nodes are lists of strings; evidence is a list of {{pr|commit, date}}) — the hooks skip this letter",
         "e_enum": "{w}: {k} ∉ {allowed}", "e_long": "{w}: `{k}` longer than {n} characters — a letter, not a novel",
         "e_ev": "{w}: evidence must be a non-empty list (a letter without evidence is a guess)",
         "e_ev_ref": "{w}: evidence {e}: needs an integer `pr` or a `commit`",
@@ -169,6 +175,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "brief_bombs": "Тикают бомбы (обезвредятся, когда закроют узел): {items}",
         "brief_expedition": "🔭 Экспедиция: с {date} влито фиксов: {n}, без письма: {m} — `{cmd} expedition`, реши по каждому, потом `--mark`.",
         "brief_vendored": "⚠ Vendored-движок {path} разошёлся с ruti — `ruti timemachine vendor`.",
+        "brief_expedition_failed": "🔭 Экспедиция: `git log` не успел — запусти `{cmd} expedition` руками.",
         "brief_malformed": "⚠ Пропущено битых писем: {n} — `{cmd} check` назовёт их.",
         "brief_unparsed": "⚠ {letters} не разбирается — письма не доставляются, пока не починишь: `{cmd} check`.",
         "brief_footer": "Подробно: `{cmd} travel`. Перед правкой файла под письмом хук напомнит сам.",
@@ -201,10 +208,12 @@ STRINGS: dict[str, dict[str, str]] = {
         "exp_none": "\nНового нет: с отметки ни одного фикса.",
         "exp_tail": "\nРешил — допиши evidence / письма и `{cmd} expedition --mark` в том же PR.",
         "exp_marked": "отметка экспедиции → {sha} ({date})",
+        "exp_git_failed": "ОШИБКА: `git log` экспедиции упал или не успел ({err}) — это не «нового нет».",
         "exp_mark_failed": "ОШИБКА: не удалось поставить отметку экспедиции в {path} — ничего не записано; впиши `expedition: {{last: …, date: …}}` руками.",
         "ok": "OK: {n} писем, нарушений нет.",
         "e_field": "{w}: нет поля `{k}`", "e_unknown": "{w}: неизвестные поля {keys}",
         "e_id": "{w}: id должен быть kebab-case", "e_dup": "{w}: id повторяется",
+        "e_shape": "{w}: у поля не тот тип (warning/precaution — текст; paths/tools/nodes — списки строк; evidence — список {{pr|commit, date}}) — хуки пропускают это письмо",
         "e_enum": "{w}: {k} ∉ {allowed}", "e_long": "{w}: `{k}` длиннее {n} символов — письмо, не роман",
         "e_ev": "{w}: evidence — непустой список (письмо без доказательств — гадание)",
         "e_ev_ref": "{w}: evidence {e}: нужен целый `pr` или `commit`",
@@ -238,11 +247,15 @@ def T(key: str, **kw) -> str:
 
 # ---------------------------------------------------------------- project
 
-def _git_in(root: pathlib.Path, *args: str) -> str:
+def _git_in(root: pathlib.Path, *args: str, timeout: float = 10, strict: bool = False) -> str:
+    """git's stdout, "" when it fails -- or, `strict`, the error itself, for a caller
+    that must not read a timeout as an empty answer."""
     try:
         return subprocess.run(["git", "-C", str(root), *args], capture_output=True,
-                              text=True, encoding="utf-8", timeout=10).stdout
+                              text=True, encoding="utf-8", timeout=timeout).stdout
     except Exception:
+        if strict:
+            raise
         return ""
 
 
@@ -377,7 +390,7 @@ class Project:
                     entries = group.get("hooks") if isinstance(group, dict) else None
                     for h in entries if isinstance(entries, list) else []:
                         cmd = str(h.get("command") or "") if isinstance(h, dict) else ""
-                        if "time-machine" in cmd or VENDORED_REL in cmd:
+                        if "time-machine" in cmd:
                             return True
         return False
 
@@ -441,8 +454,10 @@ def resolve_root(explicit: str | None = None) -> pathlib.Path:
 
 
 def find_root(start) -> pathlib.Path | None:
-    """The checkout around `start`: the nearest directory holding `.git`. A walk over
-    the filesystem, not `git rev-parse` -- the PreToolUse hook runs on every edit."""
+    """The project around `start`: the nearest directory holding letters or `.git` --
+    letters first, so a package of a monorepo with its own letters is its own project.
+    A walk over the filesystem, not `git rev-parse`: the PreToolUse hook runs on every
+    edit."""
     if not start:
         return None
     try:
@@ -450,25 +465,56 @@ def find_root(start) -> pathlib.Path | None:
     except (OSError, ValueError):
         return None
     for d in (here, *here.parents):
-        if (d / ".git").exists():
+        if (d / LETTERS_REL).exists() or (d / ".git").exists():
             return d
     return None
 
 
+def session_root(event: dict) -> pathlib.Path:
+    """The project Claude Code was started in -- `$CLAUDE_PROJECT_DIR`, which a `cd`
+    does not move -- else the event's working directory."""
+    start = os.environ.get("CLAUDE_PROJECT_DIR") or event.get("cwd") or None
+    return find_root(start) or resolve_root(start)
+
+
+def event_target(event: dict) -> pathlib.Path | None:
+    """The file a Write/Edit names, or the first file a Bash command redirects into."""
+    tool_input = event.get("tool_input") or {}
+    if event.get("tool_name") == "Bash":
+        targets = redirect_targets(str(tool_input.get("command") or ""))
+        raw = targets[0] if targets else ""
+    else:
+        raw = str(tool_input.get("file_path") or "")
+    if not raw:
+        return None
+    path = pathlib.Path(raw)
+    if not path.is_absolute():
+        if not event.get("cwd"):
+            return None
+        path = pathlib.Path(event["cwd"]) / path
+    return path
+
+
 def event_root(event: dict) -> pathlib.Path:
-    """For ruti's hooks: the project of the file being changed, else of the session's
-    working directory. A session that ran `cd app` still reaches the letters at the
-    checkout's root, and an edit in a second repository under the session's directory
-    gets that repository's."""
-    cwd = event.get("cwd") or None
-    base = find_root(cwd) or resolve_root(cwd)
-    fp = str((event.get("tool_input") or {}).get("file_path") or "")
-    own = find_root(pathlib.Path(fp).parent) if fp and pathlib.Path(fp).is_absolute() else None
-    # Only a checkout inside the session's own tree: a letter is read as the project's
+    """For ruti's hooks: the project of the file being changed, else the session's. A
+    session that ran `cd app` still reaches the letters at the checkout's root, and a
+    write into a second repository under the session's directory -- by Write, Edit or a
+    Bash redirect alike -- gets that repository's."""
+    base = session_root(event)
+    target = event_target(event)
+    own = find_root(target.parent) if target else None
+    # Only a project inside the session's own tree: a letter is read as the project's
     # history, and a clone in /tmp has no say in this session's context.
     if own and (own == base or base in own.parents):
         return own
     return base
+
+
+def wired_here(p: Project, event: dict) -> bool:
+    """The project delivers its own letters in this session: it wires a hook, and that
+    hook runs -- Claude Code loads `.claude/settings.json` from the session's project
+    only, not from a repository nested under it."""
+    return p.self_wired() and p.root == session_root(event)
 
 
 _PROJECT: Project | None = None
@@ -511,8 +557,8 @@ def load_graph() -> tuple[dict, list, list, list]:
     return project().graph()
 
 
-def git(*args: str) -> str:
-    return _git_in(project().root, *args)
+def git(*args: str, **kw) -> str:
+    return _git_in(project().root, *args, **kw)
 
 
 # ---------------------------------------------------------------- globs
@@ -747,7 +793,8 @@ def expedition_marker() -> dict:
     return m if isinstance(m, dict) else {}
 
 
-def expedition(letters: list[dict], since: str | None = None, cap: int | None = None) -> dict:
+def expedition(letters: list[dict], since: str | None = None, cap: int | None = None,
+               timeout: float = 10) -> dict:
     """Fix commits merged since the marker, sorted into: evidence for a known letter,
     candidates for a new class, and files fixed twice with no letter on them."""
     p = project()
@@ -763,7 +810,7 @@ def expedition(letters: list[dict], since: str | None = None, cap: int | None = 
     # to 41 processes inside a SessionStart hook with a timeout. `-m` with
     # --first-parent lists a merge commit's files against its first parent.
     raw = git("log", "--first-parent", "-m", "--name-only",
-              "--format=%x1e%H%x1f%cs%x1f%s", *rng)
+              "--format=%x1e%H%x1f%cs%x1f%s", *rng, timeout=timeout, strict=True)
     log = [chunk.partition("\n") for chunk in raw.split("\x1e")[1:]]
     fixes, evidence, new, counts = [], [], [], collections.Counter()
     capped = False
@@ -802,7 +849,10 @@ def mark_expedition(sha: str, date: str) -> bool:
     path = project().letters_path
     text = path.read_text(encoding="utf-8")
     block = f"expedition:\n  last: {sha}\n  date: {date}\n"
-    rx = re.compile(r"^expedition:[^\n]*\n(?:[ \t]+.*\n)*", re.MULTILINE)
+    # the block: its header, indented lines, and blank lines that more indented lines
+    # follow -- also at the end of a file without a final newline
+    rx = re.compile(r"^expedition:[^\n]*(?:\n|\Z)(?:[ \t]*\n(?=[ \t]+\S)|[ \t]+[^\n]*(?:\n|\Z))*",
+                    re.MULTILINE)
     version = re.search(r"^version:[^\n]*\n", text, re.MULTILINE)
     if rx.search(text):
         new = rx.sub(lambda _m: block, text, count=1)
@@ -810,10 +860,11 @@ def mark_expedition(sha: str, date: str) -> bool:
         new = text[:version.end()] + block + text[version.end():]
     else:
         new = block + text
-    try:
-        doc = yaml.safe_load(new)
+    try:  # strictly, as `check` reads it: a leftover duplicate key is not a marker
+        doc = yaml.load(new, Loader=_strict_loader())
         marker = doc.get("expedition") if isinstance(doc, dict) else None
-        ok = isinstance(marker, dict) and str(marker.get("last")) == sha
+        ok = (isinstance(marker, dict) and str(marker.get("last")) == sha
+              and str(marker.get("date")) == date)
     except yaml.YAMLError:
         ok = False
     if ok:
@@ -832,7 +883,11 @@ def cmd_expedition(argv: list[str]) -> int:
             return 1
         print(T("exp_marked", sha=sha[:9], date=date))
         return 0
-    rep = expedition(letters, since)
+    try:
+        rep = expedition(letters, since, timeout=EXPEDITION_CLI_TIMEOUT)
+    except (subprocess.SubprocessError, OSError) as exc:
+        print(T("exp_git_failed", err=type(exc).__name__), file=sys.stderr)
+        return 1
     if "--json" in argv:
         print(json.dumps(rep, ensure_ascii=False, indent=1))
         return 0
@@ -896,8 +951,12 @@ def brief_extras(letters: list[dict]) -> list[str]:
                        letters=LETTERS_REL))
     marker = expedition_marker()
     if marker.get("last"):
-        rep = expedition(letters, cap=EXPEDITION_BRIEF_CAP)
-        if rep["fixes"]:
+        try:
+            rep = expedition(letters, cap=EXPEDITION_BRIEF_CAP)
+        except (subprocess.SubprocessError, OSError):
+            rep = None
+            lines.append(T("brief_expedition_failed", cmd=command()))
+        if rep and rep["fixes"]:
             n = f"{rep['fixes']}+" if rep["capped"] else rep["fixes"]
             lines.append(T("brief_expedition", date=marker.get("date", "?"), n=n,
                            m=len(rep["new"]), cmd=command()))
@@ -980,8 +1039,8 @@ def brief_text(root: str | pathlib.Path | Project | None = None,
     problems = []
     if p.load_error:
         problems.append(T("brief_unparsed", letters=LETTERS_REL, cmd=command()))
-    elif p.malformed():
-        problems.append(T("brief_malformed", n=p.malformed(), cmd=command()))
+    elif (n := p.malformed()):
+        problems.append(T("brief_malformed", n=n, cmd=command()))
     by_id, front, _waiting, claimed = p.graph()
     return build_brief(p.letters(), by_id, front, claimed, dt.date.today(),
                        dt.datetime.now().timestamp(), last_activity(), source=source,
@@ -1304,6 +1363,7 @@ def check_letters(letters: list[dict], by_id: dict, tracked: list[str] | None,
     for i, x in enumerate(letters):
         lid = x.get("id")
         w = f"letter {lid or '#' + str(i)}"
+        before = len(errors)
         for k in KEYS_REQUIRED:
             if not x.get(k):
                 errors.append(T("e_field", w=w, k=k))
@@ -1317,7 +1377,7 @@ def check_letters(letters: list[dict], by_id: dict, tracked: list[str] | None,
         else:
             seen.add(lid)
         for k, allowed in (("class", CLASSES), ("severity", set(SEVERITY)), ("guard", GUARDS)):
-            if x.get(k) not in allowed:
+            if not isinstance(x.get(k), str) or x[k] not in allowed:
                 errors.append(T("e_enum", w=w, k=k, allowed=sorted(allowed)))
         for k in ("warning", "precaution"):
             if len(str(x.get(k) or "")) > TEXT_LIMIT:
@@ -1334,9 +1394,13 @@ def check_letters(letters: list[dict], by_id: dict, tracked: list[str] | None,
         if not any(x.get(k) for k in ("paths", "nodes", "while_open", "when")):
             errors.append(T("e_trigger", w=w))
         for t in x.get("tools") or []:
-            if t not in TOOLS:
+            if not isinstance(t, str) or t not in TOOLS:
                 errors.append(T("e_enum", w=w, k="tools", allowed=sorted(TOOLS)))
+        if len(errors) == before and not deliverable(x):
+            errors.append(T("e_shape", w=w))    # a type the checks above let through
         for g in x.get("paths") or []:
+            if not isinstance(g, str):
+                continue                # e_shape above names it
             if tracked is not None and not any(glob_re(g).match(f) for f in tracked):
                 blame = stale_is_error(g) if callable(stale_is_error) else stale_is_error
                 if blame == "here":
