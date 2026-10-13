@@ -1,4 +1,4 @@
-"""The PreToolUse, PostToolUse and Stop hook for wait mode and flow mode.
+"""The PreToolUse, PostToolUse and Stop hook for wait mode, flow mode and the time machine.
 
 One module for both because both are registered on the same three events, and a second
 registration would be a second Python start on every tool call. See `ruti.wait` and
@@ -12,12 +12,31 @@ pause or missed handoff.
 Where both modes are on, wait goes first: its refusal at 95% is about the hard stop of
 the whole window, and its Stop hook may sleep until the reset and then resume this very
 session -- a handoff launched before that would put two sessions on one task.
+
+The time machine only ever adds context to a Write or Edit that nothing refused: a
+letter from the project's past about the file about to change (`ruti.timemachine`).
 """
 
 from __future__ import annotations
 
 import json
 import sys
+
+
+def letter_for(payload: dict) -> dict | None:
+    """The time machine's letter for the file this Write/Edit is about to change."""
+    if payload.get("tool_name") not in ("Write", "Edit"):
+        return None
+    from ruti import timemachine
+
+    root = timemachine.resolve_root(payload.get("cwd") or None)
+    proj = timemachine.project(root)
+    if not proj.has_letters() or proj.self_wired():
+        return None
+    text = timemachine.warn_text(payload, root)
+    if not text:
+        return None
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": text}}
 
 
 def handle(payload: dict) -> dict | None:
@@ -28,10 +47,12 @@ def handle(payload: dict) -> dict | None:
         return None
     active = modes.current(session_id)
     wait_on, flow_on = active.get("wait"), active.get("flow")
+    event = payload.get("hook_event_name")
     if not (wait_on or flow_on):
+        if event == "PreToolUse" and active.get("timemachine"):
+            return letter_for(payload)
         return None
 
-    event = payload.get("hook_event_name")
     if event == "PreToolUse":
         if wait_on:
             from ruti import quota, wait
@@ -42,8 +63,10 @@ def handle(payload: dict) -> dict | None:
         if flow_on:
             from ruti import flow
 
-            return flow.pre_tool_use(session_id, payload)
-        return None
+            decided = flow.pre_tool_use(session_id, payload)
+            if decided:
+                return decided
+        return letter_for(payload) if active.get("timemachine") else None
 
     if event == "PostToolUse":
         notes = []

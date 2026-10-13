@@ -249,6 +249,23 @@ verdict — it ranks how well an answer is argued, not whether it is true, and t
 answers are always printed in full for exactly that reason. A council whose opinions
 you did not read is a council you paid for and threw away.
 
+### Time machine
+
+A project that keeps `docs/future-letters.yaml` has written down the mistakes it already
+paid for, each with the PRs that prove it. With `ruti mode timemachine` on (the default)
+the session-start brief says how long it has been since the last session -- tell the
+user -- and which letters fit the work in the queue; before you edit a file under a
+letter, its warning arrives as context. Act on the precaution; the letter is evidence,
+not a suggestion. A fix for a class a letter names adds its PR to that letter's
+`evidence` in the same diff, a new class gets a new letter, and `ruti timemachine
+expedition` lists the fixes merged since the last expedition that nobody sorted yet.
+
+`ruti timemachine` is the engine's source. A project whose sessions run where ruti is
+not installed carries a byte-identical copy at `scripts/time-machine/tm.py` and its own
+hook -- ruti stays silent there. Never edit that copy: change `ruti/timemachine.py`,
+then `ruti timemachine vendor <project>`; `ruti timemachine status` says when the copy
+drifted.
+
 ### What stays in this session
 
 Planning and architecture. Anything needing back-and-forth exploration of the codebase

@@ -17,6 +17,10 @@ defaults to off for the same reason it is a switch at all: it puts a line in fro
 the user on every prompt whose recommendation has changed, and a session that has not
 asked for that should not get it.
 
+`timemachine` defaults to on because it costs nothing where it has nothing to say: it
+acts only in a project that keeps letters from its own past (`docs/future-letters.yaml`,
+see `ruti.timemachine`) and does not already deliver them through a hook of its own.
+
 State rides in the same `sessions.json` as the on/off toggle, one record per
 session:
 
@@ -24,7 +28,7 @@ session:
                       "free": "off" | "soft" | "hard", "jev": bool,
                       "council": "off" | "on" | "auto", "wait": bool,
                       "wait_state": {...}, "flow": bool, "flow_state": {...},
-                      "manager": bool, "at": <unix ts>}}
+                      "manager": bool, "timemachine": bool, "at": <unix ts>}}
 
 `at` is refreshed on every write so `sessions.prune()` does not discard an active
 mode as if it were a stale toggle from a session long over.
@@ -60,9 +64,9 @@ COUNCIL_LEVELS: tuple[str, ...] = ("off", "on", "auto")
 # of the toolchain shares.
 DEFAULTS: dict[str, Any] = {"coding": False, "free": "off", "jev": True,
                             "council": "off", "wait": False, "flow": False,
-                            "manager": False}
+                            "manager": False, "timemachine": True}
 
-BOOL_MODES: tuple[str, ...] = ("coding", "jev", "wait", "flow", "manager")
+BOOL_MODES: tuple[str, ...] = ("coding", "jev", "wait", "flow", "manager", "timemachine")
 _LEVELS: dict[str, tuple[str, ...]] = {"free": FREE_LEVELS, "council": COUNCIL_LEVELS}
 _TRUE, _FALSE = ("on", "true", "1", "yes"), ("off", "false", "0", "no")
 
@@ -161,6 +165,7 @@ def current(session_id: str | None) -> dict[str, Any]:
         "wait": bool(record.get("wait", defaults["wait"])),
         "flow": bool(record.get("flow", defaults["flow"])),
         "manager": bool(record.get("manager", defaults["manager"])),
+        "timemachine": bool(record.get("timemachine", defaults["timemachine"])),
     }
 
 
@@ -216,6 +221,10 @@ def set_jev(session_id: str, on: bool) -> None:
 
 def set_manager(session_id: str, on: bool) -> None:
     _update(session_id, "manager", bool(on))
+
+
+def set_timemachine(session_id: str, on: bool) -> None:
+    _update(session_id, "timemachine", bool(on))
 
 
 def set_wait(session_id: str, on: bool) -> None:
