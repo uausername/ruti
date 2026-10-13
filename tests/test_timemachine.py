@@ -268,3 +268,90 @@ def test_the_vendored_copy_runs_on_its_own(repo, tmp_path):
 def test_mode_shows_up_with_a_default_of_on():
     assert modes.DEFAULTS["timemachine"] is True
     assert modes.current("fresh")["timemachine"] is True
+
+
+# ---------------------------------------------------------------- review of haccp#449
+
+
+@pytest.mark.parametrize("touch,glob,hit", [
+    ("supabase/migrations/", "supabase/migrations/*.sql", True),     # the dir's own files
+    (".github/workflows/", ".github/workflows/*-cron.yml", True),
+    (".github/workflows/", ".github/workflows/prod-watch.yml", False),  # one literal file
+    ("supabase/functions/", "supabase/functions/org-*/**", False),   # `*` mid-glob: narrower
+    ("app/lib/data/capture_x/", "app/lib/data/capture_*.dart", False),  # `*` never crosses `/`
+    ("app/lib/ui/chat/", "app/lib/**", True),
+    ("app/", "app/lib/**", False),
+    ("src/a.py", "src/*.py", True),
+])
+def test_touches_overlap_is_segment_wise(touch, glob, hit):
+    assert tm.touches_overlap(touch, glob) is hit
+
+
+def test_a_claim_is_stale_after_24_hours_not_after_midnight():
+    import datetime as dt
+    node = {"id": "n", "status": "in_progress", "notes": "2026-10-12: claim"}
+    morning_after = dt.datetime(2026, 10, 13, 9, 0)
+    assert tm.stale_claims([node], morning_after.date(), morning_after) == []
+    two_days_on = dt.datetime(2026, 10, 14, 9, 0)
+    assert tm.stale_claims([node], two_days_on.date(), two_days_on)
+
+
+def test_a_bash_append_to_a_letters_file_gets_its_letter(repo):
+    letters = repo.root / "docs/future-letters.yaml"
+    letters.write_text(letters.read_text(encoding="utf-8").replace(
+        '    paths: ["src/reducer.py"]\n', '    paths: ["src/reducer.py"]\n    tools: [Write, Edit, Bash]\n'),
+        encoding="utf-8")
+    bash = lambda cmd, s: {"session_id": s, "hook_event_name": "PreToolUse", "tool_name": "Bash",  # noqa: E731
+                           "cwd": str(repo.root), "tool_input": {"command": cmd}}
+    hit = wait_gate.handle(bash("cat >> src/reducer.py <<'EOF'\nx\nEOF", "b1"))
+    assert "parity" in hit["hookSpecificOutput"]["additionalContext"]
+    assert wait_gate.handle(bash("ls src/ | wc -l", "b2")) is None          # no redirect
+    assert wait_gate.handle(bash("echo x > /dev/null", "b3")) is None       # outside the project
+    assert wait_gate.handle(bash("tee -a src/cors.py < x", "b4")) is None   # its letter has no Bash
+
+
+def test_the_time_line_only_on_startup(repo):
+    tm.project(repo.root)
+    startup = tm.brief_text(repo.root, source="startup")
+    assert "since the last session" in startup
+    resumed = tm.brief_text(repo.root, source="resume")
+    assert "since the last session" not in resumed and "resumed" in resumed
+    compacted = tm.brief_text(repo.root, source="compact")
+    assert "⏳" not in compacted and "parity" in compacted          # letters come back
+
+
+def test_a_rename_fails_the_change_that_made_the_letter_stale(repo):
+    before = repo.git("rev-parse", "HEAD")
+    repo.git("mv", "src/cors.py", "src/cors_policy.py")
+    repo.commit("refactor: rename cors (#20)", {})
+    root = str(repo.root)
+    assert tm.main(["tm", "--root", root, "check", "--stale-only", "--base", before]) == 1
+    # the next, unrelated change sees the staleness as somebody else's: a warning
+    after = repo.git("rev-parse", "HEAD")
+    repo.commit("feat: unrelated (#21)", {"src/other.py": "z"})
+    assert tm.main(["tm", "--root", root, "check", "--stale-only", "--base", after]) == 0
+    assert tm.main(["tm", "--root", root, "check", "--base", after]) == 0
+    # with no base at all (a local run) it is an error again
+    assert tm.main(["tm", "--root", root, "check"]) == 1
+
+
+def test_an_unhashable_key_is_a_yaml_error_not_a_crash(repo):
+    letters = repo.root / "docs/future-letters.yaml"
+    letters.write_text(letters.read_text(encoding="utf-8") + "? [a, b]\n: 1\n", encoding="utf-8")
+    assert tm.main(["tm", "--root", str(repo.root), "check"]) == 1
+
+
+def test_without_pyyaml_the_hooks_exit_3_so_the_wrapper_tries_another_python(monkeypatch):
+    import sys
+    monkeypatch.setitem(sys.modules, "yaml", None)
+    assert tm.cmd_warn() == 3
+    assert tm.cmd_brief() == 3
+
+
+def test_warn_needs_no_git(repo, monkeypatch):
+    """`warn` runs on every edit: it must not shell out to git at all."""
+    calls = []
+    real = tm._git_in
+    monkeypatch.setattr(tm, "_git_in", lambda *a: calls.append(a) or real(*a))
+    tm.warn_text(pre_tool(repo.root, "src/reducer.py", session="nogit"), repo.root)
+    assert calls == []

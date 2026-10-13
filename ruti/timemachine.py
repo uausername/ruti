@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import collections
 import datetime as dt
+import fnmatch
 import importlib.util
 import json
 import os
@@ -57,7 +58,8 @@ SEVERITY = {"high": 3, "medium": 2, "low": 1}
 CLASSES = {"process", "prod-drift", "device", "parity", "security", "silent-loss",
            "assumption", "docs-lie", "ci", "hotspot", "bomb"}
 GUARDS = {"hook", "ci", "test", "prose", "none"}
-TOOLS = {"Write", "Edit"}
+TOOLS = {"Write", "Edit", "Bash"}   # Bash: a redirect into the file (`cat >> f`, `tee -a f`)
+REDIRECT_RE = re.compile(r"(?:>>?|\btee\s+(?:-a\s+)?)\s*[\"']?([^\s\"';|&<>]+)")
 KEYS_REQUIRED = ("id", "title", "class", "severity", "warning", "precaution",
                  "evidence", "guard")
 KEYS_OPTIONAL = ("paths", "tools", "nodes", "while_open", "when", "mechanize")
@@ -91,6 +93,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "d": "{d} d {h} h", "h": "{h} h {m} min", "m": "{m} min",
         "brief_time": "⏳ Time machine: {delta} since the last session (last commit {stamp}: “{subject}”). Tell the user.",
         "brief_time_unknown": "⏳ Time machine: time of the last session unknown (no git history).",
+        "brief_time_resume": "⏳ Time machine: resumed; {delta} since the last commit ({stamp}: “{subject}”).",
         "brief_letters": "Letters from the future — this already happened here and will again:",
         "brief_stale": "⚠ Stale letters (glob matches nothing — file renamed?): {items}. Fix {letters} in the next PR.",
         "brief_bombs": "Ticking bombs (defused when the node closes): {items}",
@@ -135,6 +138,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "e_ev_date": "{w}: evidence {e}: needs `date` YYYY-MM-DD",
         "e_trigger": "{w}: no trigger (paths/nodes/while_open/when) — the letter would never arrive",
         "e_stale": "{w}: glob `{g}` matches no file — the letter went stale",
+        "e_stale_here": "{w}: glob `{g}` matched files before this change and matches none now — this change made the letter stale; update its paths in the same PR",
         "e_node": "{w}: {k}: no node `{id}` in the task graph",
         "e_nograph": "{w}: {k} refers to nodes, but the project has no task graph",
         "e_when": "{w}: when `{when}` — unknown condition",
@@ -155,6 +159,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "d": "{d} д {h} ч", "h": "{h} ч {m} мин", "m": "{m} мин",
         "brief_time": "⏳ Машина времени: с прошлой сессии прошло {delta} (последний коммит {stamp}: «{subject}»). Скажи это пользователю.",
         "brief_time_unknown": "⏳ Машина времени: время прошлой сессии неизвестно (нет git-истории).",
+        "brief_time_resume": "⏳ Машина времени: сессия продолжена; с последнего коммита прошло {delta} ({stamp}: «{subject}»).",
         "brief_letters": "Письма из будущего — это уже случалось здесь и случится снова:",
         "brief_stale": "⚠ Протухли письма (glob ни с чем не совпадает — файл переименовали?): {items}. Почини {letters} в ближайшем PR.",
         "brief_bombs": "Тикают бомбы (обезвредятся, когда закроют узел): {items}",
@@ -199,6 +204,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "e_ev_date": "{w}: evidence {e}: нужна `date` YYYY-MM-DD",
         "e_trigger": "{w}: нет триггера (paths/nodes/while_open/when) — письмо не дойдёт",
         "e_stale": "{w}: glob `{g}` не совпадает ни с одним файлом — письмо протухло",
+        "e_stale_here": "{w}: glob `{g}` совпадал с файлами до этого изменения, а теперь ни с чем — это изменение сделало письмо протухшим; поправь paths в этом же PR",
         "e_node": "{w}: {k}: узла `{id}` нет в графе задач",
         "e_nograph": "{w}: {k} ссылается на узлы, а графа задач в проекте нет",
         "e_when": "{w}: when `{when}` — неизвестное условие",
@@ -252,7 +258,12 @@ def _strict_loader():
             if key_node.tag == "tag:yaml.org,2002:merge":
                 continue  # `<<: *anchor` is not a duplicate; construct_mapping expands it
             key = loader.construct_object(key_node, deep=deep)
-            if key in seen:
+            try:
+                dup = key in seen
+            except TypeError:  # an unhashable key (a list, a mapping) is a YAML error too
+                raise yaml.constructor.ConstructorError(
+                    None, None, f"unhashable key {key!r}", key_node.start_mark) from None
+            if dup:
                 raise yaml.constructor.ConstructorError(
                     None, None, f"duplicate key {key!r} — something glued onto the entry "
                     "above it (missing newline?)", key_node.start_mark)
@@ -270,9 +281,15 @@ class Project:
         self.root = root
         self.letters_path = root / LETTERS_REL
         self.doc: dict = {}
+        self.load_error: str | None = None
         if self.letters_path.exists():
             import yaml
-            self.doc = yaml.safe_load(self.letters_path.read_text(encoding="utf-8")) or {}
+            try:
+                doc = yaml.safe_load(self.letters_path.read_text(encoding="utf-8")) or {}
+                self.doc = doc if isinstance(doc, dict) else {}
+            except yaml.YAMLError as exc:
+                # tolerant here: `check` reports it; the hooks must not crash on it
+                self.load_error = str(exc)
         settings = self.doc.get("settings") or {}
         self.settings = settings if isinstance(settings, dict) else {}
         self.lang = str(self.settings.get("lang") or "en")
@@ -282,8 +299,15 @@ class Project:
         self.graph_module = (root / gm) if gm else None
         self.goal_node = self.settings.get("goal_node")
         self.activity_refs = list(self.settings.get("activity_refs") or [])
-        self.main_ref = self.settings.get("main_ref") or self._first_ref("origin/main", "main", "HEAD")
+        self._main_ref = self.settings.get("main_ref")
         self._graph = None
+
+    @property
+    def main_ref(self) -> str:
+        """Resolved on first use: `warn` runs on every edit and needs no git at all."""
+        if not self._main_ref:
+            self._main_ref = self._first_ref("origin/main", "main", "HEAD")
+        return self._main_ref
 
     def _first_ref(self, *refs: str) -> str:
         for ref in refs:
@@ -444,10 +468,29 @@ def touches_overlap(touch: str, glob: str) -> bool:
     `touches` like `.github/workflows/` pick up a letter for every file in it; the
     moment of editing such a file is what `warn` is for.
     """
-    if glob_re(glob).match(touch):
-        return True
-    cut = min([glob.find(c) for c in "*?[" if c in glob] or [len(glob)])
-    return cut < len(glob) and touch.startswith(glob[:cut])
+    if not touch.endswith("/"):
+        return bool(glob_re(glob).match(touch))
+    dirs = [d for d in touch.split("/") if d]
+    segs = [g for g in (glob + "**" if glob.endswith("/") else glob).split("/") if g]
+    return _dir_in_area(dirs, segs)
+
+
+def _dir_in_area(dirs: list[str], segs: list[str]) -> bool:
+    """Does the glob (as segments) target the files of this directory — directly
+    (`dir/*.sql`) or anywhere under it (`dir/**`)? Segment by segment, so `*` never
+    crosses a `/`; a literal file name or a deeper pattern (`dir/org-*/x.ts`) is
+    narrower than the directory and does not count."""
+    if not dirs:
+        if not segs:
+            return False
+        if segs[0] == "**":
+            return True
+        return len(segs) == 1 and any(c in segs[0] for c in "*?[")
+    if not segs:
+        return False
+    if segs[0] == "**":
+        return _dir_in_area(dirs, segs[1:]) or _dir_in_area(dirs[1:], segs)
+    return fnmatch.fnmatchcase(dirs[0], segs[0]) and _dir_in_area(dirs[1:], segs[1:])
 
 
 def letter_tools(letter: dict) -> list[str]:
@@ -487,14 +530,23 @@ def pr_of(subject: str) -> int | None:
     return int(m.group(1) or m.group(2)) if m else None
 
 
+_PR_MAP: dict[tuple[str, str], dict[int, str]] = {}
+
+
 def pr_commit(pr: int) -> str | None:
-    """A PR's commit on main: squash (`… (#N)`) or merge (`Merge pull request #N …`)."""
-    out = git("log", project().main_ref, "--format=%H %s")
-    for line in out.splitlines():
-        sha, _, subject = line.partition(" ")
-        if pr_of(subject) == pr:
-            return sha
-    return None
+    """A PR's commit on main: squash (`… (#N)`) or merge (`Merge pull request #N …`).
+    The PR → commit map is built once per project, not once per evidence entry."""
+    p = project()
+    key = (str(p.root), p.main_ref)
+    if key not in _PR_MAP:
+        found: dict[int, str] = {}
+        for line in git("log", p.main_ref, "--format=%H %s").splitlines():
+            sha, _, subject = line.partition(" ")
+            n = pr_of(subject)
+            if n is not None and n not in found:
+                found[n] = sha
+        _PR_MAP[key] = found
+    return _PR_MAP[key].get(pr)
 
 
 def commit_files(sha: str) -> list[str]:
@@ -532,11 +584,14 @@ def _node_last_date(node: dict, today: dt.date) -> dt.date | None:
     return max(dates, default=None)
 
 
-def stale_claims(claimed: list[dict], today: dt.date) -> list[str]:
+def stale_claims(claimed: list[dict], today: dt.date, now: dt.datetime | None = None) -> list[str]:
+    """Claims older than 24 hours. `notes` carry dates, not times, so a mark is taken
+    at the END of its day: a claim made late yesterday is not called stale this morning."""
+    now = now or dt.datetime.combine(today, dt.time.max)
     out = []
     for n in claimed:
         last = _node_last_date(n, today)
-        if last and (today - last).days >= 1:
+        if last and now - dt.datetime.combine(last, dt.time.max) > dt.timedelta(hours=24):
             out.append(T("stale_claim", id=n["id"], date=last.isoformat()))
     return out
 
@@ -546,7 +601,7 @@ def condition(when: str, ctx: dict) -> str | None:
     if when == "always":
         return ""
     if when == "claim-older-than-24h":
-        stale = stale_claims(ctx["claimed"], ctx["today"])
+        stale = stale_claims(ctx["claimed"], ctx["today"], ctx.get("now"))
         return "; ".join(stale) if stale else None
     if when.startswith("node-active:"):
         node = ctx["by_id"].get(when.split(":", 1)[1])
@@ -742,15 +797,26 @@ def brief_extras(letters: list[dict]) -> list[str]:
 
 
 def build_brief(letters: list[dict], by_id: dict, front: list, claimed: list,
-                today: dt.date, now: float, activity, extras: list[str] | None = None) -> str:
+                today: dt.date, now: float, activity, extras: list[str] | None = None,
+                source: str = "startup") -> str:
+    """`source` is SessionStart's: only a new session has a "last session" to measure
+    from. A resumed one is told the age of the last commit; after /compact or /clear
+    the letters come back without a time line — the session is the same one."""
     lines = []
-    if activity:
+    if source in ("startup", "", None):
+        if activity:
+            ct, stamp, subject = activity
+            lines.append(T("brief_time", delta=human_delta(now - ct), stamp=stamp,
+                           subject=subject[:80]))
+        else:
+            lines.append(T("brief_time_unknown"))
+    elif source == "resume" and activity:
         ct, stamp, subject = activity
-        lines.append(T("brief_time", delta=human_delta(now - ct), stamp=stamp, subject=subject[:80]))
-    else:
-        lines.append(T("brief_time_unknown"))
+        lines.append(T("brief_time_resume", delta=human_delta(now - ct), stamp=stamp,
+                       subject=subject[:80]))
 
-    ctx = {"by_id": by_id, "claimed": claimed, "today": today}
+    ctx = {"by_id": by_id, "claimed": claimed, "today": today,
+           "now": dt.datetime.fromtimestamp(now)}
     picked: dict[str, tuple[int, str, dict]] = {}
     # 1. conditions that hold right now (except `always`)
     for x in letters:
@@ -790,19 +856,38 @@ def build_brief(letters: list[dict], by_id: dict, front: list, claimed: list,
     return "\n".join(lines)
 
 
-def brief_text(root: str | pathlib.Path | None = None) -> str | None:
+def brief_text(root: str | pathlib.Path | None = None, source: str = "startup") -> str | None:
     """The brief for a project, or None when it has no letters. For ruti's hook."""
     p = project(root)
     if not p.has_letters():
         return None
     by_id, front, _waiting, claimed = p.graph()
     return build_brief(p.letters(), by_id, front, claimed, dt.date.today(),
-                       dt.datetime.now().timestamp(), last_activity())
+                       dt.datetime.now().timestamp(), last_activity(), source=source)
+
+
+def _yaml_missing() -> bool:
+    try:
+        import yaml  # noqa: F401
+        return False
+    except ImportError:
+        return True
+
+
+def _stdin_json() -> dict:
+    try:
+        data = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace") or "{}")
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 def cmd_brief() -> int:
+    if _yaml_missing():
+        return 3  # the hook wrapper tries the next interpreter instead of a second probe
     try:
-        text = brief_text()
+        payload = _stdin_json()
+        text = brief_text(source=str(payload.get("source") or "startup"))
         if text:
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
                                                      "additionalContext": text}},
@@ -821,10 +906,21 @@ def _seen_path(session_id: str) -> pathlib.Path:
 
 
 def build_warning(event: dict, letters: list[dict], root: pathlib.Path | None = None,
-                  seen: set[str] | None = None) -> tuple[str, list[str]]:
+                  seen: set[str] | None = None, _bash: bool = False) -> tuple[str, list[str]]:
     root = root or project().root
     tool = event.get("tool_name") or ""
-    fp = (event.get("tool_input") or {}).get("file_path") or ""
+    tool_input = event.get("tool_input") or {}
+    if tool == "Bash" and not _bash:
+        targets = REDIRECT_RE.findall(str(tool_input.get("command") or ""))
+        base = pathlib.Path(event.get("cwd") or root)
+        for t in targets:
+            text, ids = build_warning({**event, "tool_name": "Bash", "tool_input": {
+                "file_path": str(pathlib.Path(t) if pathlib.Path(t).is_absolute() else base / t)}},
+                letters, root=root, seen=seen, _bash=True)
+            if text:
+                return text, ids
+        return "", []
+    fp = tool_input.get("file_path") or ""
     if not fp:
         return "", []
     p = pathlib.Path(fp)
@@ -896,6 +992,8 @@ def warn_text(event: dict, root: str | pathlib.Path | None = None) -> str | None
 
 
 def cmd_warn() -> int:
+    if _yaml_missing():
+        return 3  # the hook wrapper tries the next interpreter instead of a second probe
     try:
         # Claude Code sends UTF-8; on Windows sys.stdin is cp1251, and a Cyrillic path
         # turned to mojibake and silently never matched the project root.
@@ -1070,9 +1168,11 @@ def cmd_backtest(min_recall: float | None) -> int:
 # ---------------------------------------------------------------- check
 
 def check_letters(letters: list[dict], by_id: dict, tracked: list[str] | None,
-                  stale_is_error: bool = True, has_graph: bool = True) -> tuple[list, list]:
-    """stale_is_error=False — the PR does not touch the letters: a glob went stale
-    through a rename in another PR, and a one-line claim must not go red for it."""
+                  stale_is_error=True, has_graph: bool = True) -> tuple[list, list]:
+    """`stale_is_error` is a bool or a function of the glob. With a base to compare
+    against it blames: a glob this change made stale is an error *here*, in the PR
+    that renamed the file; one that was stale before is a warning, so a one-line
+    claim never goes red for somebody else's rename."""
     errors, warnings, seen = [], [], set()
     for i, x in enumerate(letters):
         lid = x.get("id")
@@ -1110,7 +1210,11 @@ def check_letters(letters: list[dict], by_id: dict, tracked: list[str] | None,
                 errors.append(T("e_enum", w=w, k="tools", allowed=sorted(TOOLS)))
         for g in x.get("paths") or []:
             if tracked is not None and not any(glob_re(g).match(f) for f in tracked):
-                (errors if stale_is_error else warnings).append(T("e_stale", w=w, g=g))
+                blame = stale_is_error(g) if callable(stale_is_error) else stale_is_error
+                if blame == "here":
+                    errors.append(T("e_stale_here", w=w, g=g))
+                else:
+                    (errors if blame else warnings).append(T("e_stale", w=w, g=g))
         refs = [("nodes", nid) for nid in x.get("nodes") or []]
         refs += [(k, x[k]) for k in ("while_open", "mechanize") if x.get(k)]
         when = str(x.get("when") or "")
@@ -1134,38 +1238,74 @@ def check_letters(letters: list[dict], by_id: dict, tracked: list[str] | None,
     return errors, warnings
 
 
-def cmd_check(base: str | None = None) -> int:
+def stale_blame(base: str | None):
+    """How to judge a stale glob, given the base this change is measured against.
+
+    No base: every stale glob is an error (a local run, or a letters file being
+    written). With a base: the letters file changed here → error; the glob matched
+    files in the base tree → "here" (this change made it stale); otherwise it was
+    already stale → a warning."""
+    if not base:
+        return True
+    p = project()
+    if git("rev-parse", "--verify", "--quiet", f"{base}^{{commit}}").strip() == "":
+        return True
+    before = git("rev-parse", f"{base}:{LETTERS_REL}").strip()
+    after = git("hash-object", str(p.letters_path)).strip() if p.letters_path.exists() else ""
+    if before != after:
+        return True
+    base_files = git("ls-tree", "-r", "--name-only", base).splitlines()
+
+    def judge(glob: str):
+        return "here" if any(glob_re(glob).match(f) for f in base_files) else False
+    return judge
+
+
+def cmd_check(base: str | None = None, stale_only: bool = False) -> int:
     import yaml
     p = project()
-    try:
+    try:  # parsed once, strictly: a duplicate key is glue, never content
         doc = yaml.load(p.letters_path.read_text(encoding="utf-8"), Loader=_strict_loader()) or {}
     except (OSError, yaml.YAMLError) as exc:
         print(f"ERROR: {LETTERS_REL}: {exc}")
         return 1
+    letters = [x for x in (doc.get("letters") or []) if isinstance(x, dict)]
     gh = os.environ.get("GITHUB_ACTIONS") == "true"
     errors, warnings = [], []
-    if doc.get("version") != 1:
-        errors.append(T("e_version"))
-    if set(doc) - TOP_KEYS:
-        errors.append(T("e_top", keys=sorted(set(doc) - TOP_KEYS)))
-    if set(p.settings) - SETTINGS_KEYS:
-        errors.append(T("e_settings", keys=sorted(set(p.settings) - SETTINGS_KEYS)))
-    by_id = p.graph()[0]
+    if not stale_only:
+        if doc.get("version") != 1:
+            errors.append(T("e_version"))
+        if set(doc) - TOP_KEYS:
+            errors.append(T("e_top", keys=sorted(set(doc) - TOP_KEYS)))
+        settings = doc.get("settings") or {}
+        if isinstance(settings, dict) and set(settings) - SETTINGS_KEYS:
+            errors.append(T("e_settings", keys=sorted(set(settings) - SETTINGS_KEYS)))
     # --others: a new, not yet committed file is not a stale target
     tracked = git("ls-files", "--cached", "--others", "--exclude-standard").splitlines() or None
-    own = True
-    if base:
-        own = LETTERS_REL in git("diff", "--name-only", f"{base}...HEAD").splitlines()
-    e, w = check_letters(p.letters(), by_id, tracked, stale_is_error=own, has_graph=p.has_graph())
-    errors += e
-    warnings += w
+    if stale_only:
+        judge = stale_blame(base)
+        for x in letters:
+            for g in x.get("paths") or []:
+                if tracked is not None and not any(glob_re(g).match(f) for f in tracked):
+                    blame = judge(g) if callable(judge) else judge
+                    w = f"letter {x.get('id')}"
+                    if blame == "here":
+                        errors.append(T("e_stale_here", w=w, g=g))
+                    else:
+                        (errors if blame else warnings).append(T("e_stale", w=w, g=g))
+    else:
+        by_id = p.graph()[0]
+        e, w = check_letters(letters, by_id, tracked, stale_is_error=stale_blame(base),
+                             has_graph=p.has_graph())
+        errors += e
+        warnings += w
     for m in warnings:
         print(f"::warning file={LETTERS_REL}::{m}" if gh else f"WARNING: {m}")
     for m in errors:
         print(f"::error file={LETTERS_REL}::{m}" if gh else f"ERROR: {m}")
     if errors:
         return 1
-    print(T("ok", n=len(p.letters())))
+    print(T("ok", n=len(letters)))
     return 0
 
 
@@ -1229,7 +1369,7 @@ def main(argv: list[str]) -> int:
         mr = _opt(args, "--min-recall")
         return cmd_backtest(float(mr) if mr else None)
     if cmd == "check":
-        return cmd_check(_opt(args, "--base"))
+        return cmd_check(_opt(args, "--base"), stale_only="--stale-only" in args)
     if cmd == "status":
         return cmd_status()
     if cmd == "vendor":

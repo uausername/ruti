@@ -74,10 +74,11 @@ def time_machine(payload: dict) -> tuple[str, str] | None:
     proj = timemachine.project(root)
     if not proj.has_letters() or proj.self_wired():
         return None
-    text = timemachine.brief_text(root)
+    text = timemachine.brief_text(root, source=str(payload.get("source") or "startup"))
     if not text:
         return None
-    return text.splitlines()[0], text
+    first = text.splitlines()[0]
+    return (first if first.startswith("⏳") else "⏳ time machine: letters restored"), text
 
 
 def _mark_start() -> None:
