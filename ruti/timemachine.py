@@ -59,7 +59,8 @@ CLASSES = {"process", "prod-drift", "device", "parity", "security", "silent-loss
            "assumption", "docs-lie", "ci", "hotspot", "bomb"}
 GUARDS = {"hook", "ci", "test", "prose", "none"}
 TOOLS = {"Write", "Edit", "Bash"}   # Bash: a redirect into the file (`cat >> f`, `tee -a f`)
-REDIRECT_RE = re.compile(r"(?:>>?|\btee\s+(?:-a\s+)?)\s*[\"']?([^\s\"';|&<>]+)")
+# `> f`, `>> "a b"`, `tee --append f`, `tee -ai f`; a target in quotes keeps its spaces
+REDIRECT_RE = re.compile(r"""(?:>>?|\btee\b(?:\s+-[-\w]*)*)\s*(?:"([^"]+)"|'([^']+)'|([^\s"';|&<>]+))""")
 KEYS_REQUIRED = ("id", "title", "class", "severity", "warning", "precaution",
                  "evidence", "guard")
 KEYS_OPTIONAL = ("paths", "tools", "nodes", "while_open", "when", "mechanize")
@@ -99,6 +100,8 @@ STRINGS: dict[str, dict[str, str]] = {
         "brief_bombs": "Ticking bombs (defused when the node closes): {items}",
         "brief_expedition": "🔭 Expedition: {n} fix(es) merged since {date}, {m} with no letter — `{cmd} expedition`, decide each, then `--mark`.",
         "brief_vendored": "⚠ The vendored engine {path} differs from ruti's — `ruti timemachine vendor`.",
+        "brief_malformed": "⚠ Letters left out as malformed: {n} — `{cmd} check` names them.",
+        "brief_unparsed": "⚠ {letters} does not parse — no letters delivered until it does: `{cmd} check`.",
         "brief_footer": "More: `{cmd} travel`. Before you edit a file under a letter, the hook will remind you.",
         "for_node": "for node {id}", "daily": "lesson of the day",
         "stale_claim": "{id} (last mark {date})",
@@ -129,6 +132,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "exp_none": "\nNothing new: no fix commit since the marker.",
         "exp_tail": "\nWhen decided: add evidence / letters, then `{cmd} expedition --mark` in the same PR.",
         "exp_marked": "expedition marker → {sha} ({date})",
+        "exp_mark_failed": "ERROR: could not place the expedition marker in {path} — nothing written; add `expedition: {{last: …, date: …}}` by hand.",
         "ok": "OK: {n} letter(s), no violations.",
         "e_field": "{w}: missing `{k}`", "e_unknown": "{w}: unknown field(s) {keys}",
         "e_id": "{w}: id must be kebab-case", "e_dup": "{w}: duplicate id",
@@ -165,6 +169,8 @@ STRINGS: dict[str, dict[str, str]] = {
         "brief_bombs": "Тикают бомбы (обезвредятся, когда закроют узел): {items}",
         "brief_expedition": "🔭 Экспедиция: с {date} влито фиксов: {n}, без письма: {m} — `{cmd} expedition`, реши по каждому, потом `--mark`.",
         "brief_vendored": "⚠ Vendored-движок {path} разошёлся с ruti — `ruti timemachine vendor`.",
+        "brief_malformed": "⚠ Пропущено битых писем: {n} — `{cmd} check` назовёт их.",
+        "brief_unparsed": "⚠ {letters} не разбирается — письма не доставляются, пока не починишь: `{cmd} check`.",
         "brief_footer": "Подробно: `{cmd} travel`. Перед правкой файла под письмом хук напомнит сам.",
         "for_node": "к узлу {id}", "daily": "урок дня",
         "stale_claim": "{id} (последняя отметка {date})",
@@ -195,6 +201,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "exp_none": "\nНового нет: с отметки ни одного фикса.",
         "exp_tail": "\nРешил — допиши evidence / письма и `{cmd} expedition --mark` в том же PR.",
         "exp_marked": "отметка экспедиции → {sha} ({date})",
+        "exp_mark_failed": "ОШИБКА: не удалось поставить отметку экспедиции в {path} — ничего не записано; впиши `expedition: {{last: …, date: …}}` руками.",
         "ok": "OK: {n} писем, нарушений нет.",
         "e_field": "{w}: нет поля `{k}`", "e_unknown": "{w}: неизвестные поля {keys}",
         "e_id": "{w}: id должен быть kebab-case", "e_dup": "{w}: id повторяется",
@@ -274,6 +281,29 @@ def _strict_loader():
     return StrictLoader
 
 
+_REF_RE = re.compile(r"^[^-\s]\S*$")
+
+
+def safe_ref(value) -> str | None:
+    """A revision named by the checkout itself (settings, the expedition marker, a
+    letter's evidence), or None. Those values reach git as arguments, and one that
+    starts with `-` is an option, not a ref: `git log --output=~/.bashrc` writes a file."""
+    return value if isinstance(value, str) and _REF_RE.match(value) else None
+
+
+def deliverable(x) -> bool:
+    """A letter whose fields the brief and the warning can read without raising."""
+    def strs(v) -> bool:
+        return isinstance(v or [], list) and all(isinstance(s, str) for s in v or [])
+    return (isinstance(x, dict) and isinstance(x.get("id"), str)
+            and isinstance(x.get("severity"), str) and x["severity"] in SEVERITY
+            and isinstance(x.get("warning"), str) and isinstance(x.get("precaution"), str)
+            and strs(x.get("paths")) and strs(x.get("tools")) and strs(x.get("nodes"))
+            and isinstance(x.get("when") or "", str) and isinstance(x.get("while_open") or "", str)
+            and isinstance(x.get("evidence") or [], list)
+            and all(isinstance(e, dict) for e in x.get("evidence") or []))
+
+
 class Project:
     """Everything that differs between projects: where they live and their settings."""
 
@@ -298,8 +328,9 @@ class Project:
         gm = self.settings.get("graph_module")
         self.graph_module = (root / gm) if gm else None
         self.goal_node = self.settings.get("goal_node")
-        self.activity_refs = list(self.settings.get("activity_refs") or [])
-        self._main_ref = self.settings.get("main_ref")
+        refs = self.settings.get("activity_refs")
+        self.activity_refs = [r for r in refs if safe_ref(r)] if isinstance(refs, list) else []
+        self._main_ref = safe_ref(self.settings.get("main_ref"))
         self._graph = None
 
     @property
@@ -315,21 +346,39 @@ class Project:
                 return ref
         return "HEAD"
 
+    def _raw_letters(self) -> list:
+        raw = self.doc.get("letters")
+        return raw if isinstance(raw, list) else []
+
     def letters(self) -> list[dict]:
-        return [x for x in (self.doc.get("letters") or []) if isinstance(x, dict)]
+        """The letters that can be delivered. A malformed one is left out rather than
+        raising inside a fail-open hook and silencing every other letter with it;
+        `check` reads the file on its own and names it."""
+        return [x for x in self._raw_letters() if deliverable(x)]
+
+    def malformed(self) -> int:
+        return sum(1 for x in self._raw_letters() if not deliverable(x))
 
     def has_letters(self) -> bool:
         return self.letters_path.exists()
 
     def self_wired(self) -> bool:
-        """The project delivers letters through its own hook (a vendored copy)."""
+        """The project delivers letters through its own hook (a vendored copy). Only a
+        hook's command counts: an allow rule such as `Bash(python3 …/tm.py:*)` in
+        settings.local.json delivers nothing."""
         for name in ("settings.json", "settings.local.json"):
-            f = self.root / ".claude" / name
             try:
-                if f.exists() and "time-machine" in f.read_text(encoding="utf-8"):
-                    return True
-            except OSError:
-                pass
+                data = json.loads((self.root / ".claude" / name).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue  # absent, or broken -- and Claude Code runs no hooks from it either
+            hooks = data.get("hooks") if isinstance(data, dict) else None
+            for groups in hooks.values() if isinstance(hooks, dict) else []:
+                for group in groups if isinstance(groups, list) else []:
+                    entries = group.get("hooks") if isinstance(group, dict) else None
+                    for h in entries if isinstance(entries, list) else []:
+                        cmd = str(h.get("command") or "") if isinstance(h, dict) else ""
+                        if "time-machine" in cmd or VENDORED_REL in cmd:
+                            return True
         return False
 
     def has_graph(self) -> bool:
@@ -338,13 +387,15 @@ class Project:
 
     def graph(self) -> tuple[dict, list, list, list]:
         """(by_id, front, waiting, claimed). A project's own validator wins, so the
-        front has one definition; otherwise the task-graph schema, read directly."""
+        front has one definition -- but only for the project's vendored copy, which its
+        own hook runs. ruti's hooks fire in every directory, so from ruti a checkout's
+        Python is never executed: the task-graph schema is read directly."""
         if self._graph is None:
             self._graph = self._load_graph()
         return self._graph
 
     def _load_graph(self):
-        if self.graph_module and self.graph_module.exists():
+        if self.graph_module and self.graph_module.exists() and is_vendored_copy():
             spec = importlib.util.spec_from_file_location("tm_graph_module", self.graph_module)
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
@@ -389,12 +440,47 @@ def resolve_root(explicit: str | None = None) -> pathlib.Path:
     return pathlib.Path(top).resolve() if top else pathlib.Path.cwd().resolve()
 
 
+def find_root(start) -> pathlib.Path | None:
+    """The checkout around `start`: the nearest directory holding `.git`. A walk over
+    the filesystem, not `git rev-parse` -- the PreToolUse hook runs on every edit."""
+    if not start:
+        return None
+    try:
+        here = pathlib.Path(start).resolve()
+    except (OSError, ValueError):
+        return None
+    for d in (here, *here.parents):
+        if (d / ".git").exists():
+            return d
+    return None
+
+
+def event_root(event: dict) -> pathlib.Path:
+    """For ruti's hooks: the project of the file being changed, else of the session's
+    working directory. A session that ran `cd app` still reaches the letters at the
+    checkout's root, and an edit in a second repository under the session's directory
+    gets that repository's."""
+    cwd = event.get("cwd") or None
+    base = find_root(cwd) or resolve_root(cwd)
+    fp = str((event.get("tool_input") or {}).get("file_path") or "")
+    own = find_root(pathlib.Path(fp).parent) if fp and pathlib.Path(fp).is_absolute() else None
+    # Only a checkout inside the session's own tree: a letter is read as the project's
+    # history, and a clone in /tmp has no say in this session's context.
+    if own and (own == base or base in own.parents):
+        return own
+    return base
+
+
 _PROJECT: Project | None = None
 
 
-def project(root: str | pathlib.Path | None = None) -> Project:
+def project(root: str | pathlib.Path | Project | None = None) -> Project:
+    """The project the commands work on. A hook that already built one passes it in,
+    so the letters file is parsed once per call, not once per question."""
     global _PROJECT
-    if root is not None:
+    if isinstance(root, Project):
+        _PROJECT = root
+    elif root is not None:
         _PROJECT = Project(pathlib.Path(root).resolve())
     elif _PROJECT is None:
         _PROJECT = Project(resolve_root())
@@ -483,8 +569,8 @@ def _dir_in_area(dirs: list[str], segs: list[str]) -> bool:
     if not dirs:
         if not segs:
             return False
-        if segs[0] == "**":
-            return True
+        if segs[0] == "**":     # `dir/**` -- but `**/pubspec.yaml` names one file anywhere
+            return len(segs) == 1 or _dir_in_area(dirs, segs[1:])
         return len(segs) == 1 and any(c in segs[0] for c in "*?[")
     if not segs:
         return False
@@ -551,6 +637,8 @@ def pr_commit(pr: int) -> str | None:
 
 def commit_files(sha: str) -> list[str]:
     """Files of a commit against its first parent — so a merge commit is not empty."""
+    if not safe_ref(sha):
+        return []
     out = git("diff", "--name-only", f"{sha}^1", sha) or git("show", "--name-only", "--format=", sha)
     return [f for f in out.splitlines() if f]
 
@@ -664,24 +752,31 @@ def expedition(letters: list[dict], since: str | None = None, cap: int | None = 
     candidates for a new class, and files fixed twice with no letter on them."""
     p = project()
     head = git("rev-parse", "--short", p.main_ref).strip()
-    since = since or expedition_marker().get("last")
+    since = safe_ref(since or expedition_marker().get("last"))
     if since and git("rev-parse", "--verify", "--quiet", f"{since}^{{commit}}").strip():
         date = git("log", "-1", "--format=%cs", since).strip()
         rng, label = [f"{since}..{p.main_ref}"], f"{since[:9]} ({date})"
     else:
         rng = [p.main_ref, f"--since={EXPEDITION_DEFAULT_DAYS}.days"]
         label = f"-{EXPEDITION_DEFAULT_DAYS}d"
-    log = git("log", "--first-parent", "--format=%H\x1f%cs\x1f%s", *rng).splitlines()
+    # One git call for the whole range, files included: a `git diff` per commit was up
+    # to 41 processes inside a SessionStart hook with a timeout. `-m` with
+    # --first-parent lists a merge commit's files against its first parent.
+    raw = git("log", "--first-parent", "-m", "--name-only",
+              "--format=%x1e%H%x1f%cs%x1f%s", *rng)
+    log = [chunk.partition("\n") for chunk in raw.split("\x1e")[1:]]
     fixes, evidence, new, counts = [], [], [], collections.Counter()
-    for line in log:
-        parts = line.split("\x1f")
+    capped = False
+    for head_line, _, body in log:
+        parts = head_line.split("\x1f")
         if len(parts) != 3 or not FIX_RE.search(parts[2]):
             continue
+        if cap and len(fixes) >= cap:
+            capped = True
+            break
         sha, date, subject = parts
         fixes.append(sha)
-        if cap and len(fixes) > cap:
-            break
-        files = _bookkeeping(commit_files(sha))
+        files = _bookkeeping([f for f in body.splitlines() if f])
         pr = pr_of(subject)
         counts.update(files)
         hit = [x for x in letters if any(path_matches(f, x.get("paths") or []) for f in files)]
@@ -697,21 +792,33 @@ def expedition(letters: list[dict], since: str | None = None, cap: int | None = 
     hot = [{"file": f, "fixes": n} for f, n in counts.most_common()
            if n >= 2 and not covered(f) and not TEST_RE.search(f) and not MANIFEST_RE.search(f)]
     return {"since": label, "head": head, "all": len(log), "fixes": len(fixes),
-            "evidence": evidence, "new": new, "hot": hot}
+            "capped": capped, "evidence": evidence, "new": new, "hot": hot}
 
 
-def mark_expedition(sha: str, date: str) -> None:
-    """Move the marker in the letters file, keeping the rest of it byte for byte."""
+def mark_expedition(sha: str, date: str) -> bool:
+    """Move the marker in the letters file, keeping the rest of it byte for byte.
+    False, with the file untouched, when the edited text would not carry the marker."""
+    import yaml
     path = project().letters_path
     text = path.read_text(encoding="utf-8")
     block = f"expedition:\n  last: {sha}\n  date: {date}\n"
-    rx = re.compile(r"^expedition:\n(?:[ \t]+.*\n)*", re.MULTILINE)
+    rx = re.compile(r"^expedition:[^\n]*\n(?:[ \t]+.*\n)*", re.MULTILINE)
+    version = re.search(r"^version:[^\n]*\n", text, re.MULTILINE)
     if rx.search(text):
-        text = rx.sub(block, text, count=1)
+        new = rx.sub(lambda _m: block, text, count=1)
+    elif version:
+        new = text[:version.end()] + block + text[version.end():]
     else:
-        text = re.sub(r"^(version: *1\n)", r"\1" + block.replace("\\", "\\\\"), text,
-                      count=1, flags=re.MULTILINE)
-    path.write_text(text, encoding="utf-8")
+        new = block + text
+    try:
+        doc = yaml.safe_load(new)
+        marker = doc.get("expedition") if isinstance(doc, dict) else None
+        ok = isinstance(marker, dict) and str(marker.get("last")) == sha
+    except yaml.YAMLError:
+        ok = False
+    if ok:
+        path.write_text(new, encoding="utf-8")
+    return ok
 
 
 def cmd_expedition(argv: list[str]) -> int:
@@ -720,7 +827,9 @@ def cmd_expedition(argv: list[str]) -> int:
     if "--mark" in argv:
         sha = git("rev-parse", project().main_ref).strip()
         date = git("log", "-1", "--format=%cs", project().main_ref).strip()
-        mark_expedition(sha, date)
+        if not mark_expedition(sha, date):
+            print(T("exp_mark_failed", path=LETTERS_REL), file=sys.stderr)
+            return 1
         print(T("exp_marked", sha=sha[:9], date=date))
         return 0
     rep = expedition(letters, since)
@@ -789,7 +898,8 @@ def brief_extras(letters: list[dict]) -> list[str]:
     if marker.get("last"):
         rep = expedition(letters, cap=EXPEDITION_BRIEF_CAP)
         if rep["fixes"]:
-            lines.append(T("brief_expedition", date=marker.get("date", "?"), n=rep["fixes"],
+            n = f"{rep['fixes']}+" if rep["capped"] else rep["fixes"]
+            lines.append(T("brief_expedition", date=marker.get("date", "?"), n=n,
                            m=len(rep["new"]), cmd=command()))
     if not is_vendored_copy() and vendored_state() == "differs":
         lines.append(T("brief_vendored", path=VENDORED_REL))
@@ -798,10 +908,11 @@ def brief_extras(letters: list[dict]) -> list[str]:
 
 def build_brief(letters: list[dict], by_id: dict, front: list, claimed: list,
                 today: dt.date, now: float, activity, extras: list[str] | None = None,
-                source: str = "startup") -> str:
+                source: str = "startup", problems: list[str] | None = None) -> str:
     """`source` is SessionStart's: only a new session has a "last session" to measure
     from. A resumed one is told the age of the last commit; after /compact or /clear
-    the letters come back without a time line — the session is the same one."""
+    the letters come back without a time line — the session is the same one, and
+    neither the git-heavy extras: that session saw them when it started."""
     lines = []
     if source in ("startup", "", None):
         if activity:
@@ -814,6 +925,7 @@ def build_brief(letters: list[dict], by_id: dict, front: list, claimed: list,
         ct, stamp, subject = activity
         lines.append(T("brief_time_resume", delta=human_delta(now - ct), stamp=stamp,
                        subject=subject[:80]))
+    lines += problems or []
 
     ctx = {"by_id": by_id, "claimed": claimed, "today": today,
            "now": dt.datetime.fromtimestamp(now)}
@@ -847,8 +959,11 @@ def build_brief(letters: list[dict], by_id: dict, front: list, claimed: list,
             tail = f" [{detail}]" if detail else ""
             lines.append(f" • {one_line(x)}{tail}")
 
-    lines += brief_extras(letters) if extras is None else extras
-    bombs = [x for x in letters if x.get("while_open") and ticking(x, by_id)]
+    if extras is not None:
+        lines += extras
+    elif source in ("startup", "resume", "", None):
+        lines += brief_extras(letters)
+    bombs =[x for x in letters if x.get("while_open") and ticking(x, by_id)]
     if bombs:
         lines.append(T("brief_bombs", items=" · ".join(f"{x['id']} ⇐ {x['while_open']}"
                                                       for x in bombs)))
@@ -856,14 +971,21 @@ def build_brief(letters: list[dict], by_id: dict, front: list, claimed: list,
     return "\n".join(lines)
 
 
-def brief_text(root: str | pathlib.Path | None = None, source: str = "startup") -> str | None:
+def brief_text(root: str | pathlib.Path | Project | None = None,
+               source: str = "startup") -> str | None:
     """The brief for a project, or None when it has no letters. For ruti's hook."""
     p = project(root)
     if not p.has_letters():
         return None
+    problems = []
+    if p.load_error:
+        problems.append(T("brief_unparsed", letters=LETTERS_REL, cmd=command()))
+    elif p.malformed():
+        problems.append(T("brief_malformed", n=p.malformed(), cmd=command()))
     by_id, front, _waiting, claimed = p.graph()
     return build_brief(p.letters(), by_id, front, claimed, dt.date.today(),
-                       dt.datetime.now().timestamp(), last_activity(), source=source)
+                       dt.datetime.now().timestamp(), last_activity(), source=source,
+                       problems=problems)
 
 
 def _yaml_missing() -> bool:
@@ -905,13 +1027,18 @@ def _seen_path(session_id: str) -> pathlib.Path:
     return pathlib.Path(tempfile.gettempdir()) / f"time-machine-{proj}" / f"{safe}.json"
 
 
+def redirect_targets(command: str) -> list[str]:
+    """The files a shell command writes through `>`, `>>` or `tee`."""
+    return [a or b or c for a, b, c in REDIRECT_RE.findall(command)]
+
+
 def build_warning(event: dict, letters: list[dict], root: pathlib.Path | None = None,
                   seen: set[str] | None = None, _bash: bool = False) -> tuple[str, list[str]]:
     root = root or project().root
     tool = event.get("tool_name") or ""
     tool_input = event.get("tool_input") or {}
     if tool == "Bash" and not _bash:
-        targets = REDIRECT_RE.findall(str(tool_input.get("command") or ""))
+        targets = redirect_targets(str(tool_input.get("command") or ""))
         base = pathlib.Path(event.get("cwd") or root)
         for t in targets:
             text, ids = build_warning({**event, "tool_name": "Bash", "tool_input": {
@@ -973,7 +1100,7 @@ def live_letters(letters: list[dict]) -> list[dict]:
     return [x for x in letters if not x.get("while_open") or ticking(x, by_id)]
 
 
-def warn_text(event: dict, root: str | pathlib.Path | None = None) -> str | None:
+def warn_text(event: dict, root: str | pathlib.Path | Project | None = None) -> str | None:
     """The additionalContext for a PreToolUse event, or None. Records what was shown."""
     p = project(root)
     if not p.has_letters():
@@ -1187,7 +1314,8 @@ def check_letters(letters: list[dict], by_id: dict, tracked: list[str] | None,
             errors.append(T("e_id", w=w))
         elif lid in seen:
             errors.append(T("e_dup", w=w))
-        seen.add(lid)
+        else:
+            seen.add(lid)
         for k, allowed in (("class", CLASSES), ("severity", set(SEVERITY)), ("guard", GUARDS)):
             if x.get(k) not in allowed:
                 errors.append(T("e_enum", w=w, k=k, allowed=sorted(allowed)))

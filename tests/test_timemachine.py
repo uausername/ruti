@@ -7,6 +7,7 @@ answers come from git history and the working tree, never from ruti's own state.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import tempfile
 
@@ -355,3 +356,196 @@ def test_warn_needs_no_git(repo, monkeypatch):
     monkeypatch.setattr(tm, "_git_in", lambda *a: calls.append(a) or real(*a))
     tm.warn_text(pre_tool(repo.root, "src/reducer.py", session="nogit"), repo.root)
     assert calls == []
+
+
+# ---------------------------------------------------------------- review of ruti#52/#53
+
+
+def test_the_hooks_find_the_letters_from_a_subdirectory(repo):
+    (repo.root / "src/deep").mkdir()
+    sub = {"session_id": "s1", "cwd": str(repo.root / "src/deep")}
+    assert session_start.time_machine(sub) is not None             # `cd src/deep` earlier
+    edit = {**pre_tool(repo.root, "src/reducer.py"), "cwd": str(repo.root / "src/deep")}
+    assert "parity" in wait_gate.handle(edit)["hookSpecificOutput"]["additionalContext"]
+
+
+def test_an_edit_in_a_checkout_under_the_session_gets_that_checkouts_letters(repo, tmp_path):
+    edit = {**pre_tool(repo.root, "src/reducer.py"), "cwd": str(tmp_path)}  # repos side by side
+    assert "parity" in wait_gate.handle(edit)["hookSpecificOutput"]["additionalContext"]
+
+
+def test_a_checkout_outside_the_session_has_no_say(repo, tmp_path):
+    other = tmp_path / "other"
+    (other / ".git").mkdir(parents=True)
+    edit = {**pre_tool(repo.root, "src/reducer.py", session="o1"), "cwd": str(other)}
+    assert wait_gate.handle(edit) is None
+
+
+def test_a_ref_from_the_letters_file_is_never_a_git_option(repo, tmp_path):
+    out = tmp_path / "written"
+    letters = repo.root / "docs/future-letters.yaml"
+    text = re.sub(r"  last: \w+\n", lambda _m: f"  last: '--output={out}3'\n",  # Windows paths: no escapes
+                  letters.read_text(encoding="utf-8"))
+    letters.write_text(text.replace("  goal_node: launch\n", f"  goal_node: launch\n  main_ref: '--output={out}1'\n"
+                                    f"  activity_refs: ['--output={out}2']\n"), encoding="utf-8")
+    assert session_start.time_machine({"session_id": "s1", "cwd": str(repo.root)}) is not None
+    tm.project(repo.root)
+    tm.expedition(tm.load_letters())
+    assert tm.commit_files(f"--output={out}4") == []
+    assert not any(tmp_path.glob("written*"))
+
+
+def test_ruti_never_runs_a_checkouts_graph_module(repo):
+    marker = repo.root / "ran"
+    (repo.root / "graph.py").write_text(
+        f"open({str(marker)!r}, 'w').close()\n"
+        "def load_nodes(): return {}\n"
+        "def ready_front(by_id): return [], [], []\n", encoding="utf-8")
+    letters = repo.root / "docs/future-letters.yaml"
+    letters.write_text(letters.read_text(encoding="utf-8").replace(
+        "  goal_node: launch\n", "  goal_node: launch\n  graph_module: graph.py\n"), encoding="utf-8")
+    result = session_start.time_machine({"session_id": "s1", "cwd": str(repo.root)})
+    assert not marker.exists()
+    assert "cors-open ⇐ set-origins" in result[1]        # the graph came from tasks.yaml
+
+
+def test_an_allow_rule_is_not_a_hook(repo):
+    local = repo.root / ".claude/settings.local.json"
+    local.parent.mkdir()
+    local.write_text(json.dumps({"permissions": {"allow": [
+        "Bash(python3 scripts/time-machine/tm.py:*)", "Bash(bash .claude/hooks/time-machine.sh:*)"]}}))
+    assert not tm.Project(repo.root).self_wired()
+    assert wait_gate.handle(pre_tool(repo.root, "src/reducer.py")) is not None
+    local.write_text("{not json")
+    assert not tm.Project(repo.root).self_wired()
+
+
+@pytest.mark.parametrize("touch,glob,hit", [
+    ("app/lib/", "**/pubspec.yaml", False),       # one file name anywhere: narrower
+    ("app/lib/", "app/**/main.dart", False),
+    ("app/lib/", "app/**/*.dart", True),          # every .dart under it
+    ("app/lib/", "app/**", True),
+    ("app/lib/", "**", True),
+])
+def test_a_file_name_after_double_star_is_narrower_than_a_directory(touch, glob, hit):
+    assert tm.touches_overlap(touch, glob) is hit
+
+
+def test_one_malformed_letter_does_not_silence_the_others(repo):
+    letters = repo.root / "docs/future-letters.yaml"
+    letters.write_text(letters.read_text(encoding="utf-8") + """  - id: broken
+    title: Broken
+    class: ci
+    severity: critical
+    paths: ["src/reducer.py"]
+    warning: x
+    precaution: y
+    evidence: [{pr: 3, date: 2026-09-03}]
+    guard: ci
+  - title: No id at all
+    severity: high
+    paths: ["src/reducer.py"]
+""", encoding="utf-8")
+    assert "parity" in wait_gate.handle(pre_tool(repo.root, "src/reducer.py"))[
+        "hookSpecificOutput"]["additionalContext"]
+    _, model = session_start.time_machine({"session_id": "s1", "cwd": str(repo.root)})
+    assert "parity" in model and "malformed: 2" in model
+    assert tm.main(["tm", "--root", str(repo.root), "check"]) == 1
+
+
+def test_an_unparsable_letters_file_says_so_in_the_brief(repo):
+    (repo.root / "docs/future-letters.yaml").write_text("letters: [\n", encoding="utf-8")
+    _, model = session_start.time_machine({"session_id": "s1", "cwd": str(repo.root)})
+    assert "does not parse" in model
+
+
+def test_mark_finds_a_place_without_a_plain_version_line(repo):
+    letters = repo.root / "docs/future-letters.yaml"
+    text = letters.read_text(encoding="utf-8")
+    start, end = text.index("expedition:"), text.index("letters:")
+    letters.write_text(text[:start].replace("version: 1\n", 'version: "1"  # schema\n') + text[end:],
+                       encoding="utf-8")
+    assert tm.main(["tm", "--root", str(repo.root), "expedition", "--mark"]) == 0
+    tm.project(repo.root)
+    assert tm.expedition_marker()["last"] == repo.git("rev-parse", "HEAD")
+
+
+def test_a_mark_that_cannot_be_written_fails_and_leaves_the_file(repo, capsys):
+    letters = repo.root / "docs/future-letters.yaml"
+    letters.write_text("{version: 1, letters: []}\n", encoding="utf-8")
+    assert tm.main(["tm", "--root", str(repo.root), "expedition", "--mark"]) == 1
+    assert letters.read_text(encoding="utf-8") == "{version: 1, letters: []}\n"
+    assert "nothing written" in capsys.readouterr().err
+
+
+def test_the_hook_parses_the_letters_once(repo, monkeypatch):
+    built = []
+    real = tm.Project.__init__
+    monkeypatch.setattr(tm.Project, "__init__", lambda self, root: built.append(root) or real(self, root))
+    assert wait_gate.handle(pre_tool(repo.root, "src/reducer.py")) is not None
+    assert len(built) == 1
+
+
+@pytest.mark.parametrize("command,targets", [
+    ("make 2>&1 | tee --append docs/tasks.yaml", ["docs/tasks.yaml"]),
+    ("make | tee -ai out.log", ["out.log"]),
+    ('echo x > "my file.txt"', ["my file.txt"]),
+    ("echo x >> 'a b'", ["a b"]),
+    ("cat <<'EOF' > src/x.py", ["src/x.py"]),
+    ("echo committee guarantee", []),
+    ("ls 2>&1", []),
+])
+def test_redirect_targets(command, targets):
+    assert tm.redirect_targets(command) == targets
+
+
+def test_a_bash_command_mentioning_committee_loads_no_letters(repo, monkeypatch):
+    monkeypatch.setattr(tm, "Project", lambda *a: pytest.fail("letters loaded"))
+    bash = {"session_id": "c1", "hook_event_name": "PreToolUse", "tool_name": "Bash",
+            "cwd": str(repo.root), "tool_input": {"command": "echo committee"}}
+    assert wait_gate.handle(bash) is None
+
+
+def test_the_expedition_cap_is_a_cap(repo):
+    for i in range(5):
+        repo.commit(f"fix: thing {i} (#{30 + i})", {f"src/f{i}.py": "x"})
+    tm.project(repo.root)
+    rep = tm.expedition(tm.load_letters(), cap=3)
+    assert rep["fixes"] == 3 and rep["capped"]
+    assert tm.expedition(tm.load_letters())["capped"] is False
+
+
+def test_the_expedition_reads_a_merge_commits_files(repo):
+    repo.git("checkout", "-q", "-b", "topic")
+    repo.commit("work", {"src/reducer.py": "m"})
+    repo.git("checkout", "-q", "main")
+    repo.git("merge", "-q", "--no-ff", "topic", "-m", "fix(reducer): drifted in a merge (#40)")
+    tm.project(repo.root)
+    rep = tm.expedition(tm.load_letters())
+    assert [(i["pr"], i["letters"]) for i in rep["evidence"]] == [(40, ["parity"])]
+
+
+def test_check_reports_a_list_id_instead_of_crashing(repo):
+    letters = repo.root / "docs/future-letters.yaml"
+    letters.write_text(letters.read_text(encoding="utf-8").replace("  - id: parity\n", "  - id: [parity]\n"),
+                       encoding="utf-8")
+    assert tm.main(["tm", "--root", str(repo.root), "check"]) == 1
+
+
+def test_a_slow_time_machine_does_not_cost_the_session_start(monkeypatch, capsys):
+    import io
+    import time as _time
+
+    from ruti import flow
+
+    monkeypatch.setattr(session_start, "TIME_MACHINE_DEADLINE", 0.2)
+    monkeypatch.setattr(session_start, "_mark_start", lambda: None)
+    monkeypatch.setattr(session_start, "build_report", lambda: None)
+    monkeypatch.setattr(flow, "session_start", lambda payload: ("continued", "the handoff"))
+    monkeypatch.setattr(session_start, "time_machine", lambda payload: _time.sleep(2) or ("late", "late"))
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+    started = _time.monotonic()
+    assert session_start.main() == 0
+    assert _time.monotonic() - started < 1.5
+    out = json.loads(capsys.readouterr().out)
+    assert out["hookSpecificOutput"]["additionalContext"] == "the handoff"

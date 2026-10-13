@@ -20,7 +20,12 @@ letter from the project's past about the file about to change (`ruti.timemachine
 from __future__ import annotations
 
 import json
+import re
 import sys
+
+# A cheap look before loading any letters: most commands write nothing. `\btee\b`, so
+# `committee` or `guarantee` in a command does not count.
+_WRITES = re.compile(r">|\btee\b")
 
 
 def letter_for(payload: dict) -> dict | None:
@@ -29,16 +34,14 @@ def letter_for(payload: dict) -> dict | None:
     tool = payload.get("tool_name")
     if tool not in ("Write", "Edit", "Bash"):
         return None
-    if tool == "Bash" and ">" not in str((payload.get("tool_input") or {}).get("command") or "") \
-            and "tee" not in str((payload.get("tool_input") or {}).get("command") or ""):
-        return None  # most commands write nothing; skip loading any letters for them
+    if tool == "Bash" and not _WRITES.search(str((payload.get("tool_input") or {}).get("command") or "")):
+        return None
     from ruti import timemachine
 
-    root = timemachine.resolve_root(payload.get("cwd") or None)
-    proj = timemachine.project(root)
+    proj = timemachine.Project(timemachine.event_root(payload))
     if not proj.has_letters() or proj.self_wired():
         return None
-    text = timemachine.warn_text(payload, root)
+    text = timemachine.warn_text(payload, proj)
     if not text:
         return None
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": text}}
