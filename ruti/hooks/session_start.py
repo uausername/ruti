@@ -78,7 +78,7 @@ def time_machine(payload: dict) -> tuple[str, str] | None:
     if not modes.current(str(payload.get("session_id") or "") or None).get("timemachine"):
         return None
     proj = timemachine.Project(timemachine.event_root(payload))
-    if not proj.has_letters() or proj.self_wired():
+    if not proj.has_letters() or timemachine.wired_here(proj, payload):
         return None
     text = timemachine.brief_text(proj, source=str(payload.get("source") or "startup"))
     if not text:
