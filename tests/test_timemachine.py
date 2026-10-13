@@ -7,6 +7,7 @@ answers come from git history and the working tree, never from ruti's own state.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import tempfile
 
@@ -368,10 +369,30 @@ def test_the_hooks_find_the_letters_from_a_subdirectory(repo):
     assert "parity" in wait_gate.handle(edit)["hookSpecificOutput"]["additionalContext"]
 
 
-def test_an_edit_in_another_checkout_gets_that_checkouts_letters(repo, tmp_path):
-    (tmp_path / "elsewhere").mkdir()
-    edit = {**pre_tool(repo.root, "src/reducer.py"), "cwd": str(tmp_path / "elsewhere")}
+def test_an_edit_in_a_checkout_under_the_session_gets_that_checkouts_letters(repo, tmp_path):
+    edit = {**pre_tool(repo.root, "src/reducer.py"), "cwd": str(tmp_path)}  # repos side by side
     assert "parity" in wait_gate.handle(edit)["hookSpecificOutput"]["additionalContext"]
+
+
+def test_a_checkout_outside_the_session_has_no_say(repo, tmp_path):
+    other = tmp_path / "other"
+    (other / ".git").mkdir(parents=True)
+    edit = {**pre_tool(repo.root, "src/reducer.py", session="o1"), "cwd": str(other)}
+    assert wait_gate.handle(edit) is None
+
+
+def test_a_ref_from_the_letters_file_is_never_a_git_option(repo, tmp_path):
+    out = tmp_path / "written"
+    letters = repo.root / "docs/future-letters.yaml"
+    text = re.sub(r"  last: \w+\n", lambda _m: f"  last: '--output={out}3'\n",  # Windows paths: no escapes
+                  letters.read_text(encoding="utf-8"))
+    letters.write_text(text.replace("  goal_node: launch\n", f"  goal_node: launch\n  main_ref: '--output={out}1'\n"
+                                    f"  activity_refs: ['--output={out}2']\n"), encoding="utf-8")
+    assert session_start.time_machine({"session_id": "s1", "cwd": str(repo.root)}) is not None
+    tm.project(repo.root)
+    tm.expedition(tm.load_letters())
+    assert tm.commit_files(f"--output={out}4") == []
+    assert not any(tmp_path.glob("written*"))
 
 
 def test_ruti_never_runs_a_checkouts_graph_module(repo):

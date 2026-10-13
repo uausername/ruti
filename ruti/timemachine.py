@@ -281,6 +281,16 @@ def _strict_loader():
     return StrictLoader
 
 
+_REF_RE = re.compile(r"^[^-\s]\S*$")
+
+
+def safe_ref(value) -> str | None:
+    """A revision named by the checkout itself (settings, the expedition marker, a
+    letter's evidence), or None. Those values reach git as arguments, and one that
+    starts with `-` is an option, not a ref: `git log --output=~/.bashrc` writes a file."""
+    return value if isinstance(value, str) and _REF_RE.match(value) else None
+
+
 def deliverable(x) -> bool:
     """A letter whose fields the brief and the warning can read without raising."""
     def strs(v) -> bool:
@@ -318,8 +328,9 @@ class Project:
         gm = self.settings.get("graph_module")
         self.graph_module = (root / gm) if gm else None
         self.goal_node = self.settings.get("goal_node")
-        self.activity_refs = list(self.settings.get("activity_refs") or [])
-        self._main_ref = self.settings.get("main_ref")
+        refs = self.settings.get("activity_refs")
+        self.activity_refs = [r for r in refs if safe_ref(r)] if isinstance(refs, list) else []
+        self._main_ref = safe_ref(self.settings.get("main_ref"))
         self._graph = None
 
     @property
@@ -447,14 +458,17 @@ def find_root(start) -> pathlib.Path | None:
 def event_root(event: dict) -> pathlib.Path:
     """For ruti's hooks: the project of the file being changed, else of the session's
     working directory. A session that ran `cd app` still reaches the letters at the
-    checkout's root, and an edit in a second repository gets that repository's."""
+    checkout's root, and an edit in a second repository under the session's directory
+    gets that repository's."""
+    cwd = event.get("cwd") or None
+    base = find_root(cwd) or resolve_root(cwd)
     fp = str((event.get("tool_input") or {}).get("file_path") or "")
-    starts = [pathlib.Path(fp).parent] if fp and pathlib.Path(fp).is_absolute() else []
-    for start in (*starts, event.get("cwd")):
-        root = find_root(start)
-        if root:
-            return root
-    return resolve_root(event.get("cwd") or None)
+    own = find_root(pathlib.Path(fp).parent) if fp and pathlib.Path(fp).is_absolute() else None
+    # Only a checkout inside the session's own tree: a letter is read as the project's
+    # history, and a clone in /tmp has no say in this session's context.
+    if own and (own == base or base in own.parents):
+        return own
+    return base
 
 
 _PROJECT: Project | None = None
@@ -623,6 +637,8 @@ def pr_commit(pr: int) -> str | None:
 
 def commit_files(sha: str) -> list[str]:
     """Files of a commit against its first parent — so a merge commit is not empty."""
+    if not safe_ref(sha):
+        return []
     out = git("diff", "--name-only", f"{sha}^1", sha) or git("show", "--name-only", "--format=", sha)
     return [f for f in out.splitlines() if f]
 
@@ -736,7 +752,7 @@ def expedition(letters: list[dict], since: str | None = None, cap: int | None = 
     candidates for a new class, and files fixed twice with no letter on them."""
     p = project()
     head = git("rev-parse", "--short", p.main_ref).strip()
-    since = since or expedition_marker().get("last")
+    since = safe_ref(since or expedition_marker().get("last"))
     if since and git("rev-parse", "--verify", "--quiet", f"{since}^{{commit}}").strip():
         date = git("log", "-1", "--format=%cs", since).strip()
         rng, label = [f"{since}..{p.main_ref}"], f"{since[:9]} ({date})"
