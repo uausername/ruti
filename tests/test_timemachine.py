@@ -141,13 +141,15 @@ def test_a_broad_node_does_not_pick_up_letters_about_single_files():
 def test_check_passes_and_refuses_a_letter_without_evidence(repo):
     assert tm.main(["tm", "--root", str(repo.root), "check"]) == 0
     letters = repo.root / "docs/future-letters.yaml"
-    letters.write_text(letters.read_text().replace("      - {pr: 1, date: 2026-09-01}\n", ""))
+    letters.write_text(letters.read_text(encoding="utf-8").replace("      - {pr: 1, date: 2026-09-01}\n", ""),
+                       encoding="utf-8")
     assert tm.main(["tm", "--root", str(repo.root), "check"]) == 1
 
 
 def test_check_refuses_a_duplicate_key(repo):
     letters = repo.root / "docs/future-letters.yaml"
-    letters.write_text(letters.read_text().replace("    guard: test\n", "    guard: test\n    guard: ci\n"))
+    letters.write_text(letters.read_text(encoding="utf-8").replace("    guard: test\n", "    guard: test\n    guard: ci\n"),
+                       encoding="utf-8")
     assert tm.main(["tm", "--root", str(repo.root), "check"]) == 1
 
 
@@ -166,7 +168,7 @@ def test_expedition_sorts_fixes_since_the_marker(repo):
     assert tm.main(["tm", "--root", str(repo.root), "expedition", "--mark"]) == 0
     tm.project(repo.root)
     assert tm.expedition(tm.load_letters())["fixes"] == 0
-    assert "  - id: parity" in (repo.root / "docs/future-letters.yaml").read_text()
+    assert "  - id: parity" in (repo.root / "docs/future-letters.yaml").read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------- hooks
@@ -200,9 +202,9 @@ def test_warn_ignores_reads_and_unrelated_files(repo):
 
 
 def test_a_defused_bomb_stays_silent(repo):
-    (repo.root / "docs/tasks.yaml").write_text(TASKS.format(origins="done"))
+    (repo.root / "docs/tasks.yaml").write_text(TASKS.format(origins="done"), encoding="utf-8")
     assert wait_gate.handle(pre_tool(repo.root, "src/cors.py")) is None
-    (repo.root / "docs/tasks.yaml").write_text(TASKS.format(origins="open"))
+    (repo.root / "docs/tasks.yaml").write_text(TASKS.format(origins="open"), encoding="utf-8")
     assert wait_gate.handle(pre_tool(repo.root, "src/cors.py", session="s3")) is not None
 
 
@@ -233,7 +235,10 @@ def test_vendor_copies_byte_for_byte_and_status_sees_drift(repo):
     tm.project(repo.root)
     assert tm.vendored_state() == "same"
 
-    copy.write_text(copy.read_text() + "\n# edited here instead of in ruti\n")
+    copy.write_bytes(copy.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+    assert tm.vendored_state() == "same"          # CRLF from a Windows checkout is not drift
+    copy.write_text(copy.read_text(encoding="utf-8") + "\n# edited here instead of in ruti\n",
+                    encoding="utf-8")
     assert tm.vendored_state() == "differs"
     assert any("vendored" in line for line in tm.brief_extras(tm.load_letters()))
     result = runner.invoke(cli, ["timemachine", "--root", str(repo.root), "status"])

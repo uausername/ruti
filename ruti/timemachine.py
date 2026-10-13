@@ -713,7 +713,10 @@ def vendored_state(root: pathlib.Path | None = None) -> str:
     if not copy.exists():
         return "absent"
     try:
-        same = copy.read_bytes() == pathlib.Path(__file__).read_bytes()
+        # Line endings do not count: on Windows git checks either repo out with CRLF
+        # or LF depending on its own autocrlf, and that is not drift.
+        same = (copy.read_bytes().replace(b"\r\n", b"\n")
+                == pathlib.Path(__file__).read_bytes().replace(b"\r\n", b"\n"))
     except OSError:
         return "absent"
     return "same" if same else "differs"
