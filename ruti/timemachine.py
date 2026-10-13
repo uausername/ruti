@@ -453,19 +453,22 @@ def resolve_root(explicit: str | None = None) -> pathlib.Path:
     return pathlib.Path(top).resolve() if top else pathlib.Path.cwd().resolve()
 
 
-def find_root(start) -> pathlib.Path | None:
-    """The project around `start`: the nearest directory holding letters or `.git` --
-    letters first, so a package of a monorepo with its own letters is its own project.
-    A walk over the filesystem, not `git rev-parse`: the PreToolUse hook runs on every
-    edit."""
+def find_root(start, letters_here: bool = False) -> pathlib.Path | None:
+    """The checkout around `start`: the nearest directory holding `.git`. With
+    `letters_here`, `start` itself also counts when it holds letters -- the package of
+    a monorepo a session was started in. Only there: letters in a nested directory
+    (a dependency under node_modules) never make it a project of their own. A walk
+    over the filesystem, not `git rev-parse`: the PreToolUse hook runs on every edit."""
     if not start:
         return None
     try:
         here = pathlib.Path(start).resolve()
     except (OSError, ValueError):
         return None
+    if letters_here and (here / LETTERS_REL).exists():
+        return here
     for d in (here, *here.parents):
-        if (d / LETTERS_REL).exists() or (d / ".git").exists():
+        if (d / ".git").exists():
             return d
     return None
 
@@ -474,7 +477,7 @@ def session_root(event: dict) -> pathlib.Path:
     """The project Claude Code was started in -- `$CLAUDE_PROJECT_DIR`, which a `cd`
     does not move -- else the event's working directory."""
     start = os.environ.get("CLAUDE_PROJECT_DIR") or event.get("cwd") or None
-    return find_root(start) or resolve_root(start)
+    return find_root(start, letters_here=True) or resolve_root(start)
 
 
 def event_target(event: dict) -> pathlib.Path | None:
