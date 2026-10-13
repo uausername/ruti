@@ -215,3 +215,19 @@ def test_without_auto_seat_every_pending_move_is_yellow(monkeypatch):
 
 def test_the_context_a_model_switch_is_free_below_is_150k():
     assert manager.SWITCH_FREE_TOKENS == 150_000
+
+
+def test_seat_plan_reads_stdin_as_utf8(monkeypatch):
+    # The mod pipes UTF-8; decoding it with the console code page would double every
+    # Cyrillic letter and hand the classifier mojibake.
+    from click.testing import CliRunner
+
+    from ruti import cli
+
+    seen = {}
+    monkeypatch.setattr(cli.auto_seat_mod, "plan",
+                        lambda session_id, prompt: seen.setdefault("prompt", prompt) and {})
+    text = "проверка второго хода мода после смены модели"
+    CliRunner(charset="cp1251").invoke(cli.main, ["seat", "plan", "--session", "s1"],
+                       input=text.encode("utf-8"), catch_exceptions=False)
+    assert seen["prompt"] == text
