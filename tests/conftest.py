@@ -57,6 +57,9 @@ def isolated_state(tmp_path, monkeypatch):
     # Read by the prompt hook's rankings hint; the real one would make the hint depend
     # on whatever the machine running the suite last downloaded.
     monkeypatch.setattr(openrouter, "CATALOG_CACHE", tmp_path / "openrouter-catalog.json")
+    # `prompt_context` looks for a session's transcript under Claude Code's config folder;
+    # the real one holds this machine's live sessions.
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
 
     # Written by every `statusline.main()` and by the prompt hook's seat hint.
     monkeypatch.setattr(manager, "SEATS_FILE", tmp_path / "seats.json")
