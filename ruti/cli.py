@@ -634,6 +634,24 @@ def seat_plan(session_id: str | None, as_json: bool) -> None:
     ui.emit_json(auto_seat_mod.plan(session_id or sessions.current_session_id() or "", prompt))
 
 
+@seat_group.command("review")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def seat_review(as_json: bool) -> None:
+    """Check the model-switch threshold against what the five-hour window charges."""
+    from . import window_review
+
+    # Only a review the hook asked for is recorded; one run early to have a look leaves
+    # the reminder where it was.
+    was_due = window_review.due()
+    result = window_review.review()
+    if was_due:
+        window_review.settle(result)
+    if as_json:
+        ui.emit_json(result)
+    else:
+        ui.say(window_review.format_review(result))
+
+
 # --------------------------------------------------------------------- show / hide
 
 _VIEW_CHOICES = {"all": modes_mod.VIEW_ALL, "1": 1, "2": 2, "0": 0, "none": 0}
