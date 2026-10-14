@@ -15,10 +15,13 @@ on it.
 The economics that decide what "right" means are asymmetric, and the whole ranking rests
 on them:
 
-* The prompt cache is **per model**. Switching model re-reads the whole context
-  uncached, and an Opus cache read costs the same as a Sonnet one -- so the cache is not
-  a reason to stay, only a reason not to switch casually. A switch pays when the context
-  is still small, or when the current model is underpowered for the task at hand.
+* The prompt cache is **per model**. Switching model writes the whole context into the
+  new model's cache (2x base input with Claude Code's one-hour cache) instead of reading
+  it (0.05x on Opus 5.5 and Sonnet 5.5) -- so the cache is not a reason to stay, only a
+  reason not to switch casually. Sonnet 5.5 is half Opus 5.5's price on every line
+  (input, cache write, cache read, output), so a switch down pays back by the request
+  once made. It pays when the context is still small, or when the current model is
+  underpowered for the task at hand.
 * An **effort-only change is cheap where the docs say it is**: "How Claude Code uses
   prompt caching" states that on Opus 5.5, Sonnet 5.5 and Fable 5.1, changing effort
   keeps the cache (most older models recompute instead, which does not matter for the
@@ -102,8 +105,15 @@ ADVISOR_KILL_ENV = "CLAUDE_CODE_DISABLE_ADVISOR_TOOL"
 CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
 
 # Below this many tokens in the context window, re-reading it uncached on a model switch
-# costs less than carrying the wrong seat for the rest of the task.
+# costs less than carrying the wrong seat for the rest of the task. Priced on a real
+# Opus session (729 requests, ~264k context each): a request cost ~$0.10 on Opus and
+# would have cost ~$0.05 on Sonnet, while a switch down at T tokens costs T x ($4 write
+# - $0.20 read) per MTok -- $0.57 at 150k, $0.95 at 250k: 12 and 19 requests to pay back.
 SWITCH_FREE_TOKENS = 150_000
+# With flow mode on the session hands off at half its window, so the context never gets
+# far past ~500k; from 250k there are still ~70 requests to go at that session's pace,
+# several times the 19 a switch needs to pay back.
+SWITCH_FREE_TOKENS_FLOW = 250_000
 
 # What a model switch has to be worth before it is taken over staying on the current one.
 # Effort is free on Opus 5.5, Sonnet 5.5 and Fable 5.1 -- the cache survives an effort
@@ -203,14 +213,19 @@ def is_down(advice: Advice) -> bool:
     """Whether the recommended seat is a step down from the current one, and the
     current one already fits the task.
 
-    A move down is one auto-seat will refuse to take unless the classification is fresh
-    and confident and the task is easy, so the status line and the prompt hint need to
-    know about it.
+    A move down is one auto-seat holds back unless the classification is fresh (and,
+    for a model switch over a larger context, confident and the task easy), so the
+    status line and the prompt hint need to know about it.
     """
     required = float(advice.task["required"])
     return (advice.current is not None and advice.best is not None
             and capability(advice.current) >= required
             and capability(advice.best.seat) < capability(advice.current))
+
+
+def is_model_change(advice: Advice) -> bool:
+    return (advice.current is not None and advice.best is not None
+            and advice.best.seat.model != advice.current.model)
 
 
 def burn(seat: Seat) -> float:
@@ -219,14 +234,18 @@ def burn(seat: Seat) -> float:
     return MODEL_BURN.get(seat.model, 1.0) * EFFORT_BURN.get(seat.effort, 1.0)
 
 
-def switch_margin(tokens: int | None) -> float:
+def switch_free_tokens(flow: bool) -> int:
+    return SWITCH_FREE_TOKENS_FLOW if flow else SWITCH_FREE_TOKENS
+
+
+def switch_margin(tokens: int | None, free: int = SWITCH_FREE_TOKENS) -> float:
     """The score a model switch must beat to be worth what re-reading the context costs.
 
     Zero when the context is small, or unreadable -- which is the same thing to be
     careful in: at that size the re-read is cheap enough that the better seat is simply
     the better seat, whatever the reading would have said.
     """
-    if tokens is None or tokens < SWITCH_FREE_TOKENS:
+    if tokens is None or tokens < free:
         return 0.0
     return SWITCH_BASE_MARGIN + SWITCH_MARGIN_PER_MTOK * tokens / 1_000_000
 
@@ -253,6 +272,7 @@ class Advice:
     switch: dict[str, str]
     task: dict[str, Any]
     band: str
+    tokens: int | None = None  # the context a model switch would re-read, when known
 
     def summary(self) -> dict[str, Any]:
         """The JSON `ruti manager --json` emits, in `ruti route --json`'s shape."""
@@ -358,7 +378,8 @@ def _rank(seat: Seat, band: str, required: float, *, manager_only: bool,
 
 def _verdict(best: Ranked | None, current: Seat | None, required: float,
              tokens: int | None,
-             effort_first: tuple[str, int] | None = None) -> dict[str, str]:
+             effort_first: tuple[str, int] | None = None,
+             free: int = SWITCH_FREE_TOKENS) -> dict[str, str]:
     """Now, at a boundary, stay, or nothing at all -- and why.
 
     `effort_first` is the seat a model switch would have recommended, and the size of
@@ -390,7 +411,7 @@ def _verdict(best: Ranked | None, current: Seat | None, required: float,
         return {"verdict": "now",
                 "reason": "no context reading to price a switch against, so it is "
                           "priced as cheap"}
-    if tokens < SWITCH_FREE_TOKENS:
+    if tokens < free:
         return {"verdict": "now",
                 "reason": f"the context is only ~{tokens} tokens, so re-reading it "
                           f"uncached is cheaper than carrying {current.label()} on"}
@@ -416,6 +437,7 @@ def advise(*, kind: str | None, difficulty: float | None, session_id: str | None
     band = snapshot.band
     session_modes = modes.current(session_id)
     wait_on = bool(session_modes.get("wait"))
+    free = switch_free_tokens(bool(session_modes.get("flow")))
 
     kind = kind or "implement"
     if difficulty is None:
@@ -454,7 +476,7 @@ def advise(*, kind: str | None, difficulty: float | None, session_id: str | None
             and best.seat.model != current.model):
         same = [r for r in eligible
                 if r.seat.model == current.model and r.capability >= required]
-        if same and best.score - same[0].score <= switch_margin(tokens):
+        if same and best.score - same[0].score <= switch_margin(tokens, free):
             effort_first = (best.seat.label(), tokens or 0)
             best = same[0]
 
@@ -462,11 +484,12 @@ def advise(*, kind: str | None, difficulty: float | None, session_id: str | None
         ranked=eligible + blocked,
         best=best,
         current=current,
-        switch=_verdict(best, current, required, tokens, effort_first),
+        switch=_verdict(best, current, required, tokens, effort_first, free),
         task={"kind": kind, "difficulty": round(difficulty, 2),
               "required": round(required, 2), "source": difficulty_source,
               "advisor": advisor, "advisor_relief": ADVISOR_RELIEF if advised else 0.0},
         band=band,
+        tokens=tokens,
     )
 
 
@@ -530,7 +553,9 @@ def prompt_hint(session_id: str | None, kind: str, kind_confidence: float,
         if verdict == "now" and is_down(advice):
             from . import auto_seat
             if auto_seat.mode() == "on":
-                held = auto_seat.down_hold(fresh, kind_confidence if fresh else None, difficulty)
+                held = auto_seat.down_hold(fresh, kind_confidence if fresh else None, difficulty,
+                                           model_change=is_model_change(advice),
+                                           tokens=advice.tokens)
 
         changed = remember_recommendation(session_id, best.seat, "held" if held else verdict)
         now = advice.current.label() if advice.current else "unknown"

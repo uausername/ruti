@@ -225,8 +225,9 @@ So `ruti mode manager on` does what can be done:
 
 You cannot type `/model` or `/effort` yourself; do not claim to have switched. When the
 line says **boundary** rather than **now**, the model switch re-reads the whole context
-uncached (the cache is per model, and Opus and Sonnet cache reads cost the same), so it
-pays off at the next handoff, `/compact` or new session, not mid-task. An effort-only
+uncached (the cache is per model: the new model writes it at 2x base input instead of
+reading it at 0.05x), so it pays off at the next handoff, `/compact` or new session, not
+mid-task. An effort-only
 change keeps the cache on Opus 5.5, Sonnet 5.5 and Fable 5.1, so it is always cheap.
 
 ### Standing a council

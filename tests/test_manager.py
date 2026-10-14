@@ -165,6 +165,23 @@ def test_a_switch_that_survives_the_effort_preference_is_deferred_to_a_boundary(
     assert advice.switch["verdict"] == "boundary"
 
 
+def test_flow_mode_lets_a_model_switch_happen_now_over_a_larger_context():
+    # A flow session hands off at half its window, and a switch at 200k still pays back
+    # long before that.
+    modes.set_flow("s1", True)
+    advice = advise(quota.ORANGE, kind="implement", current=manager.Seat("opus", "high"),
+                    context_tokens=200_000, session_id="s1")
+    assert advice.best.seat.model == "sonnet"
+    assert advice.switch["verdict"] == "now"
+    late = advise(quota.ORANGE, kind="implement", current=manager.Seat("opus", "high"),
+                  context_tokens=manager.SWITCH_FREE_TOKENS_FLOW, session_id="s1")
+    assert late.switch["verdict"] == "boundary"
+
+
+def test_the_switch_margin_starts_where_the_free_switch_ends():
+    assert manager.switch_margin(200_000, manager.switch_free_tokens(True)) == 0.0
+    assert manager.switch_margin(200_000, manager.switch_free_tokens(False)) > 0.0
+
 
 def test_an_underpowered_seat_is_told_to_move_now():
     advice = advise(quota.GREEN, kind="debug", current=manager.Seat("haiku", None),
@@ -304,6 +321,17 @@ def test_the_hint_says_auto_seat_will_not_make_a_down_move(monkeypatch):
     assert "Auto-seat will not make this move itself" in note
     assert "switch yourself if you agree" in shown
     assert manager.recommended_verdict("s1") == "held"
+
+
+def test_the_hint_does_not_hold_a_cheap_down_move_on_a_fresh_classification(monkeypatch):
+    from ruti import auto_seat
+    monkeypatch.setattr(manager.quota, "load", lambda: Snap(quota.YELLOW))
+    modes.set_manager("s1", True)
+    auto_seat.set_mode("on")
+    manager.record_seat("s1", seated("claude-opus-5-5", "high", 10_000))
+    note, _shown = manager.prompt_hint("s1", "implement", 0.75, 0.5, fresh=True)
+    assert "Auto-seat will not make this move itself" not in note
+    assert manager.recommended_verdict("s1") == "now"
 
 
 def test_the_hint_does_not_mention_auto_seat_when_it_is_off(monkeypatch):

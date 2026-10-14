@@ -10,10 +10,14 @@ The rules are deliberately lopsided, because a wrong move costs differently each
 
 * Up is taken as soon as the advice says so: a stronger seat costs window, a weaker one
   costs the work.
-* Down needs a fresh classification (not a task reused from the last prompt), a kind
-  the classifier is sure of, an easy task, and the same recommendation on two prompts
-  in a row -- the classifier reads the prompt together with the assistant's previous
-  message, and one bad guess must not be able to cheapen the seat on its own.
+* Down needs a fresh classification (not a task reused from the last prompt) and the
+  same recommendation on two prompts in a row -- the classifier reads the prompt
+  together with the assistant's previous message, and one bad guess must not be able
+  to cheapen the seat on its own. A move down that is cheap to undo -- effort only, or
+  a model switch over a small context -- asks for nothing more: if it was wrong, the
+  next prompt moves straight back up, and the round trip costs little or nothing. A
+  model switch over a larger context also needs a kind the classifier is sure of and
+  an easy task.
 * A model switch is only ever taken when `advise` says "now" (small context, or the
   current seat is underpowered); at "boundary" the line stays a recommendation.
 
@@ -33,9 +37,16 @@ from .config import read_json, write_json
 MODES = ("off", "shadow", "on")
 DEFAULT_MODE = "on"
 
-# A move down is only taken for work this easy, on a kind the classifier is this sure of.
+# A move down that switches model over more context than DOWN_CHEAP_TOKENS is only taken
+# for work this easy, on a kind the classifier is this sure of.
 DOWN_MAX_DIFFICULTY = 0.35
 DOWN_MIN_CONFIDENCE = 0.8
+
+# Below this, a wrong model switch down and the switch back up cost about $0.58 together
+# (Opus 5.5 / Sonnet 5.5 one-hour cache writes against cache reads) -- six requests of a
+# typical Opus session, and far less than the single switch `manager` already accepts
+# "now" at SWITCH_FREE_TOKENS -- so the move is treated like an effort change.
+DOWN_CHEAP_TOKENS = 50_000
 
 
 # How long a recommendation counts as "the previous one" for the two-in-a-row rule.
@@ -71,12 +82,22 @@ def set_mode(value: str) -> None:
     write_json(_state_file(), {**_state(), "mode": value})
 
 
-def down_hold(fresh: bool, confidence: float | None, difficulty: float) -> str | None:
-    """Why auto-seat will not take a move down on this classification, or None."""
-    if not fresh or confidence is None or confidence < DOWN_MIN_CONFIDENCE:
-        return "a move down needs a fresh, confident classification"
+def down_hold(fresh: bool, confidence: float | None, difficulty: float, *,
+              model_change: bool = True, tokens: int | None = None) -> str | None:
+    """Why auto-seat will not take a move down on this classification, or None.
+
+    The two-in-a-row rule is not checked here: it needs the previous prompt, which only
+    `plan` has. An unknown context size is priced as a large one -- the cheap path is
+    for moves known to be cheap.
+    """
+    if not fresh or confidence is None:
+        return "a move down needs a fresh classification"
+    if not model_change or (tokens is not None and tokens < DOWN_CHEAP_TOKENS):
+        return None
+    if confidence < DOWN_MIN_CONFIDENCE:
+        return f"a model switch down needs kind confidence >= {DOWN_MIN_CONFIDENCE}"
     if difficulty > DOWN_MAX_DIFFICULTY:
-        return f"a move down needs difficulty <= {DOWN_MAX_DIFFICULTY}"
+        return f"a model switch down needs difficulty <= {DOWN_MAX_DIFFICULTY}"
     return None
 
 
@@ -180,7 +201,9 @@ def plan(session_id: str, prompt: str, *, classify: Callable[..., Any] | None = 
         down = manager.is_down(advice)
         result["direction"] = "down" if down else "up"
         if down:
-            held = down_hold(source == "fresh", confidence, difficulty)
+            held = down_hold(source == "fresh", confidence, difficulty,
+                             model_change=manager.is_model_change(advice),
+                             tokens=advice.tokens)
             if held:
                 result["held"] = held
                 manager.remember_recommendation(session_id, best.seat, "held")
