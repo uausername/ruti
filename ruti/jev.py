@@ -161,35 +161,6 @@ def _ssl_context() -> ssl.SSLContext:
     return ssl.create_default_context()
 
 
-def _questions() -> dict[str, Any]:
-    return {
-        "kind": {
-            "type": "choice",
-            "instructions": "What kind of software task is this?",
-            "criteria": KIND_CRITERIA,
-        },
-        "difficulty": {
-            "type": "score",
-            "instructions": (
-                "How much judgement about code the author cannot see does this "
-                "task demand?"
-            ),
-            "criteria": DIFFICULTY_LEVELS,
-        },
-        "trivial": {
-            "type": "noul",
-            "instructions": (
-                "Is this small enough to just write -- roughly under 40 changed "
-                "lines across at most two files?"
-            ),
-            "criteria": {
-                "true": "A small, contained edit.",
-                "false": "Larger, or spread across several files.",
-            },
-        },
-    }
-
-
 def _post(body: dict[str, Any], url: str, key: str, timeout: float) -> dict[str, Any] | None:
     request = urllib.request.Request(
         url,
@@ -268,13 +239,71 @@ def noul_of(answers: dict[str, Any], name: str) -> float:
         return 0.0
 
 
-def classify(description: str, *, transport: str = DEFAULT_TRANSPORT,
+def _questions(about_reply: bool = False) -> dict[str, Any]:
+    """The task questions; `about_reply` asks them of the user's reply to a message.
+
+    A reply such as "yes, go ahead" carries no task of its own -- the task is whatever
+    the assistant proposed -- so the reply is sent with that message and the questions
+    say which of the two to judge. Measured on real session replies, this framing raised
+    the kind confidence on substantive replies (0.77 -> 0.91, 0.79 -> 0.95) and removed
+    the confident "near-trivial" a bare "да" got on its own.
+    """
+    base = {
+        "kind": {
+            "type": "choice",
+            "instructions": "What kind of software task is this?",
+            "criteria": KIND_CRITERIA,
+        },
+        "difficulty": {
+            "type": "score",
+            "instructions": (
+                "How much judgement about code the author cannot see does this "
+                "task demand?"
+            ),
+            "criteria": DIFFICULTY_LEVELS,
+        },
+        "trivial": {
+            "type": "noul",
+            "instructions": (
+                "Is this small enough to just write -- roughly under 40 changed "
+                "lines across at most two files?"
+            ),
+            "criteria": {
+                "true": "A small, contained edit.",
+                "false": "Larger, or spread across several files.",
+            },
+        },
+    }
+    if about_reply:
+        base["kind"]["instructions"] = (
+            "What kind of software task is the user now asking for? Their reply may only "
+            "agree to, or choose from, what the assistant proposed at the end of its "
+            "message -- then the task is that proposal, not the assistant's report."
+        )
+        base["difficulty"]["instructions"] = (
+            "How much judgement about code the author cannot see does the task the user "
+            "is now asking for demand?"
+        )
+        base["trivial"]["instructions"] = (
+            "Is the task the user is now asking for small enough to just write -- roughly "
+            "under 40 changed lines across at most two files?"
+        )
+    return base
+
+
+def classify(description: str, *, context: str | None = None,
+             transport: str = DEFAULT_TRANSPORT,
              timeout: float = DEFAULT_TIMEOUT) -> Classification | None:
     """Classify a task description, or return None if that could not be done.
 
     Every failure path is `None` on purpose -- see the module docstring.
     """
-    payload = ask(description, _questions(), transport=transport, timeout=timeout)
+    state = description
+    if context:
+        # The reply first: it is what is being classified, the message only explains it.
+        state = (f"The user's reply -- the request to classify:\n{description}\n\n"
+                 f"The assistant's message it replies to, for context:\n{context}")
+    payload = ask(state, _questions(bool(context)), transport=transport, timeout=timeout)
     if payload is None:
         return None
     latency_ms = payload.get("latency_ms", 0.0)

@@ -12,8 +12,8 @@ The rules are deliberately lopsided, because a wrong move costs differently each
   costs the work.
 * Down needs a fresh classification (not a task reused from the last prompt), a kind
   the classifier is sure of, an easy task, and the same recommendation on two prompts
-  in a row -- the classifier reads only the prompt's words, and one bad guess must not
-  be able to cheapen the seat on its own.
+  in a row -- the classifier reads the prompt together with the assistant's previous
+  message, and one bad guess must not be able to cheapen the seat on its own.
 * A model switch is only ever taken when `advise` says "now" (small context, or the
   current seat is underpowered); at "boundary" the line stays a recommendation.
 
@@ -27,7 +27,7 @@ import json
 import time
 from typing import Any, Callable
 
-from . import manager, modes
+from . import manager, modes, prompt_context
 from .config import read_json, write_json
 
 MODES = ("off", "shadow", "on")
@@ -37,12 +37,6 @@ DEFAULT_MODE = "on"
 DOWN_MAX_DIFFICULTY = 0.35
 DOWN_MIN_CONFIDENCE = 0.8
 
-# Shorter prompts than this reuse the last task instead of spending a classifier call.
-# Lower than the prompt hook's bar (120): most follow-ups in a live session are short, and
-# a move down still needs a confident, fresh classification, so a noisier guess on a short
-# prompt can only ever raise the seat.
-MIN_PROMPT_CHARS = 60
-CLASSIFY_TIMEOUT = 4.0
 
 # How long a recommendation counts as "the previous one" for the two-in-a-row rule.
 STABLE_WINDOW = 1800.0
@@ -119,15 +113,10 @@ def _classify(session_id: str, prompt: str,
     Confidence is None for a task reused from an earlier prompt: it is good enough to
     keep a seat from dropping underpowered, and not good enough to cheapen one.
     """
-    from . import jev
-
-    text = (prompt or "").strip()
-    if (len(text) >= MIN_PROMPT_CHARS and modes.current(session_id).get("jev", True)
-            and (classify is not None or jev.configured())):
-        guess = (classify or jev.classify)(text, timeout=CLASSIFY_TIMEOUT)
-        if guess is not None and guess.kind_confidence >= manager.KIND_CONFIDENCE:
-            manager.remember_task(session_id, guess.kind, guess.difficulty)
-            return guess.kind, guess.difficulty, guess.kind_confidence, "fresh"
+    guess = prompt_context.classify(session_id, prompt, classify=classify)
+    if guess is not None and guess.kind_confidence >= manager.KIND_CONFIDENCE:
+        manager.remember_task(session_id, guess.kind, guess.difficulty)
+        return guess.kind, guess.difficulty, guess.kind_confidence, "fresh"
     task = manager.last_task(session_id)
     if task is not None:
         return task[0], task[1], None, "reused"
@@ -153,7 +142,7 @@ def plan(session_id: str, prompt: str, *, classify: Callable[..., Any] | None = 
 
         task = _classify(session_id, prompt, classify)
         if task is None:
-            result["held"] = "no task to judge: the prompt is too short and nothing was reused"
+            result["held"] = "no task to judge: nothing classified and nothing reused"
             return result
         kind, difficulty, confidence, source = task
         advice = manager.advise(kind=kind, difficulty=difficulty, session_id=session_id,

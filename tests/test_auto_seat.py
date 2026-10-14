@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ruti import auto_seat, manager, quota
+from ruti import auto_seat, manager, prompt_context, quota
 
 LONG = "x" * 150
 
@@ -127,12 +127,12 @@ def test_no_task_to_judge_holds_and_every_plan_is_journalled(tmp_path):
 
 def test_a_prompt_of_sixty_characters_is_classified_and_a_shorter_one_is_not():
     sit("claude-sonnet-5-5", "low")
-    out = auto_seat.plan("s1", "y" * auto_seat.MIN_PROMPT_CHARS, classify=guess("debug", 0.6, 0.9))
+    out = auto_seat.plan("s1", "y" * prompt_context.MIN_PROMPT_CHARS, classify=guess("debug", 0.6, 0.9))
     assert out["task"]["source"] == "fresh"
-    shorter = auto_seat.plan("s1", "y" * (auto_seat.MIN_PROMPT_CHARS - 1),
+    shorter = auto_seat.plan("s1", "y" * (prompt_context.MIN_PROMPT_CHARS - 1),
                              classify=guess("debug", 0.6, 0.9))
     assert shorter["task"]["source"] == "reused"
-    assert auto_seat.MIN_PROMPT_CHARS == 60
+    assert prompt_context.MIN_PROMPT_CHARS == 60
 
 
 def test_a_seat_that_fits_is_recorded_as_checked_so_the_status_line_can_say_so():

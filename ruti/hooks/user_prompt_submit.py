@@ -13,8 +13,8 @@ the band and the size of the context, none of it carried over from the last one.
 reaches the user as `systemMessage`, once per change of recommendation, because no hook
 can switch Claude Code's own model and the only way to get the right seat is to show the
 user what to type; on the repeats the model carries it instead, as the last line of its
-own reply. A prompt too short to classify reuses the last classified task, which is what
-"yes, go ahead" is.
+own reply. The reply is classified together with the assistant's previous message, and
+only when that is unavailable does a short prompt reuse the last task.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import json
 import sys
 import time
 
-from ruti import context_watch, jev, ledger, manager, modes, quota, sessions
+from ruti import context_watch, jev, ledger, manager, modes, prompt_context, quota, sessions
 from ruti.config import STATE_ROOT, read_json, write_json
 
 MEMO_FILE = STATE_ROOT / "hook-memo.json"
@@ -31,26 +31,19 @@ MEMO_FILE = STATE_ROOT / "hook-memo.json"
 # How many prompts may pass before the full policy is restated even if nothing changed.
 FULL_EVERY = 12
 
-# Classifying costs about a second and a half of wall clock before the model even
-# starts reading, so it is not worth spending on "yes", "continue" or "fix the typo".
-# A prompt that actually describes work to be routed is longer than this.
-MIN_PROMPT_CHARS = 60
-
 # A classification is only useful where the skip is documented to happen: substantial
 # work, begun without a ranking. Below this the guess is too close to call to nag over.
 HINT_MIN_CONFIDENCE = 0.7
 
-# Tighter than the library default: this one sits between the user pressing enter and
-# the model reading anything, so a slow answer is worth less than no answer.
-HINT_TIMEOUT = 2.0
 
-
-def build_context(prompt: str | None = None, cwd: str | None = None) -> tuple[str, bool]:
+def build_context(prompt: str | None = None, cwd: str | None = None,
+                  transcript: str | None = None) -> tuple[str, bool]:
     """The injected context line, and whether this was one of the full restatements."""
-    return _build(prompt, cwd)[:2]
+    return _build(prompt, cwd, transcript)[:2]
 
 
-def build_output(prompt: str | None = None, cwd: str | None = None) -> dict:
+def build_output(prompt: str | None = None, cwd: str | None = None,
+                 transcript: str | None = None) -> dict:
     """The whole hook JSON, including the `systemMessage` the user is shown.
 
     Two audiences, two fields: the context line goes into the model's window, and the
@@ -59,7 +52,7 @@ def build_output(prompt: str | None = None, cwd: str | None = None) -> dict:
     acts on. The model gets the same advice on every prompt, in the context line, and
     repeats it to the user itself.
     """
-    line, full, user_message = _build(prompt, cwd)
+    line, full, user_message = _build(prompt, cwd, transcript)
     output = {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
@@ -75,7 +68,8 @@ def build_output(prompt: str | None = None, cwd: str | None = None) -> dict:
     return output
 
 
-def _build(prompt: str | None, cwd: str | None) -> tuple[str, bool, str | None]:
+def _build(prompt: str | None, cwd: str | None,
+           transcript: str | None = None) -> tuple[str, bool, str | None]:
     """One pass over the prompt, for both outputs above.
 
     Shared because the classification is the expensive half: it costs about 1.5s of
@@ -146,7 +140,8 @@ def _build(prompt: str | None, cwd: str | None) -> tuple[str, bool, str | None]:
     # most expensive thing this hook does -- so not at all when neither will use it.
     outstanding = ledger.unfollowed_route(session_id)
     manager_on = bool(modes.current(session_id).get("manager"))
-    guess = _classify_prompt(session_id, prompt) if manager_on or not outstanding else None
+    guess = (_classify_prompt(session_id, prompt, transcript)
+             if manager_on or not outstanding else None)
 
     # The manager's own seat, and only when it is wrong for this work. Unlike the route
     # hint below it is *not* suppressed by an unfollowed ranking: nagging about delegation
@@ -199,25 +194,24 @@ def _build(prompt: str | None, cwd: str | None) -> tuple[str, bool, str | None]:
 
 
 def _classify_prompt(session_id: str | None,
-                     prompt: str | None) -> "jev.Classification | None":
+                     prompt: str | None,
+                     transcript: str | None = None) -> "jev.Classification | None":
     """The prompt's classification, or None for every reason not to ask.
 
-    The guards live in one place because both hints depend on exactly these: a prompt
-    too short to be a task, the classifier switched off or unconfigured, and a
-    blackholed endpoint whose timeout `urlopen` does not actually honour. The probe is
-    cached, and caches its failures for minutes, so an outage costs one slow prompt
-    rather than all of them.
+    The guards live in one place because both hints depend on exactly these: the
+    classifier switched off or unconfigured, and a blackholed endpoint whose timeout
+    `urlopen` does not actually honour. The probe is cached, and caches its failures for
+    minutes, so an outage costs one slow prompt rather than all of them. Whether a short
+    prompt is worth asking about is `prompt_context`'s call: with the message it answers
+    it is, without it it is not.
     """
     try:
-        text = (prompt or "").strip()
-        if len(text) < MIN_PROMPT_CHARS:
-            return None
         if not modes.current(session_id).get("jev", True) or not jev.configured():
             return None
         health = jev.probe()
         if not health or not health.get("ok"):
             return None
-        return jev.classify(text, timeout=HINT_TIMEOUT)
+        return prompt_context.classify(session_id, prompt or "", transcript=transcript)
     except Exception:
         return None
 
@@ -312,19 +306,23 @@ def _rankings_note(session_id: str | None, cwd: str | None) -> str | None:
 def main() -> int:
     prompt = ""
     cwd: str | None = None
+    transcript: str | None = None
     try:
-        raw = sys.stdin.read()
+        # Bytes, decoded as UTF-8: `sys.stdin` decodes with the console code page on
+        # Windows (cp1251 here), which turns a Cyrillic prompt into mojibake.
+        raw = sys.stdin.buffer.read().decode("utf-8", errors="replace")
         payload = json.loads(raw) if raw.strip() else {}
         if isinstance(payload, dict):
             prompt = str(payload.get("prompt") or "")
             cwd = str(payload.get("cwd") or "") or None
+            transcript = str(payload.get("transcript_path") or "") or None
     except Exception:
         # The stdin must still be drained; a payload we cannot parse just means the
         # hint is skipped, not that the hook fails.
         pass
 
     try:
-        output = build_output(prompt, cwd)
+        output = build_output(prompt, cwd, transcript)
     except Exception:
         # A hook that fails must not block the prompt.
         return 0
