@@ -85,6 +85,23 @@ def test_a_move_down_needs_a_confident_classification_and_an_easy_task():
     assert hard["apply"] is False
 
 
+def test_down_hold_returns_the_two_reasons_and_none_for_a_confident_easy_classification():
+    assert auto_seat.down_hold(False, 0.9, 0.1) == "a move down needs a fresh, confident classification"
+    assert auto_seat.down_hold(True, None, 0.1) == "a move down needs a fresh, confident classification"
+    assert auto_seat.down_hold(True, 0.7, 0.1) == "a move down needs a fresh, confident classification"
+    assert auto_seat.down_hold(True, 0.9, 0.5) == f"a move down needs difficulty <= {auto_seat.DOWN_MAX_DIFFICULTY}"
+    assert auto_seat.down_hold(True, 0.9, 0.2) is None
+
+
+def test_a_held_move_down_leaves_the_verdict_as_held():
+    auto_seat.set_mode("on")
+    sit("claude-opus-5-5", "high")
+    for _ in range(2):
+        out = auto_seat.plan("s1", LONG, classify=guess(confidence=0.75))
+    assert out["apply"] is False
+    assert manager.recommended_verdict("s1") == "held"
+
+
 def test_a_task_reused_from_the_last_prompt_never_cheapens_the_seat():
     auto_seat.set_mode("on")
     sit("claude-opus-5-5", "high")

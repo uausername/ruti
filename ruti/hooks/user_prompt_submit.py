@@ -156,9 +156,11 @@ def _build(prompt: str | None, cwd: str | None) -> tuple[str, bool, str | None]:
         kind: str | None = None
         difficulty: float | None = None
         confidence = 0.0
+        fresh = False
         if guess is not None and guess.kind_confidence >= HINT_MIN_CONFIDENCE:
             kind, difficulty = guess.kind, guess.difficulty
             confidence = guess.kind_confidence
+            fresh = True
             # Kept for the next prompt, which is very likely to be too short to classify
             # on its own -- "yes, go ahead" is the same work as the prompt above it.
             manager.remember_task(session_id, kind, difficulty)
@@ -169,7 +171,7 @@ def _build(prompt: str | None, cwd: str | None) -> tuple[str, bool, str | None]:
                 # the seat and the context as they are right now.
                 kind, difficulty, confidence = task[0], task[1], 1.0
         if kind is not None:
-            seat_hint = manager.prompt_hint(session_id, kind, confidence, difficulty)
+            seat_hint = manager.prompt_hint(session_id, kind, confidence, difficulty, fresh=fresh)
             if seat_hint is not None:
                 line += "\n" + seat_hint[0]
                 user_message = seat_hint[1]

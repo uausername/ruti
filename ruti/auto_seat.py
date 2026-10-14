@@ -77,6 +77,15 @@ def set_mode(value: str) -> None:
     write_json(_state_file(), {**_state(), "mode": value})
 
 
+def down_hold(fresh: bool, confidence: float | None, difficulty: float) -> str | None:
+    """Why auto-seat will not take a move down on this classification, or None."""
+    if not fresh or confidence is None or confidence < DOWN_MIN_CONFIDENCE:
+        return "a move down needs a fresh, confident classification"
+    if difficulty > DOWN_MAX_DIFFICULTY:
+        return f"a move down needs difficulty <= {DOWN_MAX_DIFFICULTY}"
+    return None
+
+
 def _previous(session_id: str, now: float) -> str | None:
     entry = (_state().get("sessions") or {}).get(session_id)
     if isinstance(entry, dict) and now - float(entry.get("at") or 0) < STABLE_WINDOW:
@@ -179,16 +188,13 @@ def plan(session_id: str, prompt: str, *, classify: Callable[..., Any] | None = 
             result["held"] = "a model switch re-reads the context: left as a recommendation"
             return result
 
-        required = float(advice.task["required"])
-        down = (manager.capability(current) >= required
-                and manager.capability(best.seat) < manager.capability(current))
+        down = manager.is_down(advice)
         result["direction"] = "down" if down else "up"
         if down:
-            if source != "fresh" or confidence is None or confidence < DOWN_MIN_CONFIDENCE:
-                result["held"] = "a move down needs a fresh, confident classification"
-                return result
-            if difficulty > DOWN_MAX_DIFFICULTY:
-                result["held"] = f"a move down needs difficulty <= {DOWN_MAX_DIFFICULTY}"
+            held = down_hold(source == "fresh", confidence, difficulty)
+            if held:
+                result["held"] = held
+                manager.remember_recommendation(session_id, best.seat, "held")
                 return result
             if previous != best.seat.label():
                 result["held"] = "a move down needs the same advice on two prompts in a row"
