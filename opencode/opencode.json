@@ -33,6 +33,9 @@
         "laguna-s-2.1": {
           "name": "Laguna S 2.1"
         },
+        "laguna-xs-2.1": {
+          "name": "Laguna Xs 2.1"
+        },
         "local-llama-31-8b": {
           "name": "Llama 31 8B (local)"
         },
@@ -45,11 +48,26 @@
         "mimo-v2.6-flash": {
           "name": "Mimo V2.6 Flash"
         },
+        "nemotron-3-super-120b-a12b": {
+          "name": "Nemotron 3 Super 120B A12B"
+        },
         "nemotron-3-ultra-550b-a55b": {
           "name": "Nemotron 3 Ultra 550B A55B"
         },
         "nemotron-3.5-lightning": {
           "name": "Nemotron 3.5 Lightning"
+        },
+        "north-mini-code": {
+          "name": "North Mini Code"
+        },
+        "switchyard-code": {
+          "name": "Switchyard Code"
+        },
+        "switchyard-free": {
+          "name": "Switchyard Free"
+        },
+        "switchyard-mix": {
+          "name": "Switchyard Mix"
         }
       }
     }

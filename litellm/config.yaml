@@ -20,6 +20,50 @@ model_list:
     litellm_params:
       model: gemini/gemini-2.5-flash
       api_key: os.environ/GEMINI_KEY_B
+  # NVIDIA Switchyard: picks per request between two zero-cost coders.
+  # algorithm=auto never calls the paid judge model, so the alias costs nothing
+  # (probed 2026-10-15: tools and streaming work, cost 0). Hand-written because
+  # `ruti provider add` has no way to send extra request fields.
+  # Switchyard takes at most 3 candidates per request, hence three aliases.
+  # Coding-tuned zero-cost models:
+  - model_name: switchyard-code
+    litellm_params:
+      model: openrouter/nvidia/switchyard
+      api_key: os.environ/RUTI_OPENROUTER_KEY_1
+      extra_body:
+        models:
+          - poolside/laguna-s-2.1:free
+          - cohere/north-mini-code:free
+          - poolside/laguna-xs-2.1:free
+        plugins:
+          - id: switchyard-router
+            algorithm: auto
+  # General zero-cost models, strongest to fastest:
+  - model_name: switchyard-free
+    litellm_params:
+      model: openrouter/nvidia/switchyard
+      api_key: os.environ/RUTI_OPENROUTER_KEY_1
+      extra_body:
+        models:
+          - nvidia/nemotron-3-ultra-550b-a55b:free
+          - nvidia/nemotron-3-super-120b-a12b:free
+          - nvidia/nemotron-3.5-lightning:free
+        plugins:
+          - id: switchyard-router
+            algorithm: auto
+  # Mixed: one coder, one long-context note model, one fast model.
+  - model_name: switchyard-mix
+    litellm_params:
+      model: openrouter/nvidia/switchyard
+      api_key: os.environ/RUTI_OPENROUTER_KEY_1
+      extra_body:
+        models:
+          - poolside/laguna-s-2.1:free
+          - dots-studio/dots-3-note-preview:free
+          - nvidia/nemotron-3.5-lightning:free
+        plugins:
+          - id: switchyard-router
+            algorithm: auto
 
 router_settings:
   routing_strategy: simple-shuffle
