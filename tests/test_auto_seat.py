@@ -274,3 +274,26 @@ def test_seat_plan_reads_stdin_as_utf8(monkeypatch):
     CliRunner(charset="cp1251").invoke(cli.main, ["seat", "plan", "--session", "s1"],
                        input=text.encode("utf-8"), catch_exceptions=False)
     assert seen["prompt"] == text
+
+
+def test_the_effort_left_over_from_an_applied_model_switch_is_not_held_as_a_move_down():
+    # The switch to opus was applied with `effort: low` to follow at the end of the turn;
+    # if that did not land, the session sits on opus/high and the leftover reads as a
+    # move down, which a reused classification would otherwise hold.
+    auto_seat.set_mode("on")
+    sit("claude-sonnet-5-5", "medium")
+    first = auto_seat.plan("s1", LONG, classify=guess("review", 0.67, 0.9))
+    assert first["apply"] is True and first["action"] == {"model": "opus", "effort": "low"}
+    sit("claude-opus-5-5", "high")
+    reused = lambda *_a, **_k: None  # noqa: E731 -- nothing fresh: the task is reused
+    second = auto_seat.plan("s1", "ok", classify=reused)
+    assert second["held"] is None and second["completing"] is True
+    assert second["action"] == {"effort": "low"} and second["apply"] is True
+
+
+def test_an_unrelated_move_down_is_still_held_after_a_switch_was_applied():
+    auto_seat.set_mode("on")
+    sit("claude-opus-5-5", "high")
+    auto_seat._mark_applied("s1", "opus/low", 0.0)  # long expired
+    out = auto_seat.plan("s1", LONG, classify=guess(), now=10_000.0)
+    assert out["action"] == {} and "completing" not in out
