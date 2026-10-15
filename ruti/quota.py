@@ -461,6 +461,11 @@ def capture(payload: dict[str, Any]) -> Quota:
         if not history or abs(history[-1][1] - value) > 1e-9:
             history.append((now, value))
         history = history[-HISTORY_LIMIT:]
+        # The long record behind `ruti seat review`: the history above is capped for the
+        # burn rate, and this one is kept to judge what the window charges per model.
+        from . import window_review
+
+        window_review.record_sample(value, five.get("resets_at"), now)
 
     record = {
         "version": 1,

@@ -185,6 +185,12 @@ def _build(prompt: str | None, cwd: str | None,
         if hint:
             line += "\n" + hint
 
+    from ruti import window_review
+
+    review_note = window_review.nudge()
+    if review_note:
+        line += "\n" + review_note
+
     write_json(MEMO_FILE, {
         "last_band": band,
         "prompts_since_full": 0 if full else count,
