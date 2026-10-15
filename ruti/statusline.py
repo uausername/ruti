@@ -284,7 +284,7 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
                     # that waits for the user: a model switch held back by the size of
                     # the context (`/compact` shrinks it, and the move is then taken on
                     # the next prompt), or any move while auto-seat is not on, or a move
-                    # down auto-seat holds for want of a fresh, confident, easy classification.
+                    # down auto-seat holds (see `auto_seat.down_hold`).
                     if manager.recommended_verdict(session_id) == "boundary":
                         segments.append(_colour(f"⇢{target} /compact", "33"))
                     elif manager.recommended_verdict(session_id) == "held" or auto_seat.mode() != "on":

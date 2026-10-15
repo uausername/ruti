@@ -74,28 +74,54 @@ def test_a_move_down_waits_for_the_same_advice_twice_in_a_row():
     assert second["apply"] is True and second["action"]
 
 
-def test_a_move_down_needs_a_confident_classification_and_an_easy_task():
+def test_a_model_switch_down_over_a_larger_context_needs_a_confident_easy_task():
     auto_seat.set_mode("on")
-    sit("claude-opus-5-5", "high")
+    sit("claude-opus-5-5", "high", tokens=100_000)
     for _ in range(2):
         unsure = auto_seat.plan("s1", LONG, classify=guess(confidence=0.75))
-    assert unsure["apply"] is False and "confident" in unsure["held"]
+    assert unsure["action"] == {} and "confidence" in unsure["held"]
     for _ in range(2):
         hard = auto_seat.plan("s1", LONG, classify=guess("implement", 0.5, 0.95))
-    assert hard["apply"] is False
+    assert hard["action"] == {} and "difficulty" in hard["held"]
 
 
-def test_down_hold_returns_the_two_reasons_and_none_for_a_confident_easy_classification():
-    assert auto_seat.down_hold(False, 0.9, 0.1) == "a move down needs a fresh, confident classification"
-    assert auto_seat.down_hold(True, None, 0.1) == "a move down needs a fresh, confident classification"
-    assert auto_seat.down_hold(True, 0.7, 0.1) == "a move down needs a fresh, confident classification"
-    assert auto_seat.down_hold(True, 0.9, 0.5) == f"a move down needs difficulty <= {auto_seat.DOWN_MAX_DIFFICULTY}"
-    assert auto_seat.down_hold(True, 0.9, 0.2) is None
+def test_a_model_switch_down_over_a_small_context_needs_only_a_fresh_classification():
+    # Re-reading 10k tokens twice -- down, and back up if it was wrong -- costs little.
+    auto_seat.set_mode("on")
+    sit("claude-opus-5-5", "high", tokens=10_000)
+    for _ in range(2):
+        out = auto_seat.plan("s1", LONG, classify=guess("implement", 0.5, 0.75))
+    assert out["direction"] == "down" and out["apply"] is True
+    assert out["action"].get("model") == "sonnet"
+
+
+def test_an_effort_only_move_down_needs_only_a_fresh_classification():
+    # The prompt cache survives an effort change, so the size of the context is moot.
+    auto_seat.set_mode("on")
+    sit("claude-opus-5-5", "high", tokens=400_000)
+    first = auto_seat.plan("s1", LONG, classify=guess("implement", 0.5, 0.75))
+    assert first["apply"] is False and "two prompts" in first["held"]
+    second = auto_seat.plan("s1", LONG, classify=guess("implement", 0.5, 0.75))
+    assert second["apply"] is True and second["action"] == {"effort": "low"}
+
+
+def test_down_hold_is_strict_only_for_a_model_switch_over_a_larger_context():
+    fresh_only = "a move down needs a fresh classification"
+    assert auto_seat.down_hold(False, 0.9, 0.1) == fresh_only
+    assert auto_seat.down_hold(True, None, 0.1, model_change=False) == fresh_only
+    assert auto_seat.down_hold(True, 0.7, 0.9, model_change=False) is None
+    assert auto_seat.down_hold(True, 0.7, 0.9, tokens=auto_seat.DOWN_CHEAP_TOKENS - 1) is None
+    big = auto_seat.DOWN_CHEAP_TOKENS
+    assert "confidence" in auto_seat.down_hold(True, 0.7, 0.1, tokens=big)
+    assert "difficulty" in auto_seat.down_hold(True, 0.9, 0.5, tokens=big)
+    assert auto_seat.down_hold(True, 0.9, 0.2, tokens=big) is None
+    # An unknown context is priced as a large one.
+    assert "difficulty" in auto_seat.down_hold(True, 0.9, 0.5)
 
 
 def test_a_held_move_down_leaves_the_verdict_as_held():
     auto_seat.set_mode("on")
-    sit("claude-opus-5-5", "high")
+    sit("claude-opus-5-5", "high", tokens=100_000)
     for _ in range(2):
         out = auto_seat.plan("s1", LONG, classify=guess(confidence=0.75))
     assert out["apply"] is False
