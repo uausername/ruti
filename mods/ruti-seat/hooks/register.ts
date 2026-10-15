@@ -16,7 +16,10 @@ import type { Register } from 'claude-code'
 // switch the mod puts `model` and `modelSettings` back as they were. The running
 // session keeps its new seat: the engine does not re-read the file mid-session.
 
-const LOG = 'C:/Users/Lenovo Gaming/.claude/dev-mods/ruti-seat.log'
+// One file per session: every session's mod instance rewrites its whole file, so a shared
+// one is clobbered by whichever session wrote last and the evidence is gone.
+const LOG_DIR = 'C:/Users/Lenovo Gaming/.claude/dev-mods'
+let LOG = `${LOG_DIR}/ruti-seat.log`
 const WITH_1M = new Set(['sonnet', 'opus', 'fable'])
 
 type Plan = { apply?: boolean; action?: { model?: string; effort?: string }; best?: string; mode?: string }
@@ -81,6 +84,7 @@ export const register: Register = on => {
     if (e.origin && (e.origin as { kind?: string }).kind !== 'composer') return next(e)
     try {
       const id = await $.session.id()
+      LOG = `${LOG_DIR}/ruti-seat-${String(id).slice(0, 8)}.log`
       const run = await $.process.run(['ruti', 'seat', 'plan', '--session', id], {
         stdin: e.text,
         timeoutMs: 8000,
@@ -115,6 +119,7 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     if (pendingEffort) {
+      await note($, `turn.complete with effort ${pendingEffort} pending: aborted=${String((e as any).isAborted)} reason=${String((e as any).reason)}`)
       const level = pendingEffort
       pendingEffort = null
       try {

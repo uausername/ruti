@@ -117,6 +117,31 @@ def _remember(session_id: str, label: str, now: float) -> None:
     write_json(_state_file(), {**state, "sessions": sessions})
 
 
+def _mark_applied(session_id: str, label: str, now: float) -> None:
+    state = _state()
+    applied = {sid: entry for sid, entry in (state.get("applied") or {}).items()
+               if isinstance(entry, dict) and now - float(entry.get("at") or 0) < STABLE_WINDOW}
+    applied[session_id] = {"label": label, "at": now}
+    write_json(_state_file(), {**state, "applied": applied})
+
+
+def completes_applied(session_id: str, advice: manager.Advice, now: float | None = None) -> bool:
+    """Whether the move `advice` recommends is the unfinished half of one already applied.
+
+    A model switch lands at once and the effort follows at the end of the turn, so the
+    seat can sit on the new model with the old effort -- and then the effort alone reads
+    as an independent move down, which `down_hold` refuses on a reused classification.
+    The move was decided when it was applied; finishing it is not a new decision.
+    """
+    best, current = advice.best, advice.current
+    if best is None or current is None or best.seat.model != current.model:
+        return False
+    entry = (_state().get("applied") or {}).get(session_id)
+    moment = time.time() if now is None else now
+    return (isinstance(entry, dict) and entry.get("label") == best.seat.label()
+            and moment - float(entry.get("at") or 0) < STABLE_WINDOW)
+
+
 def _journal(row: dict[str, Any]) -> None:
     try:
         journal = _journal_file()
@@ -200,7 +225,9 @@ def plan(session_id: str, prompt: str, *, classify: Callable[..., Any] | None = 
 
         down = manager.is_down(advice)
         result["direction"] = "down" if down else "up"
-        if down:
+        if down and completes_applied(session_id, advice, moment):
+            result["completing"] = True
+        elif down:
             held = down_hold(source == "fresh", confidence, difficulty,
                              model_change=manager.is_model_change(advice),
                              tokens=advice.tokens)
@@ -219,6 +246,8 @@ def plan(session_id: str, prompt: str, *, classify: Callable[..., Any] | None = 
             action["effort"] = best.seat.effort
         result["action"] = action
         result["apply"] = bool(action) and current_mode == "on"
+        if result["apply"]:
+            _mark_applied(session_id, best.seat.label(), moment)
         return result
     except Exception as error:  # a seat hint must never take a prompt down with it
         result["held"] = f"error: {error}"

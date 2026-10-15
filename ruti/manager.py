@@ -552,7 +552,7 @@ def prompt_hint(session_id: str | None, kind: str, kind_confidence: float,
         held = None
         if verdict == "now" and is_down(advice):
             from . import auto_seat
-            if auto_seat.mode() == "on":
+            if auto_seat.mode() == "on" and not auto_seat.completes_applied(session_id, advice):
                 held = auto_seat.down_hold(fresh, kind_confidence if fresh else None, difficulty,
                                            model_change=is_model_change(advice),
                                            tokens=advice.tokens)
