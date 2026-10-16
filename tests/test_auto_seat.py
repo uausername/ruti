@@ -108,7 +108,10 @@ def test_an_effort_only_move_down_needs_only_a_fresh_classification():
 def test_down_hold_is_strict_only_for_a_model_switch_over_a_larger_context():
     fresh_only = "a move down needs a fresh classification"
     assert auto_seat.down_hold(False, 0.9, 0.1) == fresh_only
-    assert auto_seat.down_hold(True, None, 0.1, model_change=False) == fresh_only
+    assert auto_seat.down_hold(False, 0.9, 0.1, model_change=True) == fresh_only
+    # An effort-only move down is taken even on a task reused from the last prompt.
+    assert auto_seat.down_hold(False, None, 0.9, model_change=False) is None
+    assert auto_seat.down_hold(True, None, 0.1, model_change=True) == fresh_only
     assert auto_seat.down_hold(True, 0.7, 0.9, model_change=False) is None
     assert auto_seat.down_hold(True, 0.7, 0.9, tokens=auto_seat.DOWN_CHEAP_TOKENS - 1) is None
     big = auto_seat.DOWN_CHEAP_TOKENS
@@ -128,13 +131,24 @@ def test_a_held_move_down_leaves_the_verdict_as_held():
     assert manager.recommended_verdict("s1") == "held"
 
 
-def test_a_task_reused_from_the_last_prompt_never_cheapens_the_seat():
+def test_a_task_reused_from_the_last_prompt_never_switches_the_model_down():
     auto_seat.set_mode("on")
     sit("claude-opus-5-5", "high")
     manager.remember_task("s1", "boilerplate", 0.1)
     for _ in range(2):
         out = auto_seat.plan("s1", "yes, go ahead")
-    assert out["task"]["source"] == "reused" and out["apply"] is False
+    assert out["task"]["source"] == "reused"
+    assert "model" not in out["action"]
+
+
+def test_a_reused_task_may_still_lower_the_effort():
+    auto_seat.set_mode("on")
+    sit("claude-sonnet-5-5", "medium")
+    manager.remember_task("s1", "analyze", 0.27)
+    for _ in range(2):
+        out = auto_seat.plan("s1", "ok")
+    assert out["task"]["source"] == "reused"
+    assert out["apply"] is True and out["action"] == {"effort": "low"}
 
 
 def test_a_model_switch_with_a_large_context_stays_a_recommendation():
