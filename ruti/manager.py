@@ -556,6 +556,11 @@ def prompt_hint(session_id: str | None, kind: str, kind_confidence: float,
                 held = auto_seat.down_hold(fresh, kind_confidence if fresh else None, difficulty,
                                            model_change=is_model_change(advice),
                                            tokens=advice.tokens)
+                # `plan` also holds a move for want of a second prompt in a row, which
+                # only it can see; do not turn that hold back into "now" here.
+                if (held is None and recommended(session_id) == best.seat.label()
+                        and recommended_verdict(session_id) == "held"):
+                    held = "a move down needs the same advice on two fresh prompts in a row"
 
         changed = remember_recommendation(session_id, best.seat, "held" if held else verdict)
         now = advice.current.label() if advice.current else "unknown"
