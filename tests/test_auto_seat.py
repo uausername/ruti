@@ -56,11 +56,11 @@ def test_the_default_is_on_and_off_does_nothing():
 def test_shadow_names_the_move_and_on_applies_it():
     sit("claude-sonnet-5-5", "low")
     auto_seat.set_mode("shadow")
-    shadow = auto_seat.plan("s1", LONG, classify=guess("debug", 0.6, 0.9))
+    shadow = auto_seat.plan("s1", LONG, classify=guess("debug", 0.5, 0.9))
     assert shadow["direction"] == "up" and shadow["action"].get("effort")
     assert shadow["apply"] is False
     auto_seat.set_mode("on")
-    live = auto_seat.plan("s1", LONG, classify=guess("debug", 0.6, 0.9))
+    live = auto_seat.plan("s1", LONG, classify=guess("debug", 0.5, 0.9))
     assert live["apply"] is True and live["action"] == shadow["action"]
 
 
@@ -167,10 +167,10 @@ def test_no_task_to_judge_holds_and_every_plan_is_journalled(tmp_path):
 
 def test_a_prompt_of_sixty_characters_is_classified_and_a_shorter_one_is_not():
     sit("claude-sonnet-5-5", "low")
-    out = auto_seat.plan("s1", "y" * prompt_context.MIN_PROMPT_CHARS, classify=guess("debug", 0.6, 0.9))
+    out = auto_seat.plan("s1", "y" * prompt_context.MIN_PROMPT_CHARS, classify=guess("debug", 0.5, 0.9))
     assert out["task"]["source"] == "fresh"
     shorter = auto_seat.plan("s1", "y" * (prompt_context.MIN_PROMPT_CHARS - 1),
-                             classify=guess("debug", 0.6, 0.9))
+                             classify=guess("debug", 0.5, 0.9))
     assert shorter["task"]["source"] == "reused"
     assert prompt_context.MIN_PROMPT_CHARS == 60
 
@@ -245,7 +245,7 @@ def test_a_move_the_manager_makes_itself_is_an_arrow_and_one_that_waits_is_yello
     modes.set_manager("s1", True)
     # Effort only: applied by the mod, cyan `->`.
     sit("claude-sonnet-5-5", "low")
-    auto_seat.plan("s1", LONG, classify=guess("debug", 0.6, 0.9))
+    auto_seat.plan("s1", LONG, classify=guess("debug", 0.5, 0.9))
     plain, raw = _line_one(monkeypatch)
     assert "->sonnet/" in plain and "\x1b[36m->" in raw and "⇢" not in plain
     assert manager.recommended_verdict("s1") == "now"
@@ -265,7 +265,7 @@ def test_without_auto_seat_every_pending_move_is_yellow(monkeypatch):
     modes.set_manager("s1", True)
     auto_seat.set_mode("shadow")
     sit("claude-sonnet-5-5", "low")
-    auto_seat.plan("s1", LONG, classify=guess("debug", 0.6, 0.9))
+    auto_seat.plan("s1", LONG, classify=guess("debug", 0.5, 0.9))
     plain, raw = _line_one(monkeypatch)
     assert "⇢sonnet/" in plain and "/compact" not in plain and "\x1b[33m⇢" in raw
 
@@ -296,7 +296,7 @@ def test_the_effort_left_over_from_an_applied_model_switch_is_not_held_as_a_move
     # move down, which a reused classification would otherwise hold.
     auto_seat.set_mode("on")
     sit("claude-sonnet-5-5", "medium")
-    first = auto_seat.plan("s1", LONG, classify=guess("review", 0.67, 0.9))
+    first = auto_seat.plan("s1", LONG, classify=guess("review", 0.5, 0.9))
     assert first["apply"] is True and first["action"] == {"model": "opus", "effort": "low"}
     sit("claude-opus-5-5", "high")
     reused = lambda *_a, **_k: None  # noqa: E731 -- nothing fresh: the task is reused
@@ -333,3 +333,16 @@ def test_cache_state_reports_the_hit_share_and_counts_the_hour_from_the_last_req
     assert manager._load()["s1"]["cache_at"] == seen
     assert manager.cache_state("s1", window, now=seen + 4000)[1] == 0.0
     assert manager.cache_state("s1", {}) is None
+
+
+def test_hard_work_asks_for_more_effort_while_the_window_allows_it():
+    def effort(band, difficulty):
+        manager.quota.load = lambda: Snap(band)
+        return manager.advise(kind="implement", difficulty=difficulty, session_id="s1").best.seat
+
+    assert effort(quota.GREEN, 0.5).effort == "medium"
+    assert effort(quota.GREEN, 0.75).label() == "opus/high"
+    assert effort(quota.GREEN, 0.9).label() == "opus/xhigh"
+    assert effort(quota.YELLOW, 0.8).label() == "opus/high"
+    # ORANGE gets no Opus (wait mode off): the best it can do is Sonnet at high.
+    assert effort(quota.ORANGE, 0.9).label() == "sonnet/high"

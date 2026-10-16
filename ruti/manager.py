@@ -147,6 +147,17 @@ BAND_EFFECT: dict[str, str] = {
     quota.CRITICAL: "nothing is permitted -- write the handoff and stop",
 }
 
+# Past this difficulty the task is worth thinking longer on, not only a stronger model:
+# every point of difficulty above it counts this much extra towards what the seat must be
+# able to do (so `high` from ~0.75, `xhigh` from ~0.8, `max` from ~0.9 on Opus), scaled
+# down as the window runs out. Without it the score never rewards depth -- `high` cost more
+# than it was worth at every difficulty, and the manager sat on `medium` for hard work.
+DEPTH_FROM = 0.5
+DEPTH_PREMIUM: dict[str, float] = {
+    quota.GREEN: 0.4, quota.YELLOW: 0.4, quota.ORANGE: 0.25,
+    quota.UNKNOWN: 0.0, quota.RED: 0.0, quota.CRITICAL: 0.0,
+}
+
 SEATS_FILE = STATE_ROOT / "seats.json"
 
 # A record this old belongs to a session that is long over.
@@ -443,7 +454,8 @@ def advise(*, kind: str | None, difficulty: float | None, session_id: str | None
     if difficulty is None:
         difficulty = router.KIND_DIFFICULTY.get(kind, 0.5)
         difficulty_source = "kind"
-    required = 0.45 + 0.5 * difficulty
+    required = min(1.0, 0.45 + 0.5 * difficulty
+                   + DEPTH_PREMIUM.get(band, 0.0) * max(0.0, difficulty - DEPTH_FROM))
     advisor = advisor_model()
     advised = (advisor is not None and kind in ADVISOR_KINDS
                and band in (quota.GREEN, quota.YELLOW))
