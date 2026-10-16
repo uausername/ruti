@@ -687,7 +687,11 @@ def record_seat(session_id: str | None, payload: dict[str, Any]) -> None:
         if not session_id or not isinstance(payload, dict):
             return
         model = payload.get("model") or {}
+        usage = (payload.get("context_window") or {}).get("current_usage")
         record: dict[str, Any] = {
+            # What the last request read from and wrote to the cache; a change in it is
+            # how the status line knows a request just happened (see `cache_state`).
+            "cache_sig": _cache_signature(usage),
             # The id first: it is what the API was asked for, where the display name
             # is whatever Claude Code chose to print.
             "model": model_alias(model.get("id")) or model_alias(model.get("display_name")),
@@ -701,7 +705,9 @@ def record_seat(session_id: str | None, payload: dict[str, Any]) -> None:
         if not moved and "at" in previous:
             return
         now = time.time()
-        data[session_id] = {**record, "at": now,
+        cache_at = (now if record["cache_sig"] != previous.get("cache_sig")
+                    else previous.get("cache_at", now))
+        data[session_id] = {**record, "at": now, "cache_at": cache_at,
                             **{key: previous[key]
                                for key in ("recommended", "recommended_verdict", "task",
                                            "matched")
@@ -710,6 +716,40 @@ def record_seat(session_id: str | None, payload: dict[str, Any]) -> None:
                                 if _fresh(entry, now)})
     except Exception:
         pass
+
+
+CACHE_TTL = 3600.0  # the one-hour tier every request in this account's transcripts uses
+
+
+def _cache_signature(usage: Any) -> str | None:
+    if not isinstance(usage, dict):
+        return None
+    parts = [usage.get(key) for key in
+             ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")]
+    return "/".join(str(p) for p in parts) if any(isinstance(p, (int, float)) for p in parts) else None
+
+
+def cache_state(session_id: str | None, window: Any,
+                now: float | None = None) -> tuple[int, float] | None:
+    """(share of the last request's input read from cache in percent, seconds the cache
+    has left), or None before the first request.
+
+    The time left counts from the repaint that first saw this request's usage, so it is
+    an estimate good to a few minutes -- enough to tell "back soon" from "gone".
+    """
+    usage = window.get("current_usage") if isinstance(window, dict) else None
+    if _cache_signature(usage) is None:
+        return None
+    read, written, fresh = (float(usage.get(key) or 0) for key in
+                            ("cache_read_input_tokens", "cache_creation_input_tokens",
+                             "input_tokens"))
+    total = read + written + fresh
+    if total <= 0:
+        return None
+    since = _entry(session_id).get("cache_at")
+    moment = time.time() if now is None else now
+    left = CACHE_TTL - (moment - float(since)) if isinstance(since, (int, float)) else CACHE_TTL
+    return round(100 * read / total), max(left, 0.0)
 
 
 def current_seat(session_id: str | None) -> Seat | None:

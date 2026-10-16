@@ -305,3 +305,17 @@ def test_a_move_held_for_want_of_a_second_prompt_is_yellow_not_cyan():
     out = auto_seat.plan("s1", LONG, classify=guess("implement", 0.5, 0.75))
     assert out["apply"] is False and "two prompts" in out["held"]
     assert manager.recommended_verdict("s1") == "held"
+
+
+def test_cache_state_reports_the_hit_share_and_counts_the_hour_from_the_last_request():
+    window = {"current_usage": {"input_tokens": 2, "cache_creation_input_tokens": 700,
+                                "cache_read_input_tokens": 99_300}}
+    manager.record_seat("s1", {"model": {"id": "claude-sonnet-5-5"}, "context_window": window})
+    hit, left = manager.cache_state("s1", window)
+    assert hit == 99 and 3590 < left <= 3600
+    # The same usage on a later repaint is the same request: the clock keeps running.
+    seen = manager._load()["s1"]["cache_at"]
+    manager.record_seat("s1", {"model": {"id": "claude-sonnet-5-5"}, "context_window": window})
+    assert manager._load()["s1"]["cache_at"] == seen
+    assert manager.cache_state("s1", window, now=seen + 4000)[1] == 0.0
+    assert manager.cache_state("s1", {}) is None

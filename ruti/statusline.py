@@ -269,6 +269,19 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
     # from the one running -- it disappears the moment `/model` is typed, which is what
     # makes it worth glancing at. Its own try/except because the mode check and the
     # file read are both things a status line must survive.
+    # The prompt cache: how much of the last request it served, and how long it has left.
+    # Yellow when most of the context had to be written again, red when it is about to
+    # expire -- the next request after that pays for the whole context once more.
+    try:
+        state = manager.cache_state(payload.get("session_id"), payload.get("context_window"))
+        if state:
+            hit, left = state
+            text = f"cache {hit}%/{int(left // 60)}m" if left > 0 else f"cache {hit}% expired"
+            colour = "31" if left < 600 else "33" if hit < 50 else "90"
+            segments.append(_colour(text, colour))
+    except Exception:
+        pass
+
     try:
         session_id = payload.get("session_id")
         if session_id:
