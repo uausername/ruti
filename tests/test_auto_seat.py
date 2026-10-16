@@ -344,5 +344,5 @@ def test_hard_work_asks_for_more_effort_while_the_window_allows_it():
     assert effort(quota.GREEN, 0.75).label() == "opus/high"
     assert effort(quota.GREEN, 0.9).label() == "opus/xhigh"
     assert effort(quota.YELLOW, 0.8).label() == "opus/high"
-    # The premium shrinks with the window: ORANGE keeps hard work on medium.
-    assert effort(quota.ORANGE, 0.9).label() == "opus/medium"
+    # ORANGE gets no Opus (wait mode off): the best it can do is Sonnet at high.
+    assert effort(quota.ORANGE, 0.9).label() == "sonnet/high"
