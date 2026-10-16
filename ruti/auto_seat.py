@@ -10,7 +10,8 @@ The rules are deliberately lopsided, because a wrong move costs differently each
 
 * Up is taken as soon as the advice says so: a stronger seat costs window, a weaker one
   costs the work.
-* Down needs a fresh classification (not a task reused from the last prompt) and the
+* Down needs a fresh classification (not a task reused from the last prompt, unless
+  only the effort changes) and the
   same recommendation on two prompts in a row -- the classifier reads the prompt
   together with the assistant's previous message, and one bad guess must not be able
   to cheapen the seat on its own. A move down that is cheap to undo -- effort only, or
@@ -90,9 +91,15 @@ def down_hold(fresh: bool, confidence: float | None, difficulty: float, *,
     `plan` has. An unknown context size is priced as a large one -- the cheap path is
     for moves known to be cheap.
     """
+    if not model_change:
+        # An effort change keeps the prompt cache (checked on a real transcript) and a
+        # wrong one is undone by the next prompt, so even a task reused from the last
+        # prompt is good enough -- short replies ("ok", "yes") would otherwise never
+        # let the effort down.
+        return None
     if not fresh or confidence is None:
         return "a move down needs a fresh classification"
-    if not model_change or (tokens is not None and tokens < DOWN_CHEAP_TOKENS):
+    if tokens is not None and tokens < DOWN_CHEAP_TOKENS:
         return None
     if confidence < DOWN_MIN_CONFIDENCE:
         return f"a model switch down needs kind confidence >= {DOWN_MIN_CONFIDENCE}"
