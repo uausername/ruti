@@ -801,6 +801,7 @@ def mode(ctx: click.Context, as_json: bool) -> None:
     ui.say(f"  flow   : {'[ok]on[/ok]' if state['flow'] else '[muted]off[/muted]'}")
     ui.say(f"  manager: {'[ok]on[/ok]' if state['manager'] else '[muted]off[/muted]'}")
     ui.say(f"  timemachine: {'[ok]on[/ok]' if state['timemachine'] else '[muted]off[/muted]'}")
+    ui.say(f"  eff+   : {'[ok]on[/ok]' if state['effplus'] else '[muted]off[/muted]'}")
     summary = modes_mod.active_summary(state)
     if summary:
         ui.say(f"\n[muted]active: {summary}[/muted]")
@@ -929,6 +930,19 @@ def mode_manager(state: str) -> None:
     ui.say("[muted]the model switch itself is the user's: no hook can change it, and a "
            "switch re-reads the context uncached, so a change of model is asked for at "
            "the next boundary[/muted]")
+
+
+@mode.command("eff+")
+@click.argument("state", type=click.Choice(["on", "off"]))
+def mode_effplus(state: str) -> None:
+    """Think harder. On: every seat the manager recommends gets one effort level more --
+    medium becomes high, high xhigh, xhigh max -- while the window still permits it
+    (a seat the band blocks is not bumped). Costs window; `ruti defaults set effplus=on`
+    makes it the default."""
+    session_id = _session_or_die()
+    modes_mod.set_effplus(session_id, state == "on")
+    ui.ok("eff+ on -- recommended seats get one effort level more" if state == "on"
+          else "eff+ off")
 
 
 @mode.command("timemachine")

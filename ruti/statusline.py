@@ -386,6 +386,9 @@ def render(payload: dict[str, Any], snapshot: quota.Quota) -> str:
                 mark = "⚡" if auto == "on" else "~" if auto == "shadow" else ""
                 mode_segments.append(_colour("mgr" + mark, "36"))
 
+            if active.get("effplus"):
+                mode_segments.append(_colour("eff+", "35"))
+
             # Shown always, not only while active, unlike the modes above: the whole
             # point is to be able to tell "off" from "silent because irrelevant" at a
             # glance, for the one toggle that quietly changes what `route --describe`
