@@ -297,3 +297,11 @@ def test_an_unrelated_move_down_is_still_held_after_a_switch_was_applied():
     auto_seat._mark_applied("s1", "opus/low", 0.0)  # long expired
     out = auto_seat.plan("s1", LONG, classify=guess(), now=10_000.0)
     assert out["action"] == {} and "completing" not in out
+
+
+def test_a_move_held_for_want_of_a_second_prompt_is_yellow_not_cyan():
+    auto_seat.set_mode("on")
+    sit("claude-opus-5-5", "high")
+    out = auto_seat.plan("s1", LONG, classify=guess("implement", 0.5, 0.75))
+    assert out["apply"] is False and "two prompts" in out["held"]
+    assert manager.recommended_verdict("s1") == "held"

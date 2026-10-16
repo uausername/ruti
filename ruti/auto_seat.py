@@ -237,6 +237,9 @@ def plan(session_id: str, prompt: str, *, classify: Callable[..., Any] | None = 
                 return result
             if previous != best.seat.label():
                 result["held"] = "a move down needs the same advice on two prompts in a row"
+                # Held means the status line must not paint it as a move the manager is
+                # about to make (cyan) -- it is not, until the next fresh prompt agrees.
+                manager.remember_recommendation(session_id, best.seat, "held")
                 return result
 
         action: dict[str, str] = {}
