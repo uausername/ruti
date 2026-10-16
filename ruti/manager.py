@@ -492,6 +492,9 @@ def advise(*, kind: str | None, difficulty: float | None, session_id: str | None
             effort_first = (best.seat.label(), tokens or 0)
             best = same[0]
 
+    if session_modes.get("effplus") and best is not None:
+        best = _one_effort_up(best, eligible)
+
     return Advice(
         ranked=eligible + blocked,
         best=best,
@@ -503,6 +506,19 @@ def advise(*, kind: str | None, difficulty: float | None, session_id: str | None
         band=band,
         tokens=tokens,
     )
+
+
+def _one_effort_up(best: Ranked, eligible: list[Ranked]) -> Ranked:
+    """`eff+`: the same model one effort level higher, when that seat is allowed in this
+    band. Haiku has no effort, and `max` has no level above it."""
+    efforts = list(EFFORTS)
+    if best.seat.effort not in efforts[:-1]:
+        return best
+    step = efforts[efforts.index(best.seat.effort) + 1]
+    for ranked in eligible:
+        if ranked.seat.model == best.seat.model and ranked.seat.effort == step:
+            return ranked
+    return best
 
 
 def advisor_model(settings_path: Path | None = None) -> str | None:

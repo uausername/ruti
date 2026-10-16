@@ -346,3 +346,21 @@ def test_hard_work_asks_for_more_effort_while_the_window_allows_it():
     assert effort(quota.YELLOW, 0.8).label() == "opus/high"
     # ORANGE gets no Opus (wait mode off): the best it can do is Sonnet at high.
     assert effort(quota.ORANGE, 0.9).label() == "sonnet/high"
+
+
+def test_eff_plus_raises_every_recommended_effort_by_one_level(monkeypatch):
+    from ruti import modes
+
+    def seat(band, difficulty, session="s1"):
+        monkeypatch.setattr(manager.quota, "load", lambda: Snap(band))
+        return manager.advise(kind="implement", difficulty=difficulty,
+                              session_id=session).best.seat.label()
+
+    assert seat(quota.GREEN, 0.5) == "opus/medium"
+    modes.set_effplus("s1", True)
+    assert seat(quota.GREEN, 0.5) == "opus/high"
+    assert seat(quota.GREEN, 0.75) == "opus/xhigh"
+    assert seat(quota.GREEN, 0.9) == "opus/max"
+    # A seat the band does not allow is not bumped into: ORANGE caps Sonnet at high.
+    assert seat(quota.ORANGE, 0.65) == "sonnet/high"
+    assert seat(quota.GREEN, 0.5, session="other") == "opus/medium"

@@ -28,7 +28,7 @@ session:
                       "free": "off" | "soft" | "hard", "jev": bool,
                       "council": "off" | "on" | "auto", "wait": bool,
                       "wait_state": {...}, "flow": bool, "flow_state": {...},
-                      "manager": bool, "timemachine": bool, "at": <unix ts>}}
+                      "manager": bool, "timemachine": bool, "effplus": bool, "at": <unix ts>}}
 
 `at` is refreshed on every write so `sessions.prune()` does not discard an active
 mode as if it were a stale toggle from a session long over.
@@ -64,9 +64,10 @@ COUNCIL_LEVELS: tuple[str, ...] = ("off", "on", "auto")
 # of the toolchain shares.
 DEFAULTS: dict[str, Any] = {"coding": False, "free": "off", "jev": True,
                             "council": "off", "wait": False, "flow": False,
-                            "manager": False, "timemachine": True}
+                            "manager": False, "timemachine": True, "effplus": False}
 
-BOOL_MODES: tuple[str, ...] = ("coding", "jev", "wait", "flow", "manager", "timemachine")
+BOOL_MODES: tuple[str, ...] = ("coding", "jev", "wait", "flow", "manager", "timemachine",
+                               "effplus")
 _LEVELS: dict[str, tuple[str, ...]] = {"free": FREE_LEVELS, "council": COUNCIL_LEVELS}
 _TRUE, _FALSE = ("on", "true", "1", "yes"), ("off", "false", "0", "no")
 
@@ -166,6 +167,7 @@ def current(session_id: str | None) -> dict[str, Any]:
         "flow": bool(record.get("flow", defaults["flow"])),
         "manager": bool(record.get("manager", defaults["manager"])),
         "timemachine": bool(record.get("timemachine", defaults["timemachine"])),
+        "effplus": bool(record.get("effplus", defaults["effplus"])),
     }
 
 
@@ -221,6 +223,10 @@ def set_jev(session_id: str, on: bool) -> None:
 
 def set_manager(session_id: str, on: bool) -> None:
     _update(session_id, "manager", bool(on))
+
+
+def set_effplus(session_id: str, on: bool) -> None:
+    _update(session_id, "effplus", bool(on))
 
 
 def set_timemachine(session_id: str, on: bool) -> None:
@@ -305,6 +311,8 @@ def active_summary(modes: dict[str, Any]) -> str:
         parts.append("flow")
     if modes.get("manager"):
         parts.append("manager")
+    if modes.get("effplus"):
+        parts.append("eff+")
     return ", ".join(parts)
 
 
