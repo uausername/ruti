@@ -366,5 +366,6 @@ def test_eff_plus_raises_every_recommended_effort_by_one_level(monkeypatch):
     assert seat(quota.ORANGE, 0.65) == "sonnet/high"
     # Where Opus is allowed, eff+ takes it over Sonnet: YELLOW caps Opus at high.
     assert seat(quota.YELLOW, 0.65) == "opus/high"
-    assert seat(quota.YELLOW, 0.5) == "opus/high"
+    # Only a Sonnet that is already at high: below that eff+ just adds a level.
+    assert seat(quota.YELLOW, 0.5) == "sonnet/high"
     assert seat(quota.GREEN, 0.5, session="other") == "opus/medium"
