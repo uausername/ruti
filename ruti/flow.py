@@ -747,4 +747,13 @@ def prompt_note(session_id: str | None) -> str:
     if used is not None:
         line += (f" Context now: {used:.0f}% used, as the status line measures it -- trust "
                  "this over your own token count; do not hand off before you are asked.")
+    if used is None or used < FLOW_AT:
+        # Seen live (haccp, 2026-10-17): at 44% the manager stopped taking work
+        # "to leave room" and ended the turn to wait for the threshold -- which
+        # never comes, because only work fills the context. The handoff is the
+        # stop; below it the queue keeps running.
+        line += (f" Until the {FLOW_AT:.0f}% ask, keep working: take the next task from "
+                 "the queue rather than ending the turn to wait for it -- the context "
+                 "only grows while you work, so stopping short of the line is idling, "
+                 "not caution. A step cut off by the ask goes into the handoff.")
     return line
