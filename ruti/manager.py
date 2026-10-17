@@ -509,16 +509,28 @@ def advise(*, kind: str | None, difficulty: float | None, session_id: str | None
 
 
 def _one_effort_up(best: Ranked, eligible: list[Ranked]) -> Ranked:
-    """`eff+`: the same model one effort level higher, when that seat is allowed in this
-    band. Haiku has no effort, and `max` has no level above it."""
+    """`eff+`: one effort level higher, and Opus rather than Sonnet where the band allows.
+
+    The same model first: the seat one level up, when it is allowed in this band (Haiku
+    has no effort, `max` has no level above it). Then a Sonnet seat is swapped for the
+    Opus one at the highest effort the band permits that is no higher than the bumped
+    effort -- and only if that is no lower than the effort it replaces, so a band that
+    allows Opus up to medium never turns `sonnet/high` into `opus/medium`.
+    """
     efforts = list(EFFORTS)
-    if best.seat.effort not in efforts[:-1]:
-        return best
-    step = efforts[efforts.index(best.seat.effort) + 1]
-    for ranked in eligible:
-        if ranked.seat.model == best.seat.model and ranked.seat.effort == step:
-            return ranked
-    return best
+    start = efforts.index(best.seat.effort) if best.seat.effort in efforts else None
+    bumped = best
+    if start is not None and start < len(efforts) - 1:
+        bumped = next((r for r in eligible if r.seat.model == best.seat.model
+                       and r.seat.effort == efforts[start + 1]), best)
+    if best.seat.model == "sonnet" and start is not None:
+        ceiling = efforts.index(bumped.seat.effort)
+        opus = [r for r in eligible if r.seat.model == "opus"
+                and r.seat.effort in efforts and efforts.index(r.seat.effort) <= ceiling
+                and efforts.index(r.seat.effort) >= start]
+        if opus:
+            return max(opus, key=lambda r: efforts.index(r.seat.effort))
+    return bumped
 
 
 def advisor_model(settings_path: Path | None = None) -> str | None:
