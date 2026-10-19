@@ -619,6 +619,14 @@ def prompt_hint(session_id: str | None, kind: str, kind_confidence: float,
         # the work is, and a recommendation that displaces the answer gets ignored. The
         # `systemMessage` is the belt to this braces, since it was not shown in a live
         # CLI session at all.
+        # Why the move is not made for the user, on the line itself: the bare commands
+        # read as "the manager is about to do this", and the user asked to see the hold.
+        why = (f"auto-seat will not make this move itself: {held}" if held
+               else f"left for the next boundary: {advice.switch['reason']}"
+               if verdict == "boundary" else None)
+        line = ("`Recommendation: <command> then <command> -- <why>`, where <why> says "
+                f"briefly why it is not switched automatically ({why})" if why
+                else "`Recommendation: <command> then <command>`")
         note = (f"ruti manager: {kind} work -> {best.seat.label()} (now {now}); "
                 f"{advice.switch['reason']}. "
                 + (f"Auto-seat will not make this move itself ({held}); the user switches if they agree, you cannot. "
@@ -626,7 +634,7 @@ def prompt_hint(session_id: str | None, kind: str, kind_confidence: float,
                 + "Make this "
                 "the LAST line of your reply -- after everything else, nothing after it "
                 "-- in the user's language, each command in its own code span: "
-                "`Recommendation: <command> then <command>`. Say it every reply until "
+                f"{line}. Say it every reply until "
                 "the seat matches; it is recomputed for each prompt, so use exactly the "
                 f"commands given here, not an earlier one.\n{commands}")
         return note, (message if changed else None)

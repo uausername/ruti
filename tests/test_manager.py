@@ -321,6 +321,20 @@ def test_the_hint_says_auto_seat_will_not_make_a_down_move(monkeypatch):
     assert "Auto-seat will not make this move itself" in note
     assert "switch yourself if you agree" in shown
     assert manager.recommended_verdict("s1") == "held"
+    # The hold goes on the recommendation line itself, not only in the note above it.
+    assert "then <command> -- <why>`" in note
+    assert "auto-seat will not make this move itself: a move down needs" in note
+
+
+def test_a_move_the_manager_makes_itself_has_no_why_on_its_line(monkeypatch):
+    from ruti import auto_seat
+    monkeypatch.setattr(manager.quota, "load", lambda: Snap(quota.YELLOW))
+    modes.set_manager("s1", True)
+    auto_seat.set_mode("on")
+    manager.record_seat("s1", seated("claude-opus-5-5", "high", 10_000))
+    note, _shown = manager.prompt_hint("s1", "implement", 0.75, 0.5, fresh=True)
+    assert "`Recommendation: <command> then <command>`" in note
+    assert "<why>" not in note
 
 
 def test_the_hint_does_not_hold_a_cheap_down_move_on_a_fresh_classification(monkeypatch):
