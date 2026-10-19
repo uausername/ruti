@@ -399,6 +399,14 @@ def test_the_prompt_line_says_how_full_the_context_is():
     assert "Context now: 16% used" in flow.prompt_note(SID)
 
 
+def test_below_the_line_the_prompt_line_says_keep_working():
+    # Not "leave room": below the ask, stopping early only stalls the queue.
+    on(44)
+    assert "keep working" in flow.prompt_note(SID)
+    on(55)
+    assert "keep working" not in flow.prompt_note(SID)
+
+
 # ------------------------------------------- what the new session inherits (live finds)
 
 
