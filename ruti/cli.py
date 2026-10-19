@@ -603,6 +603,28 @@ def on() -> None:
         ui.say("[muted]ruti was already enabled for this session[/muted]")
 
 
+@main.group("quota")
+def quota_group() -> None:
+    """The subscription window readings ruti keeps."""
+
+
+@quota_group.command("reset")
+@click.argument("which", type=click.Choice(["week", "five-hour", "all"]), default="week")
+def quota_reset(which: str) -> None:
+    """Forget a window's stored reading, e.g. after the weekly limit was reset early.
+
+    ruti ignores a lower reading of a window it already holds, since usage never falls
+    inside one; a window reset early keeps its end time and so looks like that. The next
+    status-line repaint (after your next message) is then taken as it is."""
+    names = {"week": ("seven_day",), "five-hour": ("five_hour",),
+             "all": ("five_hour", "seven_day")}[which]
+    dropped = quota.forget(*names)
+    if dropped:
+        ui.ok(f"forgot {', '.join(dropped)}; the next message refills it from the status line")
+    else:
+        ui.say("  nothing stored for that window")
+
+
 # ------------------------------------------------------------------------ seat auto
 
 

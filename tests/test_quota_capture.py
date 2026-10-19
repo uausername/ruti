@@ -93,3 +93,17 @@ def test_a_reading_of_an_older_window_is_dropped():
     old = {"session_id": "s2", "rate_limits": {
         "five_hour": {"used_percentage": 90.0, "resets_at": time.time() - 600}}}
     assert quota.capture(old).five_hour.used_percentage == 10.0
+
+
+def test_a_window_reset_early_is_refused_until_it_is_forgotten():
+    resets = time.time() + 86400
+    quota.capture({"rate_limits": {"five_hour": {"used_percentage": 20, "resets_at": time.time() + 3600},
+                                   "seven_day": {"used_percentage": 94, "resets_at": resets}}})
+    # The weekly limit was reset early: same end time, usage back near zero.
+    after = {"rate_limits": {"five_hour": {"used_percentage": 21, "resets_at": time.time() + 3600},
+                             "seven_day": {"used_percentage": 1, "resets_at": resets}}}
+    assert quota.capture(after).seven_day.used_percentage == 94
+    assert quota.forget("seven_day") == ["seven_day"]
+    assert quota.forget("seven_day") == []
+    assert quota.load().seven_day is None and quota.load().five_hour is not None
+    assert quota.capture(after).seven_day.used_percentage == 1

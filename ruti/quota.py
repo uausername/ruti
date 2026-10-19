@@ -483,3 +483,20 @@ def capture(payload: dict[str, Any]) -> Quota:
     }
     write_json(QUOTA_FILE, record)
     return load()
+
+
+def forget(*windows: str) -> list[str]:
+    """Drop the stored reading of the named windows (`five_hour`, `seven_day`).
+
+    `capture` throws away a lower reading of a window it already holds, because usage
+    never falls inside one -- which is also what keeps a window that was reset early (same
+    `resets_at`, usage back near zero) out for good. Forgetting the old reading is how the
+    next status-line repaint is taken as it is. Returns what was actually dropped.
+    """
+    record = read_json(QUOTA_FILE, default={}) or {}
+    if not isinstance(record, dict):
+        return []
+    dropped = [name for name in windows if record.pop(name, None) is not None]
+    if dropped:
+        write_json(QUOTA_FILE, record)
+    return dropped
