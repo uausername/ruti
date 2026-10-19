@@ -21,6 +21,13 @@ import type { Register } from 'claude-code'
 const LOG_DIR = 'C:/Users/Lenovo Gaming/.claude/dev-mods'
 let LOG = `${LOG_DIR}/ruti-seat.log`
 const WITH_1M = new Set(['sonnet', 'opus', 'fable'])
+// `/effort` from a mod raises the "Change effort level?" dialog a typed one does, while
+// the cache is warm on a model other than Fable. On Opus 5.5 and Sonnet 5.5 its warning
+// is wrong (the cache survives an effort change), so the helper answers it: it reads the
+// session's screen and presses `1` only on that dialog, for that level.
+const HELPER = 'C:/mycode/ruti/mods/ruti-seat/effort_confirm.py'
+const HELPER_TIMEOUT_S = 8
+const DIALOG_MODELS = ['opus', 'sonnet']
 
 type Plan = { apply?: boolean; action?: { model?: string; effort?: string }; best?: string; mode?: string }
 
@@ -124,9 +131,27 @@ export const register: Register = on => {
       pendingEffort = null
       try {
         const kept = await snapshotDefaults($)
+        // Started before `/effort`, awaited after it: the command does not return while its
+        // dialog is up, and the helper is what takes the dialog down. Nothing may outlive
+        // the hook -- a `.then` on `$` after it returned crashed the hooks worker.
+        const rows = await $.config.list()
+        const model = String(rows.find(r => r.key === 'model')?.value ?? '').toLowerCase()
+        const helper = DIALOG_MODELS.some(m => model.includes(m))
+          ? $.process.run(['python', '-I', HELPER, level, String(HELPER_TIMEOUT_S)], {
+              timeoutMs: (HELPER_TIMEOUT_S + 5) * 1000,
+            })
+          : null
         const result = await $.command.run({ command: 'effort', args: level })
         await restoreDefaults($, kept, `/effort ${level}`)
         await note($, `/effort ${level}: ${JSON.stringify(result)}`)
+        if (helper) {
+          try {
+            const run = await helper
+            await note($, `effort_confirm (${model}): ${run.stdout.trim() || `exit ${run.exitCode}`}`)
+          } catch (err) {
+            await note($, `effort_confirm failed: ${String(err)}`)
+          }
+        }
         $.ui.toast(`ruti: effort -> ${level}`)
       } catch (err) {
         await note($, `/effort ${level} failed: ${String(err)}`)
