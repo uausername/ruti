@@ -23,7 +23,8 @@ import json
 import sys
 import time
 
-from ruti import context_watch, jev, ledger, manager, modes, prompt_context, quota, sessions
+from ruti import (context_watch, jev, ledger, manager, modes, prompt_context, quota,
+                  seat_floor, sessions)
 from ruti.config import STATE_ROOT, read_json, write_json
 
 MEMO_FILE = STATE_ROOT / "hook-memo.json"
@@ -165,8 +166,17 @@ def _build(prompt: str | None, cwd: str | None,
                 # The task goes on; the ranking is still recomputed against the band,
                 # the seat and the context as they are right now.
                 kind, difficulty, confidence = task[0], task[1], 1.0
+        floor = seat_floor.for_prompt(
+            session_id, prompt,
+            prompt_context.previous_reply(prompt_context.transcript_for(session_id, transcript),
+                                          prompt),
+            project=cwd)
+        if kind is None and floor is not None:
+            # A project rule needs no classification: the work is named by what it touches.
+            kind, difficulty, confidence = "implement", 0.5, 0.0
         if kind is not None:
-            seat_hint = manager.prompt_hint(session_id, kind, confidence, difficulty, fresh=fresh)
+            seat_hint = manager.prompt_hint(session_id, kind, confidence, difficulty, fresh=fresh,
+                                            floor=floor)
             if seat_hint is not None:
                 line += "\n" + seat_hint[0]
                 user_message = seat_hint[1]

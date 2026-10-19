@@ -32,7 +32,7 @@ import json
 import time
 from typing import Any, Callable
 
-from . import manager, modes, prompt_context
+from . import manager, modes, prompt_context, seat_floor
 from .config import read_json, write_json
 
 MODES = ("off", "shadow", "on")
@@ -159,6 +159,32 @@ def _journal(row: dict[str, Any]) -> None:
         pass
 
 
+# What the classifier last said for each session, kept only for the journal: a prompt that
+# was not judged the way it should have been cannot be explained from the verdict alone.
+_last_guess: dict[str, Any] = {}
+
+
+def _what_it_saw(session_id: str, prompt: str) -> dict[str, Any]:
+    """The tail of what the classifier was shown with the prompt, and what it answered."""
+    try:
+        context = prompt_context.previous_reply(prompt_context.transcript_for(session_id), prompt)
+    except Exception:
+        context = None
+    guess = _last_guess.pop(session_id, None)
+    said = None
+    try:
+        if guess is not None:
+            top = sorted((getattr(guess, "probabilities", None) or {}).items(),
+                         key=lambda kv: -kv[1])[:3]
+            said = {"kind": guess.kind, "confidence": round(guess.kind_confidence, 2),
+                    "difficulty": round(guess.difficulty, 2),
+                    "top": {kind: round(p, 2) for kind, p in top}}
+    except Exception:  # the journal is a convenience; it must not break the plan
+        said = None
+    return {"context_chars": len(context or ""), "context_tail": (context or "")[-300:],
+            "classifier": said}
+
+
 def _classify(session_id: str, prompt: str,
               classify: Callable[..., Any] | None) -> tuple[str, float, float | None, str] | None:
     """(kind, difficulty, kind confidence or None, source), or None when nothing is known.
@@ -167,6 +193,7 @@ def _classify(session_id: str, prompt: str,
     keep a seat from dropping underpowered, and not good enough to cheapen one.
     """
     guess = prompt_context.classify(session_id, prompt, classify=classify)
+    _last_guess[session_id] = guess
     if guess is not None and guess.kind_confidence >= manager.KIND_CONFIDENCE:
         manager.remember_task(session_id, guess.kind, guess.difficulty)
         return guess.kind, guess.difficulty, guess.kind_confidence, "fresh"
@@ -198,9 +225,13 @@ def plan(session_id: str, prompt: str, *, classify: Callable[..., Any] | None = 
             result["held"] = "no task to judge: nothing classified and nothing reused"
             return result
         kind, difficulty, confidence, source = task
+        floor = seat_floor.for_prompt(
+            session_id, prompt,
+            prompt_context.previous_reply(prompt_context.transcript_for(session_id), prompt))
         advice = manager.advise(kind=kind, difficulty=difficulty, session_id=session_id,
-                                difficulty_source="jev")
+                                difficulty_source="jev", floor=floor)
         best, current = advice.best, advice.current
+        result["floor"] = advice.task.get("floor")
         verdict = advice.switch.get("verdict")
         result.update({
             "task": {"kind": kind, "difficulty": round(difficulty, 2),
@@ -264,4 +295,5 @@ def plan(session_id: str, prompt: str, *, classify: Callable[..., Any] | None = 
         return result
     finally:
         _journal({"at": moment, "session": session_id, "prompt_chars": len(prompt or ""),
+                  **_what_it_saw(session_id, prompt),
                   **{key: value for key, value in result.items() if key != "session"}})

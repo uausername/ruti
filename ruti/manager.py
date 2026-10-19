@@ -327,12 +327,14 @@ def _render(entry: Ranked) -> dict[str, Any]:
 
 
 def _blockers(seat: Seat, band: str, *, manager_only: bool, allow_fable: bool,
-              wait: bool) -> list[str]:
+              wait: bool, floor: Any = None) -> list[str]:
     """Why this seat may not manage this session, in the order the policy states it."""
     if band == quota.CRITICAL:
         return ["CRITICAL: stop, hand off"]
 
     out: list[str] = []
+    if floor is not None and not floor.allows(seat.model):
+        out.append(f"project rule: {floor.why}")
     if seat.model == "fable" and not allow_fable:
         out.append("Fable bills usage credits, which is money; pass --fable to consider it")
     if manager_only and seat.model not in ("opus", "fable"):
@@ -369,7 +371,7 @@ def _blockers(seat: Seat, band: str, *, manager_only: bool, allow_fable: bool,
 
 
 def _rank(seat: Seat, band: str, required: float, *, manager_only: bool,
-          allow_fable: bool, wait: bool) -> Ranked:
+          allow_fable: bool, wait: bool, floor: Any = None) -> Ranked:
     cap = capability(seat)
     cost = burn(seat)
     fit = 1.0 if cap >= required else 1.0 - 3.0 * (required - cap)
@@ -383,7 +385,7 @@ def _rank(seat: Seat, band: str, required: float, *, manager_only: bool,
     entry.reasons.append(f"burn {cost:.2f}x of opus/high")
     entry.reasons.append(BAND_EFFECT.get(band, ""))
     entry.blockers = _blockers(seat, band, manager_only=manager_only,
-                               allow_fable=allow_fable, wait=wait)
+                               allow_fable=allow_fable, wait=wait, floor=floor)
     return entry
 
 
@@ -434,9 +436,12 @@ def _verdict(best: Ranked | None, current: Seat | None, required: float,
 def advise(*, kind: str | None, difficulty: float | None, session_id: str | None,
            snapshot: quota.Quota | None = None, allow_fable: bool = False,
            current: Seat | None = None, context_tokens: int | None = None,
-           difficulty_source: str = "kind") -> Advice:
+           difficulty_source: str = "kind", floor: Any = None) -> Advice:
     """Rank every seat for this task in this band, and say whether to move off the
     one the session is on.
+
+    `floor` is a project's own rule (`seat_floor.Floor`): a model below it is blocked,
+    whatever the task was classified as.
 
     `snapshot`, `current` and `context_tokens` are all read from disk when not passed,
     which is what the CLI and the hook want; a caller that already has one of them
@@ -472,7 +477,7 @@ def advise(*, kind: str | None, difficulty: float | None, session_id: str | None
 
     manager_only = kind in MANAGER_ONLY_KINDS
     ranked = [_rank(seat, band, required, manager_only=manager_only,
-                    allow_fable=allow_fable, wait=wait_on)
+                    allow_fable=allow_fable, wait=wait_on, floor=floor)
               for seat in seats()]
     eligible = sorted((r for r in ranked if r.eligible), key=lambda r: r.score, reverse=True)
     blocked = sorted((r for r in ranked if not r.eligible), key=lambda r: r.score,
@@ -502,7 +507,8 @@ def advise(*, kind: str | None, difficulty: float | None, session_id: str | None
         switch=_verdict(best, current, required, tokens, effort_first, free),
         task={"kind": kind, "difficulty": round(difficulty, 2),
               "required": round(required, 2), "source": difficulty_source,
-              "advisor": advisor, "advisor_relief": ADVISOR_RELIEF if advised else 0.0},
+              "advisor": advisor, "advisor_relief": ADVISOR_RELIEF if advised else 0.0,
+              "floor": f"{floor.model}: {floor.why}" if floor is not None else None},
         band=band,
         tokens=tokens,
     )
@@ -556,7 +562,8 @@ def advisor_model(settings_path: Path | None = None) -> str | None:
 
 
 def prompt_hint(session_id: str | None, kind: str, kind_confidence: float,
-                difficulty: float, fresh: bool = True) -> tuple[str, str | None] | None:
+                difficulty: float, fresh: bool = True,
+                floor: Any = None) -> tuple[str, str | None] | None:
     """(what the model is told, what the user is shown), or None.
 
     Recomputed from scratch on every prompt: the band, the current seat and the size of
@@ -573,7 +580,7 @@ def prompt_hint(session_id: str | None, kind: str, kind_confidence: float,
         if not modes.current(session_id).get("manager"):
             return None
         advice = advise(kind=kind, difficulty=difficulty, session_id=session_id,
-                        difficulty_source="jev")
+                        difficulty_source="jev", floor=floor)
         best = advice.best
         if best is None:
             return None
@@ -629,6 +636,7 @@ def prompt_hint(session_id: str | None, kind: str, kind_confidence: float,
                 else "`Recommendation: <command> then <command>`")
         note = (f"ruti manager: {kind} work -> {best.seat.label()} (now {now}); "
                 f"{advice.switch['reason']}. "
+                + (f"The project's own rule sets the floor: {floor.why}. " if floor else "")
                 + (f"Auto-seat will not make this move itself ({held}); the user switches if they agree, you cannot. "
                    if held else "The user switches; you cannot. ")
                 + "Make this "
@@ -746,6 +754,8 @@ def record_seat(session_id: str | None, payload: dict[str, Any]) -> None:
             "model": model_alias(model.get("id")) or model_alias(model.get("display_name")),
             "effort": (payload.get("effort") or {}).get("level") or None,
             "context_tokens": _context_tokens(payload.get("context_window")),
+            # Where the session runs: a project's own seat rules live there (seat_floor).
+            "cwd": payload.get("cwd") or (payload.get("workspace") or {}).get("current_dir"),
         }
         data = _load()
         previous = data.get(session_id)
@@ -799,6 +809,12 @@ def cache_state(session_id: str | None, window: Any,
     moment = time.time() if now is None else now
     left = CACHE_TTL - (moment - float(since)) if isinstance(since, (int, float)) else CACHE_TTL
     return round(100 * read / total), max(left, 0.0)
+
+
+def session_cwd(session_id: str | None) -> str | None:
+    """The directory the session runs in, as the status line last reported it."""
+    cwd = _entry(session_id).get("cwd")
+    return cwd if isinstance(cwd, str) and cwd else None
 
 
 def current_seat(session_id: str | None) -> Seat | None:

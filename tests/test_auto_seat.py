@@ -369,3 +369,25 @@ def test_eff_plus_raises_every_recommended_effort_by_one_level(monkeypatch):
     # Only a Sonnet that is already at high: below that eff+ just adds a level.
     assert seat(quota.YELLOW, 0.5) == "sonnet/high"
     assert seat(quota.GREEN, 0.5, session="other") == "opus/medium"
+
+
+def test_a_project_floor_moves_a_sonnet_seat_up_and_is_journalled(tmp_path, monkeypatch):
+    project = tmp_path / "proj"
+    (project / ".ruti").mkdir(parents=True)
+    (project / ".ruti" / "seat-floor.json").write_text(json.dumps(
+        {"floors": [{"model": "opus", "why": "migrations are Opus work",
+                     "match": ["supabase/migrations"]}]}), encoding="utf-8")
+    journal = tmp_path / "auto-seat.jsonl"
+    monkeypatch.setattr(auto_seat, "_journal_file", lambda: journal)
+    auto_seat.set_mode("on")
+    manager.record_seat("s1", {**seated("claude-sonnet-5-5", "medium", 10_000),
+                               "cwd": str(project)})
+    # Classified as plain implementation work, which on its own is a Sonnet seat.
+    out = auto_seat.plan("s1", LONG + " apply supabase/migrations/0082_x.sql",
+                         classify=guess("implement", 0.3, 0.9))
+    assert out["apply"] is True and out["action"]["model"] == "opus"
+    assert out["floor"] == "opus: migrations are Opus work"
+    row = json.loads(journal.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["classifier"]["kind"] == "implement"
+    assert row["floor"] == "opus: migrations are Opus work"
+    assert "context_tail" in row
