@@ -114,6 +114,15 @@ def test_once_handed_off_every_other_tool_is_refused_whatever_the_context():
     assert flow.pre_tool_use(SID, tool("Bash", command="ruti mode flow off")) is None
 
 
+def test_once_handed_off_a_goal_is_told_how_to_let_the_session_stop():
+    # A `/goal` would keep this session working on a task the next one now holds.
+    on(30)
+    flow.write_handoff(SID, "Goal: x", "C:/work")
+    reason = flow.pre_tool_use(SID, tool("Edit", file_path="x"))[
+        "hookSpecificOutput"]["permissionDecisionReason"]
+    assert "/goal" in reason and "flow 1/5" in reason and "work here is finished" in reason
+
+
 # ------------------------------------------------------------------ the handoff
 
 

@@ -83,8 +83,49 @@ async function note($: any, line: string): Promise<void> {
   try { await $.fs.write(LOG, lines.join('\n') + '\n') } catch { /* the log is a convenience */ }
 }
 
+// A `/goal` set in a session keeps it working after `ruti flow handoff` has passed the task
+// to a new one, so the goal is cleared once the handoff is written. `ruti flow handoff`
+// prints this line only for a handoff it accepted; a refused one (no valid title) does not.
+const HANDOFF_CALL = /\bruti(\.exe)?\s+flow\s+handoff\b/
+const HANDOFF_WRITTEN = 'handoff written:'
+
+// `/goal clear`, or why it did not go through. A command refused mid-turn may come back
+// as an error rather than throw, so anything but an empty result is treated as not done.
+async function clearGoal($: any, when: string): Promise<boolean> {
+  try {
+    const result = await $.command.run({ command: 'goal', args: 'clear' })
+    const done = !result || Object.keys(result).length === 0
+    await note($, `/goal clear (${when}): ${JSON.stringify(result)}`)
+    if (done) $.ui.toast('ruti: goal cleared after the flow handoff')
+    return done
+  } catch (err) {
+    await note($, `/goal clear (${when}) failed: ${String(err)}`)
+    return false
+  }
+}
+
 export const register: Register = on => {
   let pendingEffort: string | null = null
+  let goalToClear = false
+
+  on('tool.call', async ($, e, next) => {
+    const result = await next(e)
+    try {
+      const args = e as unknown as Record<string, unknown>
+      const command = typeof args.command === 'string' ? args.command : ''
+      if (goalToClear) {
+        goalToClear = !(await clearGoal($, `retry on ${String(args.tool)}`))
+      } else if (HANDOFF_CALL.test(command)) {
+        const text = String((result as { text?: unknown })?.text ?? '')
+        if (!(result as { isError?: boolean })?.isError && text.includes(HANDOFF_WRITTEN)) {
+          goalToClear = !(await clearGoal($, 'after handoff'))
+        }
+      }
+    } catch (err) {
+      await note($, `tool.call error: ${String(err)}`)
+    }
+    return result
+  })
 
   on('prompt.submit', async ($, e, next) => {
     // A prompt a plugin or a peer sent is not the user's task; leave the seat alone.
@@ -125,6 +166,7 @@ export const register: Register = on => {
   })
 
   on('turn.complete', async ($, e, next) => {
+    if (goalToClear) goalToClear = !(await clearGoal($, 'turn.complete'))
     if (pendingEffort) {
       await note($, `turn.complete with effort ${pendingEffort} pending: aborted=${String((e as any).isAborted)} reason=${String((e as any).reason)}`)
       const level = pendingEffort
