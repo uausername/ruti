@@ -114,13 +114,20 @@ def test_once_handed_off_every_other_tool_is_refused_whatever_the_context():
     assert flow.pre_tool_use(SID, tool("Bash", command="ruti mode flow off")) is None
 
 
-def test_once_handed_off_a_goal_is_told_how_to_let_the_session_stop():
-    # A `/goal` would keep this session working on a task the next one now holds.
-    on(30)
+def test_once_handed_off_the_session_is_ended_whatever_else_wants_it_to_go_on(
+        tools, monkeypatch):
+    # A `/goal` set before the handoff blocks the stop -- its check reads the moved work as
+    # unfinished. `continue: false` wins over that block, at the launch and on every stop
+    # after it, until `ruti mode flow off` releases the window.
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID)
+    on()
     flow.write_handoff(SID, "Goal: x", "C:/work")
-    reason = flow.pre_tool_use(SID, tool("Edit", file_path="x"))[
-        "hookSpecificOutput"]["permissionDecisionReason"]
-    assert "/goal" in reason and "flow 1/5" in reason and "work here is finished" in reason
+    first = flow.stop(SID, {}, spawn=Spawn())
+    assert first["continue"] is False and first["stopReason"] == first["systemMessage"]
+    assert flow.stop(SID, {}, spawn=Spawn())["continue"] is False
+    modes.set_flow(SID, False)
+    modes.set_flow(SID, True)
+    assert flow.stop(SID, {}, spawn=Spawn()) is None
 
 
 # ------------------------------------------------------------------ the handoff
@@ -166,7 +173,8 @@ def test_stop_opens_the_next_session_exactly_once(tools, monkeypatch):
     assert argv[:3] == ["C:/bin/wt.exe", "-w", "new"]
     assert argv[-2:] == ["-File", str(path.with_suffix(".ps1"))]
     assert "CLAUDE_CODE_SESSION_ID" not in {k.upper() for k in kwargs["env"]}
-    assert flow.stop(SID, {}, spawn=spawn) is None
+    again = flow.stop(SID, {}, spawn=spawn)
+    assert again["continue"] is False and "handed off" in again["stopReason"]
     assert len(spawn.calls) == 1
 
 

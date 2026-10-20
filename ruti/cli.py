@@ -1115,7 +1115,6 @@ def flow_handoff(file_path: str | None, title: str | None, early: str | None) ->
     ui.say("[muted]session name: " + ui.literal(flow_mod.handoff_title(text) or "")
            + " (flow N/5 is added)[/muted]")
     ui.say("[muted]end the turn now -- the Stop hook opens the next session[/muted]")
-    ui.say(ui.literal(flow_mod.goal_note(session_id)))
 
 
 # ---------------------------------------------------------------------------- route

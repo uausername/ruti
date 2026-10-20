@@ -191,32 +191,14 @@ def post_tool_use(session_id: str) -> dict[str, Any] | None:
     }
 
 
-def goal_note(session_id: str) -> str:
-    """What to end the reply with, so a `/goal` set here lets this session stop.
-
-    The goal is judged from the transcript, and its work has moved to the next session,
-    so it can never be met here; without this line it keeps the session working after the
-    hand-off. The `ruti-seat` mod also runs `/goal clear` -- this is the fallback for when
-    it is not loaded or the command is refused.
-    """
-    hop = None
-    handoff = modes.flow_state(session_id).get("handoff")
-    if handoff:
-        meta = read_json(Path(handoff).with_suffix(".json"), default=None)
-        hop = meta.get("hop") if isinstance(meta, dict) else None
-    where = f"flow {hop}/{MAX_HOPS}" if hop else "the next flow session"
-    return (f"If a `/goal` is set in this session, end your reply with this sentence, in "
-            f"the user's language: \"The goal has been handed over to the new session "
-            f"({where}); the work here is finished.\" -- the goal's check reads it, and "
-            "this session can stop instead of working on alongside the new one.")
-
-
 def pre_tool_use(session_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     """Refuse tools once handed off, or past the force line with no handoff yet."""
     if modes.flow_state(session_id).get("handoff"):
         reason = ("ruti flow: the handoff is written -- end your turn now; the next "
                   "session continues from it. (`ruti mode flow off` releases this "
-                  "session and drops a handoff not yet launched.) " + goal_note(session_id))
+                  "session and drops a handoff not yet launched.) A `/goal` set here is not a reason to "
+                  "go on: its work moved with the handoff, and ruti ends this session once "
+                  "the next one is open.")
     else:
         used = context_watch.used(session_id)
         if used is None or used < FORCE_AT:
@@ -500,8 +482,13 @@ def stop(session_id: str, payload: dict[str, Any], *,
     """Open the next session once a handoff exists. Never blocks the stop."""
     state = modes.flow_state(session_id)
     handoff = state.get("handoff")
-    if not handoff or state.get("launched"):
+    if not handoff:
         return None
+    if state.get("launched"):
+        # Already handed off: whatever else wants this session to go on -- a `/goal`,
+        # whose check reads the work as unfinished because it moved -- it ends here.
+        return _end("ruti flow: this session has handed off; the work goes on in the next "
+                    "one. `ruti mode flow off` releases this window.")
     path = Path(handoff)
     meta = read_json(path.with_suffix(".json"), default=None)
     meta = meta if isinstance(meta, dict) else {}
@@ -557,7 +544,14 @@ def stop(session_id: str, payload: dict[str, Any], *,
         message += " Remote Control is on there too."
     if trusted(cwd) is False:
         message += " " + untrusted_note(cwd)
-    return {"systemMessage": message}
+    return _end(message)
+
+
+def _end(message: str) -> dict[str, Any]:
+    """Stop the session for good. `continue: false` wins over another Stop hook's block,
+    which is what a `/goal` set before the handoff returns: its check judges the task
+    unfinished -- it is, in the next session -- and would keep this one working on it."""
+    return {"continue": False, "stopReason": message, "systemMessage": message}
 
 
 def _seat_for(session_id: str, handoff: Path) -> manager.Seat | None:
