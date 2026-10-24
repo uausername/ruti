@@ -125,6 +125,21 @@ async function closeIfHandedOff($: any): Promise<void> {
   }
 }
 
+// In flow mode nobody watches the window: a "You should know" card would wait unread, so
+// ysk_forward.py presses 1 (Learn more), 2 (Chat in main session) and Enter for it.
+const YSK_HELPER = 'C:/mycode/ruti/mods/ruti-seat/ysk_forward.py'
+async function forwardCards($: any): Promise<void> {
+  try {
+    const id = await $.session.id()
+    const flow = await $.process.run(['ruti', 'flow', 'active', '--session', id], { timeoutMs: 8000 })
+    if (!JSON.parse(flow.stdout || '{}').flow) return
+    const run = await $.process.run(['python', '-I', YSK_HELPER], { timeoutMs: 8000 })
+    await note($, `ysk_forward: ${run.stdout.trim() || `exit ${run.exitCode}`}`)
+  } catch (err) {
+    await note($, `ysk_forward failed: ${String(err)}`)
+  }
+}
+
 export const register: Register = on => {
   let pendingEffort: string | null = null
   let goalToClear = false
@@ -192,6 +207,7 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     if (goalToClear) goalToClear = !(await clearGoal($, 'turn.complete'))
+    await forwardCards($)
     if (handedOff) {
       handedOff = false
       await closeIfHandedOff($)

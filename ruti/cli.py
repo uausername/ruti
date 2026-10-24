@@ -1061,6 +1061,14 @@ def flow_may_close(session_id: str | None, wait_s: float) -> None:
     ui.emit_json(verdict)
 
 
+@flow_group.command("active")
+@click.option("--session", "session_id", default=None)
+def flow_active(session_id: str | None) -> None:
+    """JSON: whether flow mode is on for this session (the `ruti-seat` mod asks)."""
+    session_id = session_id or sessions.current_session_id() or ""
+    ui.emit_json({"flow": bool(modes_mod.current(session_id).get("flow"))})
+
+
 @flow_group.command("handoff")
 @click.option("--file", "file_path", type=click.Path(exists=True, dir_okay=False),
               help="Read the handoff from a file instead of stdin.")
