@@ -391,3 +391,22 @@ def test_a_project_floor_moves_a_sonnet_seat_up_and_is_journalled(tmp_path, monk
     assert row["classifier"]["kind"] == "implement"
     assert row["floor"] == "opus: migrations are Opus work"
     assert "context_tail" in row
+
+
+def test_a_project_floor_judges_a_prompt_nothing_classified(tmp_path, monkeypatch):
+    # The prompt hook falls back on the floor when the classifier is unsure and no task
+    # is reused; the mod must too, or the hook recommends a seat the mod never applies.
+    project = tmp_path / "proj"
+    (project / ".ruti").mkdir(parents=True)
+    (project / ".ruti" / "seat-floor.json").write_text(json.dumps(
+        {"floors": [{"model": "opus", "why": "migrations are Opus work",
+                     "match": ["supabase/migrations"]}]}), encoding="utf-8")
+    monkeypatch.setattr(auto_seat, "_journal_file", lambda: tmp_path / "auto-seat.jsonl")
+    auto_seat.set_mode("on")
+    manager.record_seat("s2", {**seated("claude-sonnet-5-5", "medium", 10_000),
+                               "cwd": str(project)})
+    out = auto_seat.plan("s2", LONG + " apply supabase/migrations/0082_x.sql",
+                         classify=guess("implement", 0.3, 0.4))
+    assert out["held"] != "no task to judge: nothing classified and nothing reused"
+    assert out["task"]["source"] == "floor"
+    assert out["apply"] is True and out["action"]["model"] == "opus"

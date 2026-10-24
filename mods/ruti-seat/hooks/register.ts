@@ -129,7 +129,9 @@ export const register: Register = on => {
 
   on('prompt.submit', async ($, e, next) => {
     // A prompt a plugin or a peer sent is not the user's task; leave the seat alone.
-    if (e.origin && (e.origin as { kind?: string }).kind !== 'composer') return next(e)
+    // `bridge` is the user too, typing on the phone or the web through Remote Control.
+    const kind = e.origin ? (e.origin as { kind?: string }).kind : 'composer'
+    if (kind !== 'composer' && kind !== 'bridge') return next(e)
     try {
       const id = await $.session.id()
       LOG = `${LOG_DIR}/ruti-seat-${String(id).slice(0, 8)}.log`

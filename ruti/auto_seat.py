@@ -221,13 +221,18 @@ def plan(session_id: str, prompt: str, *, classify: Callable[..., Any] | None = 
             return result
 
         task = _classify(session_id, prompt, classify)
+        floor = seat_floor.for_prompt(
+            session_id, prompt,
+            prompt_context.previous_reply(prompt_context.transcript_for(session_id), prompt))
+        if task is None and floor is not None:
+            # As the prompt hook does: a project rule needs no classification, the work
+            # is named by what it touches. Without this the hook kept recommending a
+            # seat the mod would never apply ("no task to judge").
+            task = ("implement", 0.5, None, "floor")
         if task is None:
             result["held"] = "no task to judge: nothing classified and nothing reused"
             return result
         kind, difficulty, confidence, source = task
-        floor = seat_floor.for_prompt(
-            session_id, prompt,
-            prompt_context.previous_reply(prompt_context.transcript_for(session_id), prompt))
         advice = manager.advise(kind=kind, difficulty=difficulty, session_id=session_id,
                                 difficulty_source="jev", floor=floor)
         best, current = advice.best, advice.current
