@@ -1042,6 +1042,25 @@ def flow_group() -> None:
     """Flow mode's handoff from one session to the next (see `ruti mode flow`)."""
 
 
+@flow_group.command("may-close")
+@click.option("--session", "session_id", default=None)
+@click.option("--wait", "wait_s", default=0.0, type=float,
+              help="Seconds to wait for the Stop hook to launch the next session.")
+def flow_may_close(session_id: str | None, wait_s: float) -> None:
+    """JSON: whether this handed-off session may close itself (the `ruti-seat` mod asks)."""
+    import time
+
+    from . import flow as flow_mod
+
+    session_id = session_id or sessions.current_session_id() or ""
+    deadline = time.monotonic() + max(0.0, wait_s)
+    verdict = flow_mod.may_close(session_id)
+    while verdict["why"] == "not handed off" and time.monotonic() < deadline:
+        time.sleep(0.5)
+        verdict = flow_mod.may_close(session_id)
+    ui.emit_json(verdict)
+
+
 @flow_group.command("handoff")
 @click.option("--file", "file_path", type=click.Path(exists=True, dir_okay=False),
               help="Read the handoff from a file instead of stdin.")

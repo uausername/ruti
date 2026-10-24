@@ -487,8 +487,10 @@ def stop(session_id: str, payload: dict[str, Any], *,
     if state.get("launched"):
         # Already handed off: whatever else wants this session to go on -- a `/goal`,
         # whose check reads the work as unfinished because it moved -- it ends here.
+        busy = background_work(payload)
+        modes.set_flow_state(session_id, {**state, "busy": busy})
         return _end("ruti flow: this session has handed off; the work goes on in the next "
-                    "one. `ruti mode flow off` releases this window.")
+                    "one. " + close_note(busy))
     path = Path(handoff)
     meta = read_json(path.with_suffix(".json"), default=None)
     meta = meta if isinstance(meta, dict) else {}
@@ -496,7 +498,8 @@ def stop(session_id: str, payload: dict[str, Any], *,
 
     # Marked before launching, not after: a launch that half-worked and a retry on the
     # next stop would put two sessions on the same task.
-    modes.set_flow_state(session_id, {**state, "launched": True})
+    busy = background_work(payload)
+    modes.set_flow_state(session_id, {**state, "launched": True, "busy": busy})
     if hop > MAX_HOPS:
         return {"systemMessage": f"ruti flow: chain limit ({MAX_HOPS} sessions) reached -- "
                                  f"not opening another. The handoff is at {path}."}
@@ -535,7 +538,7 @@ def stop(session_id: str, payload: dict[str, Any], *,
                                  f"handoff is at {path} -- start `claude` in {cwd} and ask "
                                  "it to continue from that file."}
     message = (f"ruti flow: handed off -- a new session is opening in a new window (hop "
-               f"{hop} of {MAX_HOPS}). This window can be closed.")
+               f"{hop} of {MAX_HOPS}). {close_note(busy)}")
     if seat is not None:
         message += f" on {seat.label()}"
     if title:
@@ -545,6 +548,38 @@ def stop(session_id: str, payload: dict[str, Any], *,
     if trusted(cwd) is False:
         message += " " + untrusted_note(cwd)
     return _end(message)
+
+
+def background_work(payload: dict[str, Any]) -> list[str]:
+    """What still runs in this session, from the Stop hook's `background_tasks`: closing
+    the window would kill it (a keep-alive, a dev server, a subagent)."""
+    busy: list[str] = []
+    tasks = payload.get("background_tasks")
+    for task in tasks if isinstance(tasks, list) else []:
+        if not isinstance(task, dict):
+            continue
+        what = task.get("command") or task.get("description") or task.get("id") or "?"
+        busy.append(f"{task.get('type') or 'task'}: {str(what)[:120]}")
+    return busy
+
+
+def close_note(busy: list[str]) -> str:
+    if not busy:
+        return "This window closes itself."
+    return ("This window stays open -- closing it would stop what still runs here: "
+            + "; ".join(busy) + ". Close it yourself once that is no longer needed.")
+
+
+def may_close(session_id: str | None) -> dict[str, Any]:
+    """Whether the `ruti-seat` mod may `/exit` this session: handed off, the next session
+    launched, and nothing left running here (as the last Stop hook saw it)."""
+    state = modes.flow_state(session_id)
+    if not state.get("launched"):
+        return {"close": False, "why": "not handed off"}
+    busy = state.get("busy") or []
+    if busy:
+        return {"close": False, "why": "background work still runs", "busy": busy}
+    return {"close": True, "why": "handed off, nothing running"}
 
 
 def _end(message: str) -> dict[str, Any]:

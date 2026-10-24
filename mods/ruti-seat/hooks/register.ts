@@ -104,21 +104,44 @@ async function clearGoal($: any, when: string): Promise<boolean> {
   }
 }
 
+// Once the handoff is written and the next session open, this one closes itself -- unless
+// the Stop hook saw background work still running here (a keep-alive, a server), which
+// `/exit` would kill. `ruti flow may-close` waits for the Stop hook's launch to land.
+async function closeIfHandedOff($: any): Promise<void> {
+  try {
+    const id = await $.session.id()
+    const run = await $.process.run(['ruti', 'flow', 'may-close', '--session', id, '--wait', '10'],
+      { timeoutMs: 15000 })
+    const verdict = JSON.parse(run.stdout || '{}') as { close?: boolean; why?: string; busy?: string[] }
+    await note($, `flow may-close: ${run.stdout.trim()}`)
+    if (!verdict.close) {
+      if (verdict.busy?.length) $.ui.toast(`ruti flow: window kept open -- still running: ${verdict.busy.join('; ')}`)
+      return
+    }
+    const result = await $.command.run({ command: 'exit', args: '' })
+    await note($, `/exit: ${JSON.stringify(result)}`)
+  } catch (err) {
+    await note($, `flow close failed: ${String(err)}`)
+  }
+}
+
 export const register: Register = on => {
   let pendingEffort: string | null = null
   let goalToClear = false
+  let handedOff = false
 
   on('tool.call', async ($, e, next) => {
     const result = await next(e)
     try {
       const args = e as unknown as Record<string, unknown>
       const command = typeof args.command === 'string' ? args.command : ''
-      if (goalToClear) {
-        goalToClear = !(await clearGoal($, `retry on ${String(args.tool)}`))
-      } else if (HANDOFF_CALL.test(command)) {
+      // A pending `/goal clear` waits for turn.complete: the host refuses command.run here.
+      if (!goalToClear && HANDOFF_CALL.test(command)) {
         const text = String((result as { text?: unknown })?.text ?? '')
         if (!(result as { isError?: boolean })?.isError && text.includes(HANDOFF_WRITTEN)) {
-          goalToClear = !(await clearGoal($, 'after handoff'))
+          handedOff = true
+          // command.run is refused inside tool.call; turn.complete clears it.
+          goalToClear = true
         }
       }
     } catch (err) {
@@ -169,6 +192,11 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     if (goalToClear) goalToClear = !(await clearGoal($, 'turn.complete'))
+    if (handedOff) {
+      handedOff = false
+      await closeIfHandedOff($)
+      return next(e)
+    }
     if (pendingEffort) {
       await note($, `turn.complete with effort ${pendingEffort} pending: aborted=${String((e as any).isAborted)} reason=${String((e as any).reason)}`)
       const level = pendingEffort
