@@ -612,6 +612,15 @@ def prompt_hint(session_id: str | None, kind: str, kind_confidence: float,
 
         changed = remember_recommendation(session_id, best.seat, "held" if held else verdict)
         now = advice.current.label() if advice.current else "unknown"
+        if verdict == "now" and not held:
+            from . import auto_seat
+            if auto_seat.mode() == "on":
+                # The ruti-seat mod makes this move itself when the turn ends; a
+                # `Recommendation:` line for it read as "do this yourself", and the
+                # user kept typing moves that were about to happen anyway.
+                return (f"ruti manager: {kind} work -> {best.seat.label()} (now {now}); "
+                        "auto-seat switches it itself when this turn ends. Do not add a "
+                        "`Recommendation:` line.", None)
         # One command per line: on one line they get pasted together, and
         # `/model sonnet /effort low` is read as a model called "sonnet /effort low".
         commands = "\n".join(f"  {command}"

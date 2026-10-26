@@ -296,6 +296,9 @@ def test_the_hint_is_off_without_manager_mode():
 
 
 def test_the_hint_names_the_seat_shows_it_once_and_then_repeats(monkeypatch):
+    # Auto-seat in shadow: the user makes the move, so the line is asked for.
+    from ruti import auto_seat
+    auto_seat.set_mode("shadow")
     monkeypatch.setattr(manager.quota, "load", lambda: Snap(quota.YELLOW))
     modes.set_manager("s1", True)
     manager.record_seat("s1", seated("claude-opus-5-5", "high", 10_000))
@@ -326,15 +329,17 @@ def test_the_hint_says_auto_seat_will_not_make_a_down_move(monkeypatch):
     assert "auto-seat will not make this move itself: a move down needs" in note
 
 
-def test_a_move_the_manager_makes_itself_has_no_why_on_its_line(monkeypatch):
+def test_a_move_the_manager_makes_itself_asks_for_no_recommendation_line(monkeypatch):
     from ruti import auto_seat
     monkeypatch.setattr(manager.quota, "load", lambda: Snap(quota.YELLOW))
     modes.set_manager("s1", True)
     auto_seat.set_mode("on")
     manager.record_seat("s1", seated("claude-opus-5-5", "high", 10_000))
-    note, _shown = manager.prompt_hint("s1", "implement", 0.75, 0.5, fresh=True)
-    assert "`Recommendation: <command> then <command>`" in note
-    assert "<why>" not in note
+    note, shown = manager.prompt_hint("s1", "implement", 0.75, 0.5, fresh=True)
+    # The mod makes it when the turn ends: no line telling the user to do it too.
+    assert "auto-seat switches it itself" in note
+    assert "Do not add a `Recommendation:` line" in note
+    assert shown is None
 
 
 def test_the_hint_does_not_hold_a_cheap_down_move_on_a_fresh_classification(monkeypatch):
@@ -424,6 +429,9 @@ def test_the_status_line_shows_the_mode_itself_even_with_nothing_pending(monkeyp
 
 
 def test_the_commands_are_on_separate_lines_and_the_model_is_told_to_say_them(monkeypatch):
+    # Auto-seat in shadow: the user makes the move, so the line is asked for.
+    from ruti import auto_seat
+    auto_seat.set_mode("shadow")
     monkeypatch.setattr(manager.quota, "load", lambda: Snap(quota.YELLOW))
     modes.set_manager("s1", True)
     manager.record_seat("s1", seated("claude-opus-5-5", "high", 10_000))
@@ -438,6 +446,9 @@ def test_the_commands_are_on_separate_lines_and_the_model_is_told_to_say_them(mo
 
 
 def test_an_effort_only_note_asks_for_the_effort_alone(monkeypatch):
+    # Auto-seat in shadow: the user makes the move, so the line is asked for.
+    from ruti import auto_seat
+    auto_seat.set_mode("shadow")
     monkeypatch.setattr(manager.quota, "load", lambda: Snap(quota.YELLOW))
     modes.set_manager("s1", True)
     manager.record_seat("s1", seated("claude-opus-5-5", "xhigh", 250_000))
