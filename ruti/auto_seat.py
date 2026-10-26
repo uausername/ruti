@@ -50,8 +50,15 @@ DOWN_MIN_CONFIDENCE = 0.8
 DOWN_CHEAP_TOKENS = 50_000
 
 
-# How long a recommendation counts as "the previous one" for the two-in-a-row rule.
+# How long an applied move counts as unfinished (`completes_applied`).
 STABLE_WINDOW = 1800.0
+
+# How long a recommendation counts as "the previous one" for the two-in-a-row rule. Not
+# STABLE_WINDOW: one agentic turn runs 20-40 minutes here, and turns woken by a
+# background task do not pass through `plan`, so two consecutive prompts are often more
+# than half an hour apart -- with 1800s the previous one had always expired and a move
+# down was held forever (session 2dccf4aa, 2026-10-26: held at 12:08 and again at 12:43).
+PREVIOUS_WINDOW = 4 * 3600.0
 
 
 def _state_file():
@@ -110,7 +117,7 @@ def down_hold(fresh: bool, confidence: float | None, difficulty: float, *,
 
 def _previous(session_id: str, now: float) -> str | None:
     entry = (_state().get("sessions") or {}).get(session_id)
-    if isinstance(entry, dict) and now - float(entry.get("at") or 0) < STABLE_WINDOW:
+    if isinstance(entry, dict) and now - float(entry.get("at") or 0) < PREVIOUS_WINDOW:
         label = entry.get("label")
         return label if isinstance(label, str) else None
     return None
@@ -119,7 +126,7 @@ def _previous(session_id: str, now: float) -> str | None:
 def _remember(session_id: str, label: str, now: float) -> None:
     state = _state()
     sessions = {sid: entry for sid, entry in (state.get("sessions") or {}).items()
-                if isinstance(entry, dict) and now - float(entry.get("at") or 0) < STABLE_WINDOW}
+                if isinstance(entry, dict) and now - float(entry.get("at") or 0) < PREVIOUS_WINDOW}
     sessions[session_id] = {"label": label, "at": now}
     write_json(_state_file(), {**state, "sessions": sessions})
 

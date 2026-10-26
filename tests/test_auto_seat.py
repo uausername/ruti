@@ -74,6 +74,18 @@ def test_a_move_down_waits_for_the_same_advice_twice_in_a_row():
     assert second["apply"] is True and second["action"]
 
 
+def test_the_previous_prompt_still_counts_after_a_long_turn():
+    # A turn here runs 20-40 minutes; the second prompt 35 minutes on is still the next one.
+    import time
+    auto_seat.set_mode("on")
+    sit("claude-opus-5-5", "high")
+    start = time.time()
+    first = auto_seat.plan("s1", LONG, classify=guess(), now=start)
+    assert "two prompts" in first["held"]
+    second = auto_seat.plan("s1", LONG, classify=guess(), now=start + 35 * 60)
+    assert second["apply"] is True and second["action"]
+
+
 def test_a_model_switch_down_over_a_larger_context_needs_a_confident_easy_task():
     auto_seat.set_mode("on")
     sit("claude-opus-5-5", "high", tokens=100_000)
