@@ -26,3 +26,9 @@ def test_the_card_alone_is_not_a_dialog():
 def test_composer_text_needs_text_after_the_prompt_mark():
     assert ysk.composer_text(["╭────╮", "│ > Heads up: the cache costs more │", "╰────╯"])
     assert not ysk.composer_text(["│ >                                  │"])
+
+
+def test_a_card_is_seen_by_its_header_while_its_buttons_are_hidden():
+    lines = ["✦ Heads up · текст", "  ще текст", "↓ 10 more", "❯"]
+    assert ysk.card_up(lines) and not ysk.teaser(lines) and ysk.composer_empty(lines)
+    assert not ysk.composer_empty(["❯ 1 да, 2 да"])

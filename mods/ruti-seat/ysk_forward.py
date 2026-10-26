@@ -21,7 +21,6 @@ import effort_confirm as ec  # noqa: E402
 
 TEASER = ("1: Learn more", "2: Knew this already")
 CARD = "2: Chat in main session"
-LOOK_S = 4.0       # a teaser is either on screen at turn end or not
 EXPLAIN_S = 90.0   # the explanation is written by a model ("One moment...")
 
 
@@ -65,21 +64,6 @@ def wheel_down(inp, out) -> bool:
     return bool(ec.k32.WriteConsoleInputW(inp, record, 1, ctypes.byref(written)))
 
 
-def scroll_to_card(inp, out) -> bool:
-    """The card's buttons sit below its own scroll area and a hidden `2` does not take
-    the key: scroll down a notch at a time until it shows. The wheel only: an arrow key
-    would move the selection of any dialog that came up meanwhile."""
-    for _ in range(SCROLL_STEPS):
-        lines = ec.screen_tail(out)
-        if card(lines):
-            return True
-        if dialog_up(lines):
-            return False
-        wheel_down(inp, out)
-        time.sleep(0.25)
-    return card(ec.screen_tail(out))
-
-
 def wait_for(out, test, seconds: float) -> bool:
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -114,6 +98,79 @@ def teaser(lines): return any(all(t in line for t in TEASER) for line in lines)
 def card(lines): return any(CARD in line for line in lines)
 
 
+LOG = os.path.join(os.path.expanduser("~"), ".claude", "dev-mods", "ysk_forward.log")
+WATCH_S = 60.0     # a card's fork may finish after the turn that started it
+
+
+def log(pid, what: str) -> None:
+    try:
+        with open(LOG, "a", encoding="utf-8") as handle:
+            handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} claude {pid}: {what}\n")
+    except OSError:
+        pass
+
+
+def card_up(lines) -> bool:
+    """Some card is drawn: its buttons, or its header / scroll mark while they are hidden."""
+    return teaser(lines) or card(lines) or any(
+        line.lstrip().startswith("✦") or ("↓" in line and "more" in line) for line in lines)
+
+
+def composer_empty(lines) -> bool:
+    return any(line.strip().strip("│").strip() in (">", "❯") for line in lines)
+
+
+def scroll_to(inp, out, test) -> bool:
+    """The buttons sit below the card's own scroll area and a hidden one does not take
+    its key: scroll down a notch at a time until `test` sees them. The wheel only: an
+    arrow key would move the selection of any dialog that came up meanwhile."""
+    for _ in range(SCROLL_STEPS):
+        lines = ec.screen_tail(out)
+        if test(lines):
+            return True
+        if dialog_up(lines):
+            return False
+        wheel_down(inp, out)
+        time.sleep(0.25)
+    return test(ec.screen_tail(out))
+
+
+def forward(inp, out) -> str:
+    """What it did, or why it stopped; "sent" only when Enter went in."""
+    if not wait_for(out, card_up, WATCH_S):
+        return "no card"
+    if not card(ec.screen_tail(out)):
+        if not scroll_to(inp, out, teaser):
+            return "teaser buttons not found"
+        lines = ec.screen_tail(out)
+        if dialog_up(lines):
+            return "a dialog is up"
+        if not press(inp, "1", 0x31):
+            return "pressing 1 failed"
+        # The explanation is written once "One moment..." is gone from the screen.
+        if not wait_for(out, lambda lines: not any("One moment" in l for l in lines)
+                        and not teaser(lines), EXPLAIN_S):
+            return "the explanation did not come"
+        if not scroll_to(inp, out, card):
+            return "card buttons not found"
+    lines = ec.screen_tail(out)
+    if dialog_up(lines):
+        return "a dialog is up"
+    # The card's text goes into the composer: never on top of what the user is typing,
+    # and only then is "text in the composer" proof that it was the card's.
+    if not composer_empty(lines):
+        return "the composer holds the user's text"
+    if not press(inp, "2", 0x32):
+        return "pressing 2 failed"
+    time.sleep(1.5)
+    lines = ec.screen_tail(out)
+    # Enter only for the card's text in the composer, and with no dialog up: a blind
+    # Enter could approve whatever permission prompt came up meanwhile.
+    if card(lines) or dialog_up(lines) or not composer_text(lines):
+        return "2 did not put the card in the composer"
+    return "sent" if press(inp, chr(13), 0x0D) else "pressing Enter failed"
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         pid = ec.claude_pid()
@@ -126,36 +183,34 @@ def main() -> int:
         print(f"watching claude {pid} for a card")
         return 0
     pid = int(sys.argv[1])
-    ec.k32.FreeConsole()
-    if not ec.k32.AttachConsole(pid):
-        return 1
+    # One watcher per session: every turn end starts one, and two would press twice.
+    lock = os.path.join(os.environ.get("TEMP", "."), f"ysk_forward-{pid}.lock")
     try:
+        if time.time() - os.path.getmtime(lock) < WATCH_S + EXPLAIN_S + 30:
+            return 0
+    except OSError:
+        pass
+    open(lock, "w").close()
+    ec.k32.FreeConsole()
+    try:
+        if not ec.k32.AttachConsole(pid):
+            log(pid, "attach failed")
+            return 1
         out = ec.k32.CreateFileW("CONOUT$", ec.GENERIC_RW, ec.SHARE_RW, None, ec.OPEN_EXISTING, 0, None)
         inp = ec.k32.CreateFileW("CONIN$", ec.GENERIC_RW, ec.SHARE_RW, None, ec.OPEN_EXISTING, 0, None)
         if out in (None, ec.INVALID) or inp in (None, ec.INVALID):
+            log(pid, "no console handles")
             return 1
-        if not card(ec.screen_tail(out)):
-            if not wait_for(out, teaser, LOOK_S) or dialog_up(ec.screen_tail(out)):
-                return 1
-            if not press(inp, "1", 0x31):
-                return 1
-            # The explanation is written once "One moment..." is gone from the screen.
-            if not wait_for(out, lambda lines: not any("One moment" in l for l in lines)
-                            and not teaser(lines), EXPLAIN_S):
-                return 1
-            if not scroll_to_card(inp, out):
-                return 1
-        if dialog_up(ec.screen_tail(out)) or not press(inp, "2", 0x32):
-            return 1
-        time.sleep(1.5)
-        lines = ec.screen_tail(out)
-        # Enter only for the card's text in the composer, and with no dialog up: a blind
-        # Enter could approve whatever permission prompt came up meanwhile.
-        if card(lines) or dialog_up(lines) or not composer_text(lines):
-            return 1
-        return 0 if press(inp, "\r", 0x0D) else 1
+        what = forward(inp, out)
+        if what != "no card":
+            log(pid, what)
+        return 0 if what == "sent" else 1
     finally:
         ec.k32.FreeConsole()
+        try:
+            os.remove(lock)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":
