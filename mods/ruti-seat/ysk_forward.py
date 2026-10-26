@@ -46,13 +46,19 @@ SCROLL_STEPS = 12
 
 
 def wheel_down(inp, out) -> bool:
-    """One notch down, over the card's area (the bottom rows, where it is drawn)."""
+    """One notch down, over the card's text. The wheel scrolls only what is under the
+    pointer: the bottom rows are the status line, where it scrolls nothing (seen on a
+    live card, 2026-10-26). The card's `↓ N more` row marks its scroll area."""
     info = ec.CSBI()
     ec.k32.GetConsoleScreenBufferInfo(out, ctypes.byref(info))
+    lines = ec.screen_tail(out)
+    marks = [i for i, line in enumerate(lines) if "↓" in line and "more" in line]
+    # screen_tail ends at the window's bottom row.
+    from_bottom = len(lines) - 1 - marks[-1] + 2 if marks else len(lines) // 2
     record = (ec.INPUT_RECORD * 1)()
     record[0].EventType = MOUSE_EVENT
     mouse = ctypes.cast(ctypes.byref(record[0].Event), ctypes.POINTER(MOUSE_EVENT_RECORD)).contents
-    mouse.dwMousePosition = ec.COORD(info.dwSize.X // 2, max(info.srWindow.Top, info.srWindow.Bottom - 4))
+    mouse.dwMousePosition = ec.COORD(20, max(info.srWindow.Top, info.srWindow.Bottom - from_bottom))
     mouse.dwButtonState = (-120 & 0xFFFF) << 16  # high word: wheel delta, negative = down
     mouse.dwEventFlags = MOUSE_WHEELED
     written = ec.wt.DWORD()
