@@ -36,6 +36,43 @@ def press(inp, char: str, vk: int) -> bool:
     return bool(ec.k32.WriteConsoleInputW(inp, records, 2, ctypes.byref(written)))
 
 
+class MOUSE_EVENT_RECORD(ctypes.Structure):
+    _fields_ = [("dwMousePosition", ec.COORD), ("dwButtonState", ec.wt.DWORD),
+                ("dwControlKeyState", ec.wt.DWORD), ("dwEventFlags", ec.wt.DWORD)]
+
+
+MOUSE_EVENT, MOUSE_WHEELED = 0x2, 0x4
+SCROLL_STEPS = 12
+
+
+def wheel_down(inp, out) -> bool:
+    """One notch down, over the card's area (the bottom rows, where it is drawn)."""
+    info = ec.CSBI()
+    ec.k32.GetConsoleScreenBufferInfo(out, ctypes.byref(info))
+    record = (ec.INPUT_RECORD * 1)()
+    record[0].EventType = MOUSE_EVENT
+    mouse = ctypes.cast(ctypes.byref(record[0].Event), ctypes.POINTER(MOUSE_EVENT_RECORD)).contents
+    mouse.dwMousePosition = ec.COORD(info.dwSize.X // 2, max(info.srWindow.Top, info.srWindow.Bottom - 4))
+    mouse.dwButtonState = (-120 & 0xFFFF) << 16  # high word: wheel delta, negative = down
+    mouse.dwEventFlags = MOUSE_WHEELED
+    written = ec.wt.DWORD()
+    return bool(ec.k32.WriteConsoleInputW(inp, record, 1, ctypes.byref(written)))
+
+
+def scroll_to_card(inp, out) -> bool:
+    """The card's buttons sit below its own scroll area and a hidden `2` does not take
+    the key: scroll down a notch at a time (the wheel, then the arrow) until it shows."""
+    for step in range(SCROLL_STEPS * 2):
+        if card(ec.screen_tail(out)):
+            return True
+        if step < SCROLL_STEPS:
+            wheel_down(inp, out)
+        else:
+            press(inp, chr(0), 0x28)  # VK_DOWN
+        time.sleep(0.25)
+    return card(ec.screen_tail(out))
+
+
 def wait_for(out, test, seconds: float) -> bool:
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -72,7 +109,11 @@ def main() -> int:
         if not card(ec.screen_tail(out)):
             if not wait_for(out, teaser, LOOK_S) or not press(inp, "1", 0x31):
                 return 1
-            if not wait_for(out, card, EXPLAIN_S):
+            # The explanation is written once "One moment..." is gone from the screen.
+            if not wait_for(out, lambda lines: not any("One moment" in l for l in lines)
+                            and not teaser(lines), EXPLAIN_S):
+                return 1
+            if not scroll_to_card(inp, out):
                 return 1
         if not press(inp, "2", 0x32):
             return 1

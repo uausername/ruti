@@ -80,7 +80,9 @@ CLAUDE_CONFIG = Path.home() / ".claude.json"
 
 # Claude Code's per-process markers outside the `CLAUDE_CODE_` prefix, as found in the
 # environment of its children on this machine.
-_MARKER_NAMES = frozenset({"CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT"})
+# NO_COLOR: Claude Code sets it for its children (tools, hooks); inherited, it turned the
+# whole next session monochrome. One the user set in Windows is kept (persistent names).
+_MARKER_NAMES = frozenset({"CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT", "NO_COLOR"})
 
 # What `claude --permission-mode` accepts, checked against `claude --help` on this
 # machine. Anything else -- "default", or a mode a later version adds -- is left out

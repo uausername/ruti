@@ -22,3 +22,9 @@ def test_background_work_keeps_the_window_open_and_is_named(monkeypatch):
     assert "stays open" in out["stopReason"] and "sleep 86400" in out["stopReason"]
     verdict = flow.may_close("s")
     assert verdict["close"] is False and verdict["busy"] == ["shell: wsl -d Debian -- sleep 86400"]
+
+
+def test_an_inherited_no_color_is_not_handed_to_the_next_session():
+    env = {"NO_COLOR": "1", "PATH": "x", "CLAUDE_CODE_CHILD_SESSION": "1"}
+    assert "NO_COLOR" in flow.session_markers(env, persistent=set())
+    assert "NO_COLOR" not in flow.session_markers(env, persistent={"NO_COLOR"})
