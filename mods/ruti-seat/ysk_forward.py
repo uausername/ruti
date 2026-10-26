@@ -61,14 +61,15 @@ def wheel_down(inp, out) -> bool:
 
 def scroll_to_card(inp, out) -> bool:
     """The card's buttons sit below its own scroll area and a hidden `2` does not take
-    the key: scroll down a notch at a time (the wheel, then the arrow) until it shows."""
-    for step in range(SCROLL_STEPS * 2):
-        if card(ec.screen_tail(out)):
+    the key: scroll down a notch at a time until it shows. The wheel only: an arrow key
+    would move the selection of any dialog that came up meanwhile."""
+    for _ in range(SCROLL_STEPS):
+        lines = ec.screen_tail(out)
+        if card(lines):
             return True
-        if step < SCROLL_STEPS:
-            wheel_down(inp, out)
-        else:
-            press(inp, chr(0), 0x28)  # VK_DOWN
+        if dialog_up(lines):
+            return False
+        wheel_down(inp, out)
         time.sleep(0.25)
     return card(ec.screen_tail(out))
 
@@ -79,6 +80,27 @@ def wait_for(out, test, seconds: float) -> bool:
         if test(ec.screen_tail(out)):
             return True
         time.sleep(ec.POLL)
+    return False
+
+
+# Any of these on screen means a dialog may hold the keys (a permission prompt, a
+# question, the effort dialog): Enter would answer it with its default, an arrow would
+# move its selection. Nothing is pressed while one shows.
+DIALOG_MARKS = ("Do you want", "❯ 1.", "1. Yes", "Esc to cancel", "Allow ",
+                "Change effort level?", "Enter to select", "Enter to confirm")
+
+
+def dialog_up(lines) -> bool:
+    return any(mark in line for line in lines for mark in DIALOG_MARKS)
+
+
+def composer_text(lines) -> bool:
+    """The composer holds text: its prompt row (`>` / `❯` in the input box) is not empty."""
+    for line in lines:
+        row = line.strip().strip("│").strip()
+        for mark in ("> ", "❯ "):
+            if row.startswith(mark) and row[len(mark):].strip():
+                return True
     return False
 
 
@@ -107,7 +129,9 @@ def main() -> int:
         if out in (None, ec.INVALID) or inp in (None, ec.INVALID):
             return 1
         if not card(ec.screen_tail(out)):
-            if not wait_for(out, teaser, LOOK_S) or not press(inp, "1", 0x31):
+            if not wait_for(out, teaser, LOOK_S) or dialog_up(ec.screen_tail(out)):
+                return 1
+            if not press(inp, "1", 0x31):
                 return 1
             # The explanation is written once "One moment..." is gone from the screen.
             if not wait_for(out, lambda lines: not any("One moment" in l for l in lines)
@@ -115,10 +139,13 @@ def main() -> int:
                 return 1
             if not scroll_to_card(inp, out):
                 return 1
-        if not press(inp, "2", 0x32):
+        if dialog_up(ec.screen_tail(out)) or not press(inp, "2", 0x32):
             return 1
         time.sleep(1.5)
-        if card(ec.screen_tail(out)):  # the card did not take the key: send nothing
+        lines = ec.screen_tail(out)
+        # Enter only for the card's text in the composer, and with no dialog up: a blind
+        # Enter could approve whatever permission prompt came up meanwhile.
+        if card(lines) or dialog_up(lines) or not composer_text(lines):
             return 1
         return 0 if press(inp, "\r", 0x0D) else 1
     finally:
