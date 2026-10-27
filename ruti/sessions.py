@@ -27,7 +27,16 @@ MAX_AGE_SECONDS = 7 * 86400
 
 
 def current_session_id() -> str | None:
-    return os.environ.get(ENV_VAR) or None
+    explicit = os.environ.get("RUTI_SESSION_ID")
+    if current_host() == "codex":
+        identity = explicit or os.environ.get("CODEX_THREAD_ID")
+        return f"codex:{identity}" if identity else None
+    return explicit or os.environ.get(ENV_VAR) or None
+
+
+def current_host() -> str:
+    """Select the manager explicitly; retain Claude behavior for existing callers."""
+    return os.environ.get("RUTI_HOST", "claude").lower()
 
 
 def _load() -> dict[str, Any]:

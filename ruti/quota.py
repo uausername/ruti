@@ -387,6 +387,9 @@ def _window(raw: Any) -> Window | None:
 
 
 def load() -> Quota:
+    from . import sessions
+    if sessions.current_host() == "codex":
+        return Quota(None, None, 0.0)
     data = read_json(QUOTA_FILE, default=None)
     if not isinstance(data, dict):
         return Quota(None, None, 0.0)

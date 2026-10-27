@@ -58,7 +58,9 @@ def fake_opencode(monkeypatch):
             return proc.Result(argv, 1, "", "not a repository", 0.0)
         with usage.USAGE_LOG.open("a", encoding="utf-8") as handle:
             for entry in served:
-                handle.write(json.dumps({**entry, "at": time.time()}) + "\n")
+                config = json.loads(kwargs["env"]["OPENCODE_CONFIG_CONTENT"])
+                run_id = config["provider"]["ruti-router"]["options"]["headers"]["x-ruti-run-id"]
+                handle.write(json.dumps({**entry, "at": time.time(), "run_id": run_id}) + "\n")
         return proc.Result(argv, 0, "done", "", 0.1)
 
     monkeypatch.setattr(delegate.proc, "run", run)

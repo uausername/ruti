@@ -56,6 +56,8 @@ def current_session() -> str | None:
     """
     from . import sessions
 
+    if sessions.current_host() == "codex":
+        return sessions.current_session_id()
     data = read_json(STATE_ROOT / "quota.json", default={}) or {}
     return sessions.current_session_id() or data.get("session_id")
 
@@ -66,7 +68,9 @@ def record(event: str, **fields: Any) -> None:
         ensure_dirs()
         if LEDGER.exists() and LEDGER.stat().st_size > MAX_BYTES:
             LEDGER.replace(LEDGER.with_suffix(".jsonl.1"))
-        entry = {"at": time.time(), "event": event, "session": current_session(), **fields}
+        from . import sessions
+        entry = {"at": time.time(), "event": event, "session": current_session(),
+                 "host": sessions.current_host(), **fields}
         # Append mode with a single small write: atomic enough for line-oriented data,
         # and cheaper than taking a lock on something written this often.
         with LEDGER.open("a", encoding="utf-8") as handle:
@@ -263,9 +267,8 @@ def unfollowed_route(session_id: str | None) -> dict[str, Any] | None:
         return None
     # A delegation to the recommended alias still running is the route being followed:
     # its ledger line is only written when it ends, which can be fifteen minutes later.
-    from .delegate import _running_alias
-    running = _running_alias()
-    if running and running == _alias_of(route.get("recommended") or ""):
+    from .delegate import running_for
+    if running_for(_alias_of(route.get("recommended") or ""), session_id):
         return None
     return route
 
@@ -310,7 +313,37 @@ def _sessions(events: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
     yield from by_session.values()
 
 
-def summarise(events: list[dict[str, Any]]) -> dict[str, Any]:
+def for_host(events: list[dict[str, Any]], host: str) -> list[dict[str, Any]]:
+    """Filter manager observations, preserving verdicts targeting that host's runs."""
+    def belongs(entry: dict[str, Any]) -> bool:
+        inferred = "codex" if str(entry.get("session") or "").startswith("codex:") else "claude"
+        return (entry.get("host") or inferred) == host
+
+    run_ids = {e.get("run_id") for e in events
+               if e.get("event") == "delegation" and belongs(e) and e.get("run_id")}
+    return [e for e in events if belongs(e)
+            or (e.get("event") == "verdict" and e.get("run_id") in run_ids)]
+
+
+def review_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Accepted work is evidence; process exit and subscription savings are not."""
+    verdicts = {e["run_id"]: e.get("verdict") for e in events
+                if e.get("event") == "verdict" and e.get("run_id")}
+    delegations = [e for e in events if e.get("event") == "delegation"]
+    accepted = [e for e in delegations if verdicts.get(e.get("run_id")) == "ok"]
+    rejected = [e for e in delegations if verdicts.get(e.get("run_id")) == "bad"]
+    reviewed = len(accepted) + len(rejected)
+    return {
+        "accepted": len(accepted), "rejected": len(rejected),
+        "unreviewed": len(delegations) - reviewed,
+        "acceptance_rate": len(accepted) / reviewed if reviewed else None,
+        "accepted_run_seconds": round(sum(e.get("duration_s", 0) for e in accepted), 1),
+        "accepted_lines_in_changed_files": sum(e.get("lines_written", 0) for e in accepted),
+        "subscription_savings_percentage": None,
+    }
+
+
+def summarise(events: list[dict[str, Any]], *, reviewed_only: bool = False) -> dict[str, Any]:
     delegations = [e for e in events if e["event"] == "delegation"]
 
     log_bytes = sum(e.get("log_bytes", 0) for e in delegations)
@@ -322,9 +355,15 @@ def summarise(events: list[dict[str, Any]]) -> dict[str, Any]:
     # its lines as a saving inverts the sign of the measurement. Found on a real
     # project: two runs exited 0, produced 75 lines between them, and every one of
     # those lines had to be thrown away and written by hand.
-    succeeded = [e for e in delegations if e.get("ok")]
+    verdicts = {e["run_id"]: e.get("verdict") for e in events
+                if e.get("event") == "verdict" and e.get("run_id")}
+    succeeded = [e for e in delegations
+                 if verdicts.get(e.get("run_id")) == "ok"
+                 or (not reviewed_only and e.get("run_id") not in verdicts and e.get("ok"))]
     lines_written = sum(e.get("lines_written", 0) for e in succeeded)
-    discarded_lines = sum(e.get("lines_written", 0) for e in delegations if not e.get("ok"))
+    discarded_lines = sum(e.get("lines_written", 0) for e in delegations
+                          if verdicts.get(e.get("run_id")) == "bad"
+                          or (not e.get("ok") and verdicts.get(e.get("run_id")) != "ok"))
 
     delegated_files: list[str] = []
     for entry in succeeded:
@@ -363,6 +402,7 @@ def summarise(events: list[dict[str, Any]]) -> dict[str, Any]:
         return sum(s["end"]["five_hour"] - s["start"]["five_hour"] for s in group) / len(group)
 
     return {
+        "review": review_summary(events),
         "delegations": {
             "total": len(delegations),
             "failed": sum(1 for e in delegations if not e.get("ok")),

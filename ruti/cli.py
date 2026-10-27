@@ -317,14 +317,19 @@ def model_use(key: str, context: int | None, min_context: int, ttl: int | None,
                    "and why, and what came of it.")
 @click.option("--limit", type=int, default=15, show_default=True,
               help="With --routes: how many of the latest rankings to show.")
+@click.option("--host", type=click.Choice(["all", "claude", "codex"]), default=None,
+              help="Filter manager history; defaults to codex for Codex, all otherwise.")
 @click.option("--json", "as_json", is_flag=True)
-def report(days: float | None, routes: bool, limit: int, as_json: bool) -> None:
+def report(days: float | None, routes: bool, limit: int, host: str | None, as_json: bool) -> None:
     """Show what delegation has actually bought you."""
     events = ledger.read_events(since_days=days)
+    selected_host = host or ("codex" if sessions.current_host() == "codex" else "all")
+    if selected_host != "all":
+        events = ledger.for_host(events, selected_host)
     if routes:
         _report_routes(ledger.route_history(events, limit=limit or None), as_json)
         return
-    stats = ledger.summarise(events)
+    stats = ledger.summarise(events, reviewed_only=selected_host == "codex")
 
     if as_json:
         ui.emit_json(stats)
@@ -351,6 +356,17 @@ def report(days: float | None, routes: bool, limit: int, as_json: bool) -> None:
         ui.console.print(grid)
 
     _report_money(stats["money"])
+
+    review = stats["review"]
+    ui.heading("Reviewed results")
+    ui.say(f"  {review['accepted']} accepted, {review['rejected']} rejected, "
+           f"{review['unreviewed']} unreviewed")
+    if selected_host == "codex":
+        ui.say(f"  accepted runs: {review['accepted_run_seconds']:.1f}s; "
+               f"{review['accepted_lines_in_changed_files']} lines in changed files")
+        ui.say("  [muted]Codex subscription savings: unknown. File lines and runner time "
+               "do not measure subscription savings or review effort.[/muted]")
+        return
 
     ui.heading("Work the manager did not have to type")
     ui.say(f"  [ok]{w['lines_written']:,} lines written by delegates[/ok]  "
@@ -487,7 +503,7 @@ def _route_outcome_text(row: dict) -> str:
         recommended = row.get("recommended") or ""
         if not recommended:
             text = "[muted]nothing was eligible[/muted]"
-        elif recommended == "claude:self":
+        elif recommended in ("claude:self", "codex:self"):
             text = "[muted]recommended writing it in session[/muted]"
         else:
             text = (f"[muted]recommended a {recommended.split(':')[-1]} subagent "
@@ -536,10 +552,11 @@ def _report_money(money: dict) -> None:
 
 @main.command()
 @click.option("--apply", "do_apply", is_flag=True, help="Write the changes, not just show them.")
-def install(do_apply: bool) -> None:
-    """Wire ruti into Claude Code: status line, hooks, agents, and the policy file."""
+@click.option("--host", type=click.Choice(["claude", "codex"]), default="claude")
+def install(do_apply: bool, host: str) -> None:
+    """Install host guidance; Claude also receives status line, hooks and agents."""
     try:
-        changes = install_mod.plan()
+        changes = install_mod.codex_plan() if host == "codex" else install_mod.plan()
     except RuntimeError as exc:
         raise click.ClickException(str(exc))
 
@@ -564,6 +581,9 @@ def install(do_apply: bool) -> None:
 
     for note in install_mod.apply(changes):
         ui.ok(note)
+    if host == "codex":
+        ui.say("Codex guidance takes effect in the next session.")
+        return
     ui.say("")
     ui.say("[muted]the status line and hooks take effect in the next Claude Code session; "
            "run `/hooks` there to confirm they parsed[/muted]")
@@ -572,12 +592,40 @@ def install(do_apply: bool) -> None:
 # ------------------------------------------------------------------------- on / off
 
 
+@main.group("worktree")
+def worktree_commands() -> None:
+    """Review and import an isolated delegate's exported patch."""
+
+
+@worktree_commands.command("apply")
+@click.option("--run", "run_id", required=True)
+@click.option("--dir", "directory", type=click.Path(exists=True), default=".")
+@click.option("--json", "as_json", is_flag=True)
+def worktree_apply(run_id: str, directory: str, as_json: bool) -> None:
+    """Apply a reviewed patch, refusing changed HEAD, tampering and conflicts."""
+    import re
+    from pathlib import Path
+    from . import proc, worktrees
+
+    if not re.fullmatch(r"[0-9a-f]{8,64}", run_id):
+        raise click.ClickException("invalid run ID")
+    manifest = delegate_mod.LOG_DIR / f"worktree-{run_id}.json"
+    try:
+        applied = worktrees.apply_saved(manifest, Path(directory))
+    except (RuntimeError, ValueError, OSError, proc.ToolTimeout) as exc:
+        raise click.ClickException(str(exc)) from exc
+    ledger.record("worktree_apply", run_id=run_id, applied=applied, directory=str(Path(directory).resolve()))
+    if as_json:
+        ui.emit_json({"run_id": run_id, "applied": applied})
+    else:
+        ui.say("patch applied; source index unchanged" if applied else "patch is empty; nothing to apply")
+
+
 def _session_or_die() -> str:
     session_id = sessions.current_session_id()
     if not session_id:
         raise click.ClickException(
-            f"no ${sessions.ENV_VAR} in the environment -- this only works run from "
-            "inside a Claude Code session"
+            "no session identity -- set RUTI_SESSION_ID and RUTI_HOST, or run inside Claude Code"
         )
     return session_id
 
@@ -1448,9 +1496,13 @@ def manager(kind: str | None, describe: str | None, difficulty: float | None,
 @click.option("--dir", "directory", type=click.Path(exists=True), default=".",
               help="Where the work belongs.")
 @click.option("--timeout", type=float, default=delegate_mod.DEFAULT_TIMEOUT)
+@click.option("--local-only", is_flag=True,
+              help="Send model requests directly to LM Studio; refuse remote aliases and fallback.")
+@click.option("--worktree", "isolated", is_flag=True,
+              help="Run in a detached HEAD checkout; exclude uncommitted source edits and export a patch.")
 @click.option("--json", "as_json", is_flag=True)
 def delegate(model: str, task: str | None, task_file: str | None, directory: str,
-             timeout: float, as_json: bool) -> None:
+             timeout: float, local_only: bool, isolated: bool, as_json: bool) -> None:
     """Run a task through `opencode` and report back in a few lines."""
     from pathlib import Path
 
@@ -1467,7 +1519,9 @@ def delegate(model: str, task: str | None, task_file: str | None, directory: str
 
     qualified = model if "/" in model else f"ruti-router/{model}"
     outcome = delegate_mod.run(
-        text, model=qualified, directory=Path(directory).resolve(), timeout=timeout
+        text, model=qualified, directory=Path(directory).resolve(), timeout=timeout,
+        local_only=local_only,
+        isolated=isolated,
     )
 
     if as_json:
@@ -1486,6 +1540,13 @@ def delegate(model: str, task: str | None, task_file: str | None, directory: str
         ui.bad(f"{outcome.model_requested} failed "
                f"({outcome.error or f'exit {outcome.exit_code}'}) after {outcome.duration_s:.0f}s")
     _say_effective_model(outcome)
+    if outcome.worktree:
+        ui.say("  worktree: " + ui.literal(outcome.worktree["directory"]))
+        if outcome.worktree.get("source_dirty_excluded"):
+            ui.say("  uncommitted source edits were excluded; the checkout starts at HEAD")
+        if outcome.worktree.get("patch"):
+            ui.say("  patch: " + ui.literal(outcome.worktree["patch"]))
+            ui.say(f"  after review, from the original checkout: ruti worktree apply --run {outcome.run_id}")
     if outcome.files_changed:
         ui.say("  changed: " + ", ".join(outcome.files_changed))
     if outcome.broken_files:

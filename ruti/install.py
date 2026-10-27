@@ -34,6 +34,27 @@ LIVE_OPENCODE = Path.home() / ".config" / "opencode" / "opencode.json"
 BEGIN = "<!-- ruti:begin -- managed by `ruti install`; edits here are overwritten -->"
 END = "<!-- ruti:end -->"
 
+CODEX_MEMORY = Path.home() / ".codex" / "AGENTS.md"
+CODEX_BEGIN = "<!-- ruti:codex:begin -->"
+CODEX_END = "<!-- ruti:codex:end -->"
+
+
+def codex_plan() -> list[tuple[str, Path, str, str]]:
+    """Preview Codex guidance without installing Claude hooks or replacing OpenCode config."""
+    before = CODEX_MEMORY.read_text(encoding="utf-8") if CODEX_MEMORY.exists() else ""
+    guidance = (REPO_ROOT / "codex" / "AGENTS.md").read_text(encoding="utf-8").strip()
+    block = f"{CODEX_BEGIN}\n{guidance}\n{CODEX_END}"
+    if CODEX_BEGIN in before or CODEX_END in before:
+        if before.count(CODEX_BEGIN) != 1 or before.count(CODEX_END) != 1:
+            raise RuntimeError("Malformed ruti Codex markers; refusing to replace user guidance")
+        start, end = before.index(CODEX_BEGIN), before.index(CODEX_END)
+        if end < start:
+            raise RuntimeError("Malformed ruti Codex marker order")
+        after = before[:start] + block + before[end + len(CODEX_END):]
+    else:
+        after = before + ("\n\n" if before else "") + block + "\n"
+    return [("Codex AGENTS.md", CODEX_MEMORY, before, after)] if before != after else []
+
 # The heading the pre-2.0 setup used, so an upgrade replaces it instead of leaving a
 # stale copy that contradicts the new one.
 LEGACY_HEADING = "## Delegate implementation-heavy work to conserve Pro subscription quota"

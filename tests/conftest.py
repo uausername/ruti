@@ -15,6 +15,9 @@ from ruti import (config, context_watch, delegate, flow, ledger, manager, modes,
 
 @pytest.fixture(autouse=True)
 def isolated_state(tmp_path, monkeypatch):
+    # Most existing tests exercise Claude; do not inherit the invoking Codex host.
+    for name in ("RUTI_HOST", "RUTI_SESSION_ID", "CODEX_THREAD_ID"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(ledger, "LEDGER", tmp_path / "ledger.jsonl")
     monkeypatch.setattr(usage, "USAGE_LOG", tmp_path / "usage.jsonl")
     monkeypatch.setattr(delegate, "RUNNING_FILE", tmp_path / "running.json")

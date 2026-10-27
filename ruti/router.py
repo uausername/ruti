@@ -31,10 +31,10 @@ from typing import Any, Literal
 from . import (jev, litellm_cfg, lmstudio, modes, openrouter, planner, providers, quota,
                rankings, sessions, track, vram)
 
-# Measured, not guessed: `opencode run` sends an 8095-token system prompt before any
-# task text. A model whose window cannot hold it will not run slowly, it will fail --
-# and on the way it may claim to have written files it never touched.
-OPENCODE_PROMPT_TOKENS = 8095
+# OpenCode 1.18.13's local smoke request measured 17,447 input tokens (2026-10-27).
+# Round up: tools and host instructions change across releases and repositories.
+# This is a planning estimate, not live token telemetry.
+OPENCODE_PROMPT_TOKENS = 18_000
 
 # Rough conversion for sizing a task. Deliberately generous: under-estimating the
 # context puts work on a model that cannot hold it.
@@ -136,6 +136,8 @@ class Candidate:
 
     @property
     def pays_in(self) -> str:
+        if self.name == "codex:self":
+            return "the current Codex session -- subscription usage unknown"
         if self.tier == "local":
             return "nothing -- runs on this machine"
         if self.tier in ("anthropic", "self"):
@@ -415,6 +417,8 @@ def _money_reason(candidate: Candidate) -> str:
 
 
 def _anthropic_candidates(task: Task, snapshot: quota.Quota) -> list[Candidate]:
+    if sessions.current_host() == "codex":
+        return []
     allowed = set(snapshot.policy["anthropic_executors"])
     specs = [
         ("haiku", 0.12, 0.85, 0.45, "low"),
@@ -446,7 +450,7 @@ def _anthropic_candidates(task: Task, snapshot: quota.Quota) -> list[Candidate]:
 
 def _self_candidate(task: Task, snapshot: quota.Quota) -> Candidate:
     candidate = Candidate(
-        name="claude:self",
+        name="codex:self" if sessions.current_host() == "codex" else "claude:self",
         tier="self",
         context_window=200_000,
         supports_tools=True,
@@ -571,7 +575,8 @@ def rank(task: Task, snapshot: quota.Quota | None = None, *,
                 )
 
         # Score. Budget dominates, then speed; capability is already gated above.
-        budget_term = 1.0 - candidate.quota_cost * (0.4 + 0.6 * _pressure(snapshot))
+        pressure = 0.0 if sessions.current_host() == "codex" else _pressure(snapshot)
+        budget_term = 1.0 - candidate.quota_cost * (0.4 + 0.6 * pressure)
         candidate.score = round(budget_term * (0.6 + 0.4 * candidate.speed), 3)
         # The measured track record, applied to the score it belongs to and not to the
         # adjustments below: this is what the model did, while those are what the
@@ -785,6 +790,8 @@ def _advice(task: Task, snapshot: quota.Quota, eligible: list[Candidate]) -> str
             "Do it in session -- no delegate cleared the bar for this one. "
             "See the ruled-out list for why."
         )
+    if sessions.current_host() == "codex":
+        return f"Use {best.name}. Codex subscription usage is unknown."
     if snapshot.freshness in ("stale", "unknown", "never"):
         return (
             f"Use {best.name}. The quota reading is {snapshot.freshness}, so this "

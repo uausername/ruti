@@ -15,7 +15,7 @@ plain response, and from each raw OpenRouter chunk, keyed by its generation id, 
 stream. The cost comes from the same place -- OpenRouter states it in `usage.cost`,
 and LiteLLM always asks it to. Nothing here makes a network call.
 
-`ruti delegate` reads the resulting `usage.jsonl` for the window its run occupied.
+`ruti delegate` reads the resulting `usage.jsonl` by run ID and time window.
 This file deliberately imports nothing from ruti: it runs inside the proxy process,
 and an import error here would stop the proxy from starting at all. For the same
 reason every path through it swallows its own exceptions -- losing one usage line is
@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from collections import OrderedDict
 from pathlib import Path
@@ -146,6 +147,15 @@ def build_record(kwargs: dict[str, Any], start: Any, end: Any) -> dict[str, Any]
     gen_id = payload.get("id")
     deployment = str(payload.get("model") or "")
     provider = payload.get("custom_llm_provider")
+    params = kwargs.get("litellm_params") or {}
+    request = params.get("proxy_server_request") or {}
+    headers = request.get("headers", {}) if isinstance(request, dict) else {}
+    run_id = None
+    if isinstance(headers, dict):
+        candidate = next((v for k, v in headers.items()
+                          if str(k).lower() == "x-ruti-run-id"), None)
+        if isinstance(candidate, str) and re.fullmatch(r"[0-9a-f]{8,64}", candidate):
+            run_id = candidate
 
     body = _raw_body(kwargs)
     seen = _SEEN.pop(gen_id, {}) if gen_id else {}
@@ -174,6 +184,7 @@ def build_record(kwargs: dict[str, Any], start: Any, end: Any) -> dict[str, Any]
 
     return {
         "at": _epoch(end) or time.time(),
+        "run_id": run_id,
         "start": _epoch(start),
         "requested": _requested(kwargs, payload),
         "group": payload.get("model_group"),

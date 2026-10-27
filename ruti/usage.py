@@ -136,17 +136,18 @@ def _settle(timeout: float) -> None:
 
 
 def in_window(entries: list[dict[str, Any]], alias: str, started: float,
-              finished: float) -> list[dict[str, Any]]:
+              finished: float, *, run_id: str | None = None) -> list[dict[str, Any]]:
     """Completions requested under `alias` that finished while the run was going.
 
     Matched on the name the client asked for, not on the group that served it, so a
     request a fallback answered is still counted against the run that made it.
-    Two runs against the same alias at the same moment cannot be told apart here;
-    `delegate` notes when that may have happened.
+    A supplied run ID excludes other runs and legacy unattributed completions.
+    Omitting it preserves time-window matching for historical consumers.
     """
     return [
         e for e in entries
         if e.get("requested") == alias
+        and (run_id is None or e.get("run_id") == run_id)
         and isinstance(e.get("at"), (int, float))
         and started <= e["at"] <= finished + 2.0
     ]
@@ -254,16 +255,21 @@ def aggregate(alias: str, entries: list[dict[str, Any]]) -> Usage:
 
 
 def collect(alias: str, started: float, finished: float, *,
-            settle: float = SETTLE_SECONDS, lookup: Lookup | None = None) -> Usage:
+            settle: float = SETTLE_SECONDS, lookup: Lookup | None = None,
+            run_id: str | None = None) -> Usage:
     """The real model(s) and cost behind one run. Never raises."""
     try:
         if settle:
             _settle(settle)
-        entries = in_window(read_log(), alias, started, finished)
+        entries = in_window(read_log(), alias, started, finished, run_id=run_id)
     except Exception as exc:  # bookkeeping must not fail the delegation it describes
         return Usage(alias=alias, note=f"could not read the proxy's usage log: {exc}")
 
     if not entries:
+        if run_id is not None:
+            return Usage(alias=alias, note="no usage attributed to this run ID; requests may not have "
+                         "completed, or restart the proxy if the updated callback is not loaded; "
+                         "legacy time-window records are excluded")
         if not recording_wired():
             note = (f"the proxy is not recording which model answers -- add `callbacks: "
                     f"{CALLBACK}` under litellm_settings in litellm/config.yaml and "

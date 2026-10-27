@@ -129,7 +129,7 @@ def test_a_real_timeout_marks_the_run_and_names_it(monkeypatch, tmp_path):
     outcome = delegate.run("write it", model="ruti-router/inkling-small",
                            directory=tmp_path, timeout=1200, check_substitution=False)
     assert outcome.timed_out is True and outcome.ok is False
-    assert outcome.run_id and len(outcome.run_id) == 8
+    assert outcome.run_id and len(outcome.run_id) == 12
     assert outcome.summary()["next"].endswith(f"--run {outcome.run_id}")
 
     event = [e for e in ledger.read_events() if e["event"] == "delegation"][-1]

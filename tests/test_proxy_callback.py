@@ -45,6 +45,21 @@ def test_plain_response_names_the_routers_pick(cb):
     assert record["cost_usd"] == pytest.approx(0.0123)
 
 
+@pytest.mark.parametrize("header,value,expected", [
+    ("X-Ruti-Run-Id", "abcdef12", "abcdef12"),
+    ("x-ruti-run-id", "12345678", "12345678"),
+    ("x-ruti-run-id", "../../secret", None),
+    ("x-ruti-run-id", 12345678, None),
+])
+def test_run_attribution_extracts_only_valid_id(cb, header, value, expected):
+    kwargs = _kwargs()
+    kwargs["litellm_params"]["proxy_server_request"]["headers"] = {
+        header: value, "Authorization": "secret-must-not-be-logged"}
+    record = cb.build_record(kwargs, 1, 2)
+    assert record["run_id"] == expected
+    assert "secret-must-not-be-logged" not in json.dumps(record)
+
+
 def test_stream_chunks_are_captured_before_litellm_renames_them(cb):
     # The same path LiteLLM takes: raw OpenRouter chunks through the patched parser.
     from litellm.llms.openrouter.chat.transformation import (

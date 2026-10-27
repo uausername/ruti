@@ -1,14 +1,28 @@
 # ruti
 
+**Works with Claude Code and Codex.** The CLI, model router and delegation runner are
+shared; each assistant gets its own session instructions and setup.
+
+| Host | Install | How ruti is activated |
+|---|---|---|
+| Claude Code | `ruti install --apply` | Installs Claude hooks, status line and agents. Existing default; no host flag needed. |
+| Codex | `ruti install --host codex --apply` | Adds managed guidance to `~/.codex/AGENTS.md`; ruti commands set `RUTI_HOST=codex` and use a Codex session ID. |
+
+Install both to use ruti from Claude Code and Codex on the same machine. Their
+instructions and session state stay separate; both can use the same configured ruti
+backends. Codex does not automatically install Claude hooks, and Claude's existing
+integration remains unchanged. See [Codex setup, local-only routing and parallel runs](docs/codex.md).
+
 [![CI](https://github.com/uausername/ruti/actions/workflows/ci.yml/badge.svg)](https://github.com/uausername/ruti/actions/workflows/ci.yml)
 
-**Stop burning your Claude Code subscription on boilerplate.**
+**Keep implementation work out of your manager's context.**
 
-`ruti` keeps Claude Code as your architect and reviewer, and routes the token-heavy
-typing to a model on your own GPU, a free API tier, or a cheap one — *without leaving
-your session*.
+`ruti` lets Claude Code or Codex plan and review, then routes bounded implementation
+work to a model on your own GPU, a free API tier, or a low-cost provider — *without
+leaving your session*.
 
-No proxy in front of Claude. No re-authentication. No lost context.
+Claude Code keeps its normal authentication. Codex uses its own instructions and host
+identity. Neither assistant's subscription is treated as the delegate's usage budget.
 
 ---
 

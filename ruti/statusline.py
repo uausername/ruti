@@ -135,13 +135,10 @@ def _refresh_facts() -> dict[str, Any]:
 def _running_delegate() -> dict[str, Any] | None:
     """The delegate executing right now, or None if the marker is absent or stale."""
     from .delegate import RUNNING_FILE
+    from . import runs
 
-    entry = read_json(RUNNING_FILE, default=None)
-    if not isinstance(entry, dict):
-        return None
-    if time.time() > entry.get("expires_at", 0):
-        return None
-    return entry
+    entries = runs.active(RUNNING_FILE)
+    return entries[0] if entries else None
 
 
 def _short(executor: str) -> str:

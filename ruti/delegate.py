@@ -19,6 +19,7 @@ for the first, `model_effective` for the second (see `usage.py`).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 import uuid
@@ -26,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import proc
+from . import delegate_config, proc, runs, sessions, worktrees
 from . import usage as usage_mod
 from .config import LOG_DIR, PROXY_BASE, STATE_ROOT, ensure_dirs, read_json, write_json
 
@@ -81,6 +82,8 @@ class Outcome:
     # the work may be on disk and the manager may use it -- but nothing can decide that
     # without looking, and `track` must not count it either way until someone does.
     timed_out: bool = False
+    local_only: bool = False
+    worktree: dict | None = None
 
     @property
     def ok(self) -> bool:
@@ -92,6 +95,8 @@ class Outcome:
             "ok": self.ok,
             "run_id": self.run_id,
             "timed_out": self.timed_out,
+            "local_only": self.local_only,
+            **({"worktree": self.worktree} if self.worktree else {}),
             "model_requested": self.model_requested,
             "model_answering": self.model_answering,
             "model_effective": self.model_effective,
@@ -192,10 +197,14 @@ def _router_alias(alias: str) -> bool:
 
 def _running_alias() -> str | None:
     """The alias another delegation is running against right now, if any."""
-    marker = read_json(RUNNING_FILE, default=None)
-    if not isinstance(marker, dict) or marker.get("expires_at", 0) < time.time():
-        return None
-    return str(marker.get("model", "")).split("/")[-1] or None
+    entries = runs.active(RUNNING_FILE)
+    return entries[0]["model"].split("/")[-1] if entries else None
+
+
+def running_for(alias: str, session_id: str | None = None) -> bool:
+    return any(entry["model"].split("/")[-1] == alias
+               and (session_id is None or entry.get("session") in (None, session_id))
+               for entry in runs.active(RUNNING_FILE))
 
 
 def _opencode_executable() -> str:
@@ -234,6 +243,27 @@ def _git(args: list[str], cwd: Path) -> str:
         return ""
 
 
+def _file_snapshot(directory: Path) -> dict[str, str]:
+    """Hash tracked and visible untracked files, including already-dirty paths."""
+    listing = _git(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], directory)
+    snapshot = {}
+    for name in listing.split("\0"):
+        if not name:
+            continue
+        path = directory / name
+        if _is_generated(path, directory):
+            continue
+        try:
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            snapshot[name] = digest.hexdigest()
+        except OSError:
+            continue
+    return snapshot
+
+
 def run(
     task: str,
     *,
@@ -241,14 +271,24 @@ def run(
     directory: Path,
     timeout: float = DEFAULT_TIMEOUT,
     check_substitution: bool = True,
+    local_only: bool = False,
+    isolated: bool = False,
 ) -> Outcome:
     """Run one delegated task and return a summary small enough to read."""
     ensure_dirs()
     alias = model.split("/")[-1]
-    outcome = Outcome(model_requested=model, router=_router_alias(alias))
+    outcome = Outcome(model_requested=model, router=_router_alias(alias), local_only=local_only)
     # Before anything can fail: every run is named, so a verdict can be given for one
     # that died before it wrote a file as well as for one that wrote a lot of them.
-    outcome.run_id = uuid.uuid4().hex[:8]
+    outcome.run_id = uuid.uuid4().hex[:12]
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    log_path = LOG_DIR / f"delegate-{stamp}-{outcome.run_id}-{model.replace('/', '_')}.log"
+    outcome.log_path = str(log_path)
+    if local_only and not alias.startswith("local-"):
+        outcome.error = "--local-only requires a local-* model; no task was sent"
+        outcome.exit_code = -1
+        _record(outcome, log_path)
+        return outcome
     # `route` ranks a local model that is not resident as "would load in a few
     # seconds", so the load has to happen here: a request for an unloaded `local-*`
     # alias does not fail, the proxy's fallback quietly answers from a remote model.
@@ -257,23 +297,72 @@ def run(
         from .router import OPENCODE_PROMPT_TOKENS, RESPONSE_HEADROOM
 
         try:
-            planner.ensure_resident(alias, min_context=OPENCODE_PROMPT_TOKENS + RESPONSE_HEADROOM,
+            planner.ensure_resident(alias, min_context=OPENCODE_PROMPT_TOKENS + RESPONSE_HEADROOM
+                                    + len(task) // 3,
                                     ttl_seconds=lmstudio.DEFAULT_TTL_SECONDS)
         except Exception as exc:  # the substitution probe below still reports the outcome
             outcome.load_error = str(exc)
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    log_path = LOG_DIR / f"delegate-{stamp}-{model.replace('/', '_')}.log"
-    outcome.log_path = str(log_path)
+    local_context = None
+    if local_only:
+        try:
+            if outcome.load_error:
+                raise RuntimeError(outcome.load_error)
+            resident = next((m for m in lmstudio.loaded_models() if m.identifier == alias), None)
+            if resident is None:
+                raise RuntimeError("requested model is not resident in LM Studio")
+            local_context = getattr(resident, "loaded_context", None)
+        except Exception as exc:
+            outcome.error = f"local-only preflight failed: {exc}; no task was sent"
+            outcome.exit_code = -1
+            _record(outcome, log_path)
+            return outcome
+    try:
+        child_model, child_env = delegate_config.environment(
+            outcome.run_id, local_alias=alias if local_only else None, local_context=local_context)
+        if isolated:
+            config = json.loads(child_env["OPENCODE_CONFIG_CONTENT"])
+            permissions = config.get("permission", {})
+            if isinstance(permissions, str):
+                permissions = {"*": permissions}
+            config["permission"] = {**permissions, "external_directory": "deny"}
+            agent = config.setdefault("agent", {}).setdefault("build", {})
+            permissions = agent.get("permission", {})
+            if isinstance(permissions, str):
+                permissions = {"*": permissions}
+            agent["permission"] = {**permissions, "external_directory": "deny"}
+            child_env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
+    except (ValueError, TypeError, AttributeError) as exc:
+        outcome.error = f"invalid child configuration: {exc}"
+        outcome.exit_code = -1
+        _record(outcome, log_path)
+        return outcome
 
-    if check_substitution:
+    if check_substitution and not local_only:
         answer = probe(alias)
         outcome.model_answering = answer.model
         outcome.substituted = is_substitution(alias, answer, router=outcome.router)
 
+    workspace = None
+    manifest = LOG_DIR / f"worktree-{outcome.run_id}.json"
+    if isolated:
+        try:
+            workspace = worktrees.prepare(directory, STATE_ROOT / "worktrees" / outcome.run_id)
+            directory = workspace.directory
+            outcome.worktree = workspace.summary()
+            write_json(manifest, outcome.worktree)
+            task = ("Your current working directory is the isolated checkout. Use relative file paths. "
+                    "Uncommitted source changes are excluded. Do not guess absolute paths or access "
+                    "sibling directories or other checkouts.\n\n" + task)
+        except (RuntimeError, ValueError, OSError, proc.ToolTimeout) as exc:
+            outcome.error = f"worktree preparation failed: {exc}"
+            outcome.exit_code = -1
+            _record(outcome, log_path)
+            return outcome
+
     # Kept alongside the log so a surprising result can be traced back to the exact
     # brief that produced it. It is not passed with `-f`: that flag takes a list of
     # attachments and greedily swallows the message argument as another filename.
-    task_file = LOG_DIR / f"task-{stamp}.md"
+    task_file = LOG_DIR / f"task-{stamp}-{outcome.run_id}.md"
     task_file.write_text(task, encoding="utf-8")
 
     # Windows caps a command line at ~32k characters. The prompt is passed as one argv
@@ -285,25 +374,31 @@ def run(
             "command line -- split it into smaller tasks"
         )
         outcome.exit_code = -1
+        _record(outcome, log_path)
         return outcome
 
     head_before = _git(["rev-parse", "HEAD"], directory)
     dirty_before = set(_git(["status", "--porcelain"], directory).splitlines())
+    snapshot_before = _file_snapshot(directory)
 
-    # Usage is matched by alias and time, so a concurrent run against the same alias
-    # would be counted in with this one. Rare, but worth saying when it can happen.
-    overlapping = _running_alias() == alias
+    # Per-run headers and markers keep same-alias executions distinct.
     started = time.monotonic()
     started_wall = time.time()
-    _mark_running(model, timeout)
+    _mark_running(model, timeout, run_id=outcome.run_id)
     try:
         # `opencode run` has no timeout flag of its own, so the parent has to impose
         # one or a stuck delegate wedges the session indefinitely.
+        command = [_opencode_executable(), "run", "--dir", str(directory),
+                   "--model", child_model or model, "--auto"]
+        if local_only:
+            command.append("--pure")
+        if isolated:
+            command.extend(["--agent", "build"])
         result = proc.run(
-            [_opencode_executable(), "run", "--dir", str(directory), "--model", model,
-             "--auto", task],
+            [*command, task],
             timeout=timeout,
             cwd=directory,
+            env=child_env,
         )
         outcome.exit_code = result.returncode
         log_path.write_text(
@@ -343,9 +438,13 @@ def run(
     finally:
         outcome.duration_s = time.monotonic() - started
         finished_wall = time.time()
-        _clear_running()
+        _clear_running(run_id=outcome.run_id)
 
-    outcome.usage = usage_mod.collect(alias, started_wall, finished_wall)
+    if local_only:
+        outcome.usage = usage_mod.Usage(alias=alias, note="direct LM Studio route; proxy usage "
+                                       "does not measure this run; model identity and tokens unknown")
+    else:
+        outcome.usage = usage_mod.collect(alias, started_wall, finished_wall, run_id=outcome.run_id)
     outcome.model_effective = outcome.usage.model
     # The probe above sees one request before the run; the fallback usually takes over
     # mid-run, after the alias's first rate limit. The run's own log is the record of
@@ -358,17 +457,14 @@ def run(
             f"{alias} (LiteLLM fallback)",
             outcome.usage.note,
         ]))
-    if overlapping:
-        outcome.usage.note = "; ".join(filter(None, [
-            outcome.usage.note,
-            "another delegation to this alias was running at the same time, and its "
-            "requests may be counted here",
-        ]))
-
     dirty_after = set(_git(["status", "--porcelain"], directory).splitlines())
     outcome.files_changed = sorted(
         line[3:] for line in (dirty_after - dirty_before) if len(line) > 3
     )
+    snapshot_after = _file_snapshot(directory)
+    content_changes = {name for name in snapshot_before.keys() | snapshot_after.keys()
+                       if snapshot_before.get(name) != snapshot_after.get(name)}
+    outcome.files_changed = sorted(set(outcome.files_changed) | content_changes)
     head_after = _git(["rev-parse", "HEAD"], directory)
     if head_before and head_after and head_before != head_after:
         outcome.diff_stat = _git(["diff", "--stat", f"{head_before}..{head_after}"], directory)
@@ -382,11 +478,17 @@ def run(
 
     outcome.broken_files = _unparsable_python(outcome.files_changed, directory)
     outcome.lines_written = _count_written_lines(outcome.files_changed, directory)
+    if workspace is not None:
+        try:
+            outcome.worktree = worktrees.export(workspace, manifest.with_suffix(".patch"))
+            write_json(manifest, outcome.worktree)
+        except (RuntimeError, ValueError, OSError, proc.ToolTimeout) as exc:
+            outcome.error = f"worktree patch export failed: {exc}; checkout preserved at {directory}"
     _record(outcome, log_path)
     return outcome
 
 
-def _mark_running(model: str, timeout: float) -> None:
+def _mark_running(model: str, timeout: float, *, run_id: str | None = None) -> None:
     """Announce that a delegate is executing. Never raises: this is only reporting.
 
     Carries an expiry rather than a pid. If this process is killed outright the marker
@@ -396,6 +498,9 @@ def _mark_running(model: str, timeout: float) -> None:
     """
     try:
         ensure_dirs()
+        if run_id is not None:
+            runs.start(RUNNING_FILE, model, timeout, run_id, sessions.current_session_id())
+            return
         write_json(RUNNING_FILE, {
             "model": model,
             "started_at": time.time(),
@@ -405,8 +510,11 @@ def _mark_running(model: str, timeout: float) -> None:
         pass
 
 
-def _clear_running() -> None:
+def _clear_running(*, run_id: str | None = None) -> None:
     try:
+        if run_id is not None:
+            runs.finish(RUNNING_FILE, run_id)
+            return
         RUNNING_FILE.unlink(missing_ok=True)
     except OSError:
         pass
@@ -520,6 +628,7 @@ def _record(outcome: Outcome, log_path: Path) -> None:
     ledger.record(
         "delegation",
         model=outcome.model_requested,
+        **({"worktree": outcome.worktree} if outcome.worktree else {}),
         # What `ruti verdict --run` is given, and what `track` matches a later verdict
         # against. Absent on ledger lines written before this field existed, which is why
         # `track` treats a run with no id as though it had never been reviewed.
