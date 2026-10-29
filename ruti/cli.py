@@ -553,11 +553,17 @@ def _report_money(money: dict) -> None:
 @main.command()
 @click.option("--apply", "do_apply", is_flag=True, help="Write the changes, not just show them.")
 @click.option("--host", type=click.Choice(["claude", "codex"]), default="claude")
-def install(do_apply: bool, host: str) -> None:
-    """Install host guidance; Claude also receives status line, hooks and agents."""
+@click.option("--native-hooks", is_flag=True, help="Opt in to Codex native hooks; requires /hooks trust.")
+def install(do_apply: bool, host: str, native_hooks: bool) -> None:
+    """Preview or install host guidance and optional native Codex hooks."""
+    if native_hooks and host != "codex":
+        raise click.UsageError("--native-hooks requires --host codex")
     try:
         changes = install_mod.codex_plan() if host == "codex" else install_mod.plan()
-    except RuntimeError as exc:
+        if native_hooks:
+            from . import codex_install
+            changes += codex_install.plan()
+    except (RuntimeError, ValueError, OSError) as exc:
         raise click.ClickException(str(exc))
 
     if not changes:
@@ -583,6 +589,9 @@ def install(do_apply: bool, host: str) -> None:
         ui.ok(note)
     if host == "codex":
         ui.say("Codex guidance takes effect in the next session.")
+        if native_hooks:
+            ui.say("Open /hooks in Codex and review/trust the exact Ruti definitions. "
+                   "Installation does not grant trust or change approval permissions.")
         return
     ui.say("")
     ui.say("[muted]the status line and hooks take effect in the next Claude Code session; "
@@ -590,6 +599,35 @@ def install(do_apply: bool, host: str) -> None:
 
 
 # ------------------------------------------------------------------------- on / off
+
+
+@main.group("codex")
+def codex_group() -> None:
+    """Inspect native hook receipts without running models or granting trust."""
+
+
+@codex_group.command("status")
+@click.option("--json", "as_json", is_flag=True)
+def codex_status(as_json: bool) -> None:
+    from .hooks.codex import runtime_status
+    data = {"session": sessions.current_session_id(), "runtime": runtime_status(),
+            "trust_verified": False,
+            "note": "Runtime receipt is historical; review current definitions in Codex /hooks."}
+    if as_json:
+        ui.emit_json(data)
+    else:
+        ui.say(str(data))
+
+
+@codex_group.command("pending")
+@click.option("--json", "as_json", is_flag=True)
+def codex_pending(as_json: bool) -> None:
+    from .hooks.codex import pending_handoffs
+    data = {"handoffs": pending_handoffs(), "automatic_spawn": False}
+    if as_json:
+        ui.emit_json(data)
+    else:
+        ui.say(str(data))
 
 
 @main.group("worktree")

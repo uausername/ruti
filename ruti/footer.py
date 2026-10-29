@@ -35,11 +35,14 @@ def render(session_id: str | None = None) -> str:
             pieces.append("coding")
         if state.get("free", "off") != "off":
             pieces.append("free:" + _clean(state["free"], 8))
+        from .hooks.codex import runtime_status
+        native = runtime_status(session_id) if str(session_id).startswith("codex:") else {}
         for key, label in (("wait", "wait"), ("flow", "flow"),
                            ("manager", "manager"), ("timemachine", "timemachine"),
                            ("effplus", "eff+")):
             if state.get(key):
-                pieces.append(label + "*")
+                live = key in ("wait", "timemachine") and native.get("capabilities", {}).get(key) is True
+                pieces.append(label + ("" if live else "*"))
 
         active = [entry for entry in runs.active(delegate.RUNNING_FILE)
                   if session_id and entry.get("session") == session_id]

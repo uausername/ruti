@@ -225,7 +225,16 @@ def _prune(now: float) -> None:
 
 
 def _draft_path(session_id: str) -> Path:
-    return FLOW_DIR / f"{session_id}-draft.md"
+    return FLOW_DIR / f"{_file_identity(session_id)}-draft.md"
+
+
+def _file_identity(session_id: str) -> str:
+    # Codex uses a namespaced identity containing a colon (invalid on Windows).
+    # Keep existing UUID-shaped Claude names, hash all other identities.
+    if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", session_id):
+        return session_id
+    import hashlib
+    return hashlib.sha256(session_id.encode()).hexdigest()
 
 
 def save_draft(session_id: str, text: str) -> bool:
@@ -273,7 +282,7 @@ def write_handoff(session_id: str, text: str, cwd: str, *, early: str | None = N
     now = time.time()
     FLOW_DIR.mkdir(parents=True, exist_ok=True)
     _prune(now)
-    path = FLOW_DIR / f"{session_id}-{time.strftime('%Y%m%d-%H%M%S', time.localtime(now))}.md"
+    path = FLOW_DIR / f"{_file_identity(session_id)}-{time.strftime('%Y%m%d-%H%M%S', time.localtime(now))}.md"
     path.write_text(text + "\n", encoding="utf-8")
     write_json(path.with_suffix(".json"), {
         "from_session": session_id,
