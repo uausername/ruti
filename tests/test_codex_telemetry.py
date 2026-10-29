@@ -192,3 +192,25 @@ def test_controls_and_nested_json_are_ignored(rollout):
     data = t.read(rollout(row('turn_context', {'model': 'gpt\u202eevil', 'effort': 'high'})), 'abc', NOW)
     assert 'model' not in data
     assert t._row(b'[' * 3000 + b'0' + b']' * 3000) == {}
+
+
+def test_capture_preserves_observation_after_it_leaves_bounded_tail(rollout):
+    path = rollout(event({'primary': window(96)}))
+    p = {'session_id': 'abc', 'transcript_path': str(path)}
+    t.capture(p, NOW)
+    with path.open('ab') as stream:
+        stream.write(b'x' * (t.TAIL_LIMIT + 1) + b'\n')
+        stream.write((json.dumps(row('turn_context', {'model': 'new'}, '2026-01-02T00:00:00Z')) + '\n').encode())
+    data = t.capture(p, NOW + 200)
+    assert data['five_hour']['used_percentage'] == 96
+    assert data['captured_at_epoch'] == AT
+    assert t.load(now=NOW + 200)['captured_at_epoch'] == AT
+    assert data['model_captured_at_epoch'] == AT + 86400
+
+
+def test_registered_other_session_cannot_be_loaded_by_prefixed_id(rollout, monkeypatch):
+    path = rollout(event({'primary': window(12)}), meta={'id': 'other'})
+    t.capture({'session_id': 'other', 'transcript_path': str(path)}, NOW)
+    assert t.load('codex:other', NOW) == {}
+    monkeypatch.setenv('CODEX_THREAD_ID', 'other')
+    assert t.load('codex:other', NOW)['five_hour']['used_percentage'] == 12

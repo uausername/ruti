@@ -115,6 +115,10 @@ def _tool_payload(payload, sid):
         result['tool_name'] = 'TodoWrite'
     elif result.get('tool_name') in ('exec_command', 'shell_command', 'PowerShell'):
         result['tool_name'] = 'Bash'
+    if result.get('tool_name') == 'Bash' and isinstance(result.get('tool_input'), dict):
+        value = result['tool_input']
+        if not isinstance(value.get('command'), str) and isinstance(value.get('cmd'), str):
+            result['tool_input'] = {**value, 'command': value['cmd']}
     return result
 
 

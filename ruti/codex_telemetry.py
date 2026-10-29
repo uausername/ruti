@@ -162,6 +162,9 @@ def capture(payload: dict, now=None):
         return {}
     result = read(payload.get('transcript_path'), payload.get('session_id'), now)
     if result:
+        old = _cached(result['session_id'], time.time() if now is None else now)
+        if old.get('transcript_path') == result.get('transcript_path'):
+            result = {**old, **result}
         try:
             config.write_json(_cache_path(result['session_id']), result)
         except OSError:
@@ -169,16 +172,8 @@ def capture(payload: dict, now=None):
     return result
 
 
-def load(session_id=None, now=None):
-    """Load only this Codex session's registered metadata, refreshing if possible."""
-    if sessions.current_host() != 'codex':
-        return {}
-    identity = sessions.current_session_id() if session_id is None else session_id
-    raw = _identity(identity)
-    current = _identity(sessions.current_session_id())
-    if raw is None or (not str(identity).startswith('codex:') and raw != current):
-        return {}
-    now = time.time() if now is None else now
+def _cached(raw, now):
+    """Validate a single exact-identity cache without refreshing its timestamp."""
     try:
         with _open(_cache_path(raw)) as stream:
             data = _row(stream.read(LINE_LIMIT + 1))
@@ -210,6 +205,25 @@ def load(session_id=None, now=None):
             field = 'context_used_percentage' if key == 'context' else key
             if field in data and key + '_captured_at_epoch' not in data:
                 return {}
+        return data
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def load(session_id=None, now=None):
+    """Load only this Codex session's registered metadata, refreshing if possible."""
+    if sessions.current_host() != 'codex':
+        return {}
+    identity = sessions.current_session_id() if session_id is None else session_id
+    raw = _identity(identity)
+    current = _identity(sessions.current_session_id())
+    if raw is None or raw != current:
+        return {}
+    now = time.time() if now is None else now
+    data = _cached(raw, now)
+    if not data:
+        return {}
+    try:
         fresh = read(data['transcript_path'], raw, now)
         if not fresh:
             return data

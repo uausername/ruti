@@ -62,6 +62,20 @@ def test_wait_denial_and_same_session_stop(capture, monkeypatch):
     assert h.handle(payload('Stop', stop_hook_active=True)) is None
 
 
+@pytest.mark.parametrize('tool', ['exec_command', 'shell_command', 'PowerShell', 'Bash'])
+def test_native_cmd_recovery_survives_both_gates(capture, monkeypatch, tool):
+    modes.set_wait('codex:abc', True)
+    modes.set_flow('codex:abc', True)
+    monkeypatch.setattr(h.quota, 'load', lambda: quota.Quota(
+        quota.Window(96, time.time() + 60), None, time.time()))
+    monkeypatch.setattr(h.codex_telemetry, 'capture', lambda _: {
+        'context_used_percentage': 65, 'context_captured_at_epoch': time.time()})
+    for command in ('ruti mode flow off', 'ruti mode wait off', 'ruti flow handoff --file checkpoint.md'):
+        assert h.handle(payload('PreToolUse', tool_name=tool, tool_input={'cmd': command})) is None
+    denied = h.handle(payload('PreToolUse', tool_name=tool, tool_input={'cmd': 'git status'}))
+    assert denied['hookSpecificOutput']['permissionDecision'] == 'deny'
+
+
 def test_stale_context_not_freshened_or_borrowed(monkeypatch):
     monkeypatch.setattr(h.codex_telemetry, 'capture', lambda _: {
         'context_used_percentage': 90, 'context_captured_at_epoch': time.time() - 500})
