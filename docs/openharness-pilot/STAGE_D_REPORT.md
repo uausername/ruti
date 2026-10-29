@@ -6,7 +6,8 @@ Both requested histories were committed and pushed:
 
 - `pilot/openharness-bootstrap-20261029`: `6032e51`, includes the original brief.
 - `pilot/statusline-codex`: `d66ec24`, Claude stage B plus sanitized XML evidence.
-- `feature/codex-native-hooks-20261029`: native automation, code `b479d59`.
+- `feature/codex-native-hooks-20261029`: native automation and review fixes;
+  [PR #63](https://github.com/uausername/ruti/pull/63).
 
 No private transcripts/credentials were published. The dirty existing HACCP
 checkout C:/mycode/haccp was preserved; tooling uses a separate clone.
@@ -33,13 +34,14 @@ stage C's historical assumptions about missing hooks and metric sources.
 
 | Check | Actual result |
 |---|---|
-| Full Windows Python 3.12 suite | **1004 passed**, 188.48s |
-| Full WSL Python 3.13 suite | **995 passed, 6 skipped**, 36.08s |
+| Full Windows Python 3.12 suite after fixes | **1019 passed**, 171.47s |
+| Full WSL Python 3.13 suite after fixes | **1010 passed, 6 skipped**, 33.94s |
 | Installed commands through Windows COMSPEC/cmd | All five commands executed in isolated state |
 | Installed commands through WSL login shell | All five commands executed in isolated state |
 | Existing Windows/WSL hooks preserved | Non-Ruti definitions equal parsed backups |
 | Real own Codex rollout | 5h/weekly/context read; original observation time retained |
-| Native exact-definition hook trust | **Pending human review**, never bypassed |
+| WSL native exact-definition hook trust | Person confirmed; all five real lifecycle events observed |
+| Windows native CLI hook trust | Not verified; command fixtures only |
 | Independent Claude manager in this stage | **Not launched**; person-only launcher prepared |
 
 Raw XML/logs remain under ignored build/openharness-bootstrap. Command fixtures
@@ -48,7 +50,8 @@ OS profiles with backups: Windows
 `~/.codex/hooks.json.ruti-backup-20261029-190209`, WSL
 `~/.codex/hooks.json.ruti-backup-20261029-170211`. WSL Codex AGENTS.md was a new
 file; Windows guidance was already current. Existing Harness hooks, subscription
-auth and config.toml trust hashes were preserved.
+auth and project-trust config were preserved. The person subsequently granted
+WSL's exact hook-definition trust through Codex's UI; the agent did not write it.
 
 ## Mode boundaries
 
@@ -76,15 +79,33 @@ ran the suites and closed these owned Codex implementation children successfully
 - `haccp-process-preflight`, `4c7f2f57-80fb-40c2-9210-584896a070bc`.
 
 Independent `native-process-review`, `bd64271f-1a06-4fe4-acfc-cdb7d38268ea`,
-stopped before its first turn: «Hooks need review — 5 hooks are new or changed».
-Only the person can answer. No independent-review verdict is claimed; the
-reviewer remains open for that manual gate.
+initially stopped at «Hooks need review». The person confirmed the five Ruti
+definitions in a directly attached Windows Terminal/WSL pane. Parent then
+observed exact-review-session receipts for SessionStart, UserPromptSubmit,
+PreToolUse, PostToolUse and Stop, plus native quota/context measurements.
+
+The first review found recovery `cmd` normalization, bounded-tail quota loss,
+cross-session loading, and the HACCP launcher's unpinned clone. Fixes are in
+Ruti `b305565` and HACCP `7fb995a`. A fresh independent `native-fixes-review`
+(`f3574b55-1d74-4170-9b7f-091d75ec7bda`) started without another trust prompt,
+confirmed all four resolutions, ran 90 Ruti and 19 HACCP focused tests in
+temporary state, and found an additional test-isolation defect. Parent fixed
+import-time lock/log bindings in `e315bdb`; 99 targeted tests then passed with
+an explicitly unwritable original RUTI_HOME. Parent also added session-bound
+Bash/PowerShell recovery prefixes and chaining/isolation regressions in
+`0df0da9`, then reran both full suites above. Both owned reviewers closed
+successfully. [Review details](STAGE_D_REVIEW.md).
+
+One real Harness limitation remains: `harness tell` from the outside Codex
+parent returned NOT_YOURS, although new/wait/show/close worked. No identity or
+send bypass was used; the follow-up used a new reviewer. The top-level manager
+must test tell/close from its own pane before relying on unattended orchestration.
 
 HACCP instructions and specification section 14 were read. Claim
 [PR #631](https://github.com/uausername/haccp/pull/631) passed its checks and
 squash-merged as `939ce1b`. Tooling is published in
 [draft PR #632](https://github.com/uausername/haccp/pull/632); the task stays in
-progress pending review/gates. It adds project guidance, read-only preflight,
+progress pending project review/rehearsal gates. It adds project guidance, read-only preflight,
 protected-file guard, backup installer, CI fixtures and an independent-manager
 launcher that refuses agent environments.
 
@@ -107,9 +128,8 @@ committed LF bytes. No existing database or production endpoint was used.
 
 ## Person's exact next steps
 
-Open `native-process-review` in Harness, choose **Review hooks**, inspect the
-five Ruti definitions, and decide whether to trust them. Codex requires this
-manual gate; the agent cannot answer for the person.
+The WSL global-hook trust step is complete; both review children are closed.
+The independent Claude manager must still be started by the person, as requested.
 
 Then from a **fresh WSL Debian terminal outside any agent**:
 
@@ -119,6 +139,8 @@ bash scripts/agent-pilot/start_manager.sh
 ```
 
 The launcher starts independent Claude in `ask` mode with the bounded rehearsal
-brief. Do not invoke it from a Codex/Claude tool shell. Project protected-file
-hooks require their own `/hooks` review. The full protocol and evidence rules
-are in HACCP docs/agent-pilot.md.
+brief pinned to the published HACCP source revision. Do not invoke it from a
+Codex/Claude tool shell. Project protected-file hooks require their own `/hooks`
+review. The full protocol and evidence rules are in HACCP docs/agent-pilot.md.
+The HACCP PR remains draft until its prescribed project review and bounded
+manager rehearsal; independent Codex review is not claimed as `/code-review`.
