@@ -73,8 +73,13 @@ $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [En
 Use `/statusline` to reorder the Ruti item with your other fields. This is a custom
 TUI build; future Codex releases require reviewing and rebuilding the patch.
 
-The renderer polls local Ruti state every five seconds and reuses its local facts
-cache. It makes no model requests. It runs the installed Python interpreter from
+The renderer polls local Ruti state every five seconds and reads its local facts
+cache without running service probes or GPU subprocesses. Missing facts show
+`unknown`; facts older than 30 seconds show `stale`. Standalone Codex currently
+has no independent facts-cache producer. Enabled Claude-hook modes are marked
+with `*`, meaning their automatic behavior is unsupported on Codex; see
+[implementation notes](openharness-pilot/CODEX_STATUSLINE_NOTES.md).
+It makes no model requests. It runs the installed Python interpreter from
 an absolute path stored in Ruti's user state, with a four-second timeout, bounded
 stdout and control-character filtering. Python runs in isolated mode from its own
 installation directory, so a project's `ruti` package cannot replace the installed
