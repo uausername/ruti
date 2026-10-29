@@ -1,5 +1,8 @@
 # Stage C — working Windows Ruti footer and cross-platform validation
 
+Historical stage snapshot. See [stage D](STAGE_D_REPORT.md) for publication,
+native Codex hooks, verified own-session metrics and the HACCP process transfer.
+
 Date: 2026-10-29. **Working Windows demo: PASS.**
 HACCP deployment remains **NO-GO**; the next bounded collaboration pilot is viable.
 
