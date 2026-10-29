@@ -625,14 +625,15 @@ def _session_or_die() -> str:
     session_id = sessions.current_session_id()
     if not session_id:
         raise click.ClickException(
-            "no session identity -- set RUTI_SESSION_ID and RUTI_HOST, or run inside Claude Code"
+            "no session identity -- run inside Codex or Claude Code, "
+            "or set RUTI_SESSION_ID and RUTI_HOST"
         )
     return session_id
 
 
 @main.command()
 def off() -> None:
-    """Disable `route`/`delegate` for the current Claude Code session only."""
+    """Disable `route`/`delegate` for the current host session only."""
     session_id = _session_or_die()
     sessions.set_disabled(session_id, True)
     ui.ok(f"ruti disabled for this session ({session_id[:8]}) -- "
@@ -641,7 +642,7 @@ def off() -> None:
 
 @main.command()
 def on() -> None:
-    """Re-enable `route`/`delegate` for the current Claude Code session."""
+    """Re-enable `route`/`delegate` for the current host session."""
     session_id = _session_or_die()
     was_disabled = sessions.is_disabled(session_id)
     sessions.set_disabled(session_id, False)

@@ -13,6 +13,9 @@ instructions and session state stay separate; both can use the same configured r
 backends. Codex does not automatically install Claude hooks, and Claude's existing
 integration remains unchanged. See [Codex setup, local-only routing and parallel runs](docs/codex.md).
 
+An optional custom Codex CLI build adds a Ruti item to its existing `/statusline`:
+[build and install the footer integration](docs/codex.md#ruti-inside-the-codex-cli-status-line).
+
 [![CI](https://github.com/uausername/ruti/actions/workflows/ci.yml/badge.svg)](https://github.com/uausername/ruti/actions/workflows/ci.yml)
 
 **Keep implementation work out of your manager's context.**
