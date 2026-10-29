@@ -27,6 +27,9 @@ def isolated_state(tmp_path, monkeypatch):
     # `doctor.cache()`/`cached()` re-import `STATE_ROOT` from `config` inside the
     # function on every call, so patching it here is enough for those two alone.
     monkeypatch.setattr(config, "STATE_ROOT", tmp_path)
+    # ensure_dirs/file_lock retain these independent import-time bindings.
+    monkeypatch.setattr(config, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(config, "LOCK_DIR", tmp_path / "locks")
 
     # `sessions.py` and `modes.py` are the opposite: each binds its own `SESSIONS_FILE`
     # name once at import time (`modes.py`'s own copy comes from `from .sessions
