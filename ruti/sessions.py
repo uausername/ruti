@@ -1,6 +1,6 @@
 """Per-session on/off toggle for routing and delegation.
 
-Scoped to a single Claude Code session, deliberately not to CLAUDE.md: a `ruti off`
+Scoped to a single host session, deliberately not to project instructions: a `ruti off`
 here must not follow the user into every other project or every future session, and
 it must still survive *this* session's own context compaction, which a purely verbal
 "don't delegate" does not. `CLAUDE_CODE_SESSION_ID` is the environment variable Claude
@@ -35,8 +35,11 @@ def current_session_id() -> str | None:
 
 
 def current_host() -> str:
-    """Select the manager explicitly; retain Claude behavior for existing callers."""
-    return os.environ.get("RUTI_HOST", "claude").lower()
+    """Honor an explicit host, otherwise recognize Codex's per-thread environment."""
+    explicit = os.environ.get("RUTI_HOST")
+    if explicit:
+        return explicit.lower()
+    return "codex" if os.environ.get("CODEX_THREAD_ID") else "claude"
 
 
 def _load() -> dict[str, Any]:

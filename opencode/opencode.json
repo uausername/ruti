@@ -15,6 +15,9 @@
         "dots-3-note-preview": {
           "name": "Dots 3 Note Preview"
         },
+        "flint-v1.0": {
+          "name": "Flint V1.0"
+        },
         "free": {
           "name": "Free"
         },
@@ -23,6 +26,9 @@
         },
         "gemini-flash-lite": {
           "name": "Gemini Flash Lite"
+        },
+        "gemma-4-31b-it": {
+          "name": "Gemma 4 31B It"
         },
         "glm-5.3-flash": {
           "name": "Glm 5.3 Flash"
@@ -48,14 +54,14 @@
         "mimo-v2.6-flash": {
           "name": "Mimo V2.6 Flash"
         },
-        "nemotron-3-super-120b-a12b": {
-          "name": "Nemotron 3 Super 120B A12B"
-        },
         "nemotron-3-ultra-550b-a55b": {
           "name": "Nemotron 3 Ultra 550B A55B"
         },
         "nemotron-3.5-lightning": {
           "name": "Nemotron 3.5 Lightning"
+        },
+        "nemotron-3.5-super-vl": {
+          "name": "Nemotron 3.5 Super Vl"
         },
         "north-mini-code": {
           "name": "North Mini Code"
