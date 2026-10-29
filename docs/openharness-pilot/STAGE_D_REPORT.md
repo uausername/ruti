@@ -53,6 +53,15 @@ file; Windows guidance was already current. Existing Harness hooks, subscription
 auth and project-trust config were preserved. The person subsequently granted
 WSL's exact hook-definition trust through Codex's UI; the agent did not write it.
 
+Backup exception: a separate WSL config.toml snapshot was not taken immediately
+before that manual UI confirmation. Codex writes hook trust under hooks.state
+in this file. The installer had backed up hooks.json, but that does not replace
+a pre-trust config.toml backup. Current private snapshots were saved afterward
+(`config.toml.ruti-snapshot-20261029T174115255263Z` in WSL,
+`config.toml.ruti-snapshot-20261029T174114962238Z` on Windows). These are explicitly
+post-trust/current snapshots, not reconstructed or falsely labeled old backups.
+Subscription authentication was not replaced; no config contents were published.
+
 ## Mode boundaries
 
 | Feature | Behavior and limit |
