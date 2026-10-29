@@ -76,6 +76,23 @@ def test_native_cmd_recovery_survives_both_gates(capture, monkeypatch, tool):
     assert denied['hookSpecificOutput']['permissionDecision'] == 'deny'
 
 
+@pytest.mark.parametrize('command,allowed', [
+    ('RUTI_HOST=codex RUTI_SESSION_ID=abc ruti mode wait off', True),
+    ('env RUTI_SESSION_ID="$CODEX_THREAD_ID" RUTI_HOST=codex ruti mode flow off', True),
+    ("$env:RUTI_HOST='codex'; $env:RUTI_SESSION_ID='abc'; ruti mode wait off", True),
+    ('$env:RUTI_SESSION_ID=$env:CODEX_THREAD_ID; $env:RUTI_HOST="codex"; ruti mode flow off', True),
+    ('RUTI_HOST=codex RUTI_SESSION_ID=other ruti mode wait off', False),
+    ("$env:RUTI_HOST='codex'; $env:RUTI_SESSION_ID='ABC'; ruti mode wait off", False),
+    ('env RUTI_HOST=codex RUTI_SESSION_ID=abc ruti status; git status', False),
+    ("$env:RUTI_HOST='codex'; $env:RUTI_SESSION_ID='abc'; ruti status; git status", False),
+    ('RUTI_HOST=codex RUTI_SESSION_ID=$(other) ruti mode wait off', False),
+])
+def test_session_bound_recovery_prefixes_do_not_widen_gate(command, allowed):
+    from ruti import wait
+    adapted = h._tool_payload(payload(tool_name='exec_command', tool_input={'cmd': command}), 'codex:abc')
+    assert wait.tool_allowed_while_paused(adapted['tool_name'], adapted['tool_input']) is allowed
+
+
 def test_stale_context_not_freshened_or_borrowed(monkeypatch):
     monkeypatch.setattr(h.codex_telemetry, 'capture', lambda _: {
         'context_used_percentage': 90, 'context_captured_at_epoch': time.time() - 500})

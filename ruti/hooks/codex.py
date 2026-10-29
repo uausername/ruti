@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
 import sys
 import time
 
@@ -119,7 +120,45 @@ def _tool_payload(payload, sid):
         value = result['tool_input']
         if not isinstance(value.get('command'), str) and isinstance(value.get('cmd'), str):
             result['tool_input'] = {**value, 'command': value['cmd']}
+        command = result['tool_input'].get('command')
+        if isinstance(command, str):
+            result['tool_input'] = {**result['tool_input'], 'command': _recovery_command(command, sid)}
     return result
+
+
+def _recovery_command(command, sid):
+    """Recognize the required host/session bindings before a pure Ruti command.
+
+    This only adapts policy inspection; it never executes or approves a command.
+    Unknown prefixes remain unchanged and therefore stay gated.
+    """
+    raw = _raw_id(sid)
+    if not raw:
+        return command
+    values = {raw, '$CODEX_THREAD_ID', '${CODEX_THREAD_ID}'}
+    try:
+        tokens = shlex.split(command)
+        if tokens and tokens[0] == 'env':
+            tokens = tokens[1:]
+        if len(tokens) >= 3:
+            bindings = dict(token.split('=', 1) for token in tokens[:2])
+            if (set(bindings) == {'RUTI_HOST', 'RUTI_SESSION_ID'}
+                    and bindings['RUTI_HOST'] == 'codex'
+                    and bindings['RUTI_SESSION_ID'] in values and tokens[2] == 'ruti'):
+                return shlex.join(tokens[2:])
+    except ValueError:
+        pass
+    # PowerShell's standard per-invocation bindings contain semicolons. Strip
+    # only these exact two assignments, never arbitrary shell setup/chaining.
+    identity = re.escape(raw)
+    host = r"\$env:RUTI_HOST\s*=\s*(?:'codex'|\"codex\")\s*;\s*"
+    session = (r"\$env:RUTI_SESSION_ID\s*=\s*(?:'" + identity + r"'|\"" + identity
+               + r"\"|\$env:CODEX_THREAD_ID|\"\$env:CODEX_THREAD_ID\")\s*;\s*")
+    for prefix in (host + session, session + host):
+        match = re.fullmatch(r'\s*' + prefix + r'(ruti(?:\s+.*)?)\s*', command)
+        if match:
+            return match[1]
+    return command
 
 
 def _flow_gate(sid, payload):
