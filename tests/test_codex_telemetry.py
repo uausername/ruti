@@ -123,7 +123,10 @@ def test_host_and_unavailable(rollout, monkeypatch):
     assert t.load('codex:abc', NOW) == {}
     assert t.read(path.parent, 'abc', NOW) == {}
     link = path.with_name('link')
-    link.symlink_to(path)
+    try:
+        link.symlink_to(path)
+    except PermissionError:
+        pytest.skip('symlink privilege unavailable')
     assert t.read(link, 'abc', NOW) == {}
 
 
