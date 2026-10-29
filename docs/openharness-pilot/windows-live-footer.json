@@ -1,0 +1,19 @@
+{
+  "result": "PASS",
+  "platform": "win32",
+  "initial": "Ruti on timemachine* proxy unknown local:unknown GPU unknown",
+  "initial_seconds": 0.422,
+  "session_a": "Ruti OFF timemachine* proxy up local:none GPU5.5G",
+  "session_b": "Ruti on timemachine* proxy up local:none GPU5.5G",
+  "seconds_a": 0.469,
+  "seconds_b": 0.39,
+  "proxy": true,
+  "loaded_ok": true,
+  "loaded_count": 0,
+  "gpu": {
+    "free_mib": 5670,
+    "total_mib": 6144
+  },
+  "isolated_state": true,
+  "model_requests": 0
+}

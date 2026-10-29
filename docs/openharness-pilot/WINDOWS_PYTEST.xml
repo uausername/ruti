@@ -1,0 +1,52 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<testsuites name="pytest tests">
+  <testsuite name="pytest" errors="0" failures="0" skipped="0" tests="47" time="1.729" timestamp="2026-10-29T13:24:07.126223+02:00">
+    <testcase classname="tests.test_codex_host" name="test_codex_session_does_not_reuse_claude" time="0.013" />
+    <testcase classname="tests.test_codex_host" name="test_codex_ignores_claude_quota" time="0.006" />
+    <testcase classname="tests.test_codex_host" name="test_claude_session_remains_compatible" time="0.006" />
+    <testcase classname="tests.test_codex_host" name="test_codex_thread_automatically_selects_host_and_enables_session" time="0.037" />
+    <testcase classname="tests.test_codex_host" name="test_explicit_claude_host_overrides_inherited_codex_thread" time="0.006" />
+    <testcase classname="tests.test_codex_host" name="test_codex_install_preserves_user_guidance_and_is_idempotent" time="0.016" />
+    <testcase classname="tests.test_codex_host" name="test_codex_installer_preview_does_not_call_claude" time="0.045" />
+    <testcase classname="tests.test_codex_host" name="test_snapshot_detects_content_change_with_same_git_status" time="0.017" />
+    <testcase classname="tests.test_flow_session" name="test_a_renamed_session_outranks_the_auto_title" time="0.010" />
+    <testcase classname="tests.test_flow_session" name="test_the_last_custom_title_is_the_one" time="0.012" />
+    <testcase classname="tests.test_flow_session" name="test_only_an_auto_title_is_used_when_nothing_was_named" time="0.011" />
+    <testcase classname="tests.test_flow_session" name="test_the_custom_title_is_kept_apart_from_the_generated_one" time="0.011" />
+    <testcase classname="tests.test_flow_session" name="test_a_cyrillic_title_round_trips" time="0.009" />
+    <testcase classname="tests.test_flow_session" name="test_a_bridge_session_alone_means_remote_control" time="0.010" />
+    <testcase classname="tests.test_flow_session" name="test_a_disconnect_beats_the_markers_before_it" time="0.010" />
+    <testcase classname="tests.test_flow_session" name="test_a_bridge_still_active_at_the_end" time="0.010" />
+    <testcase classname="tests.test_flow_session" name="test_an_ordinary_transcript_says_neither" time="0.010" />
+    <testcase classname="tests.test_flow_session" name="test_nothing_to_read_is_not_an_error" time="0.010" />
+    <testcase classname="tests.test_flow_session" name="test_the_title_line_of_the_handoff_is_read_in_any_markdown_shape[Title: Fix X]" time="0.012" />
+    <testcase classname="tests.test_flow_session" name="test_the_title_line_of_the_handoff_is_read_in_any_markdown_shape[**Title:** Fix X]" time="0.013" />
+    <testcase classname="tests.test_flow_session" name="test_the_title_line_of_the_handoff_is_read_in_any_markdown_shape[## Title: Fix X]" time="0.010" />
+    <testcase classname="tests.test_flow_session" name="test_the_title_line_of_the_handoff_is_read_in_any_markdown_shape[- Title - Fix X]" time="0.011" />
+    <testcase classname="tests.test_flow_session" name="test_the_title_line_of_the_handoff_is_read_in_any_markdown_shape[# Handoff\n\nTitle \u2013 `Fix X`  \n]" time="0.011" />
+    <testcase classname="tests.test_flow_session" name="test_the_title_line_of_the_handoff_is_read_in_any_markdown_shape[&gt; Title: &quot;Fix   X&quot;\n]" time="0.011" />
+    <testcase classname="tests.test_flow_session" name="test_no_title_line_means_no_title_to_carry" time="0.009" />
+    <testcase classname="tests.test_flow_session" name="test_a_word_that_merely_starts_with_title_is_not_one" time="0.008" />
+    <testcase classname="tests.test_flow_session" name="test_the_next_session_is_named_for_the_work_the_handoff_names" time="0.009" />
+    <testcase classname="tests.test_flow_session" name="test_the_goal_is_never_a_name" time="0.007" />
+    <testcase classname="tests.test_flow_session" name="test_a_bad_legacy_title_is_skipped_rather_than_used" time="0.008" />
+    <testcase classname="tests.test_flow_session" name="test_a_long_handoff_title_is_cut_at_a_word" time="0.010" />
+    <testcase classname="tests.test_flow_session" name="test_the_folder_name_is_the_last_named_thing_before_the_generic_one" time="0.010" />
+    <testcase classname="tests.test_flow_session" name="test_with_nothing_at_all_to_go_on" time="0.010" />
+    <testcase classname="tests.test_flow_session" name="test_a_name_the_user_chose_beats_the_handoff" time="0.010" />
+    <testcase classname="tests.test_flow_session" name="test_a_name_a_previous_hop_wrote_is_not_the_user_speaking" time="0.010" />
+    <testcase classname="tests.test_flow_session" name="test_a_very_long_name_is_cut_at_a_word_never_mid_word" time="0.010" />
+    <testcase classname="tests.test_flow_session" name="test_the_launcher_names_the_session_and_keeps_remote_control_on" time="0.010" />
+    <testcase classname="tests.test_flow_session" name="test_a_remote_control_flag_is_never_bare" time="0.008" />
+    <testcase classname="tests.test_flow_session" name="test_nothing_is_added_when_there_is_nothing_to_carry" time="0.010" />
+    <testcase classname="tests.test_flow_session" name="test_stop_carries_both_across_from_the_transcript" time="0.086" />
+    <testcase classname="tests.test_flow_session" name="test_stop_names_the_next_session_for_the_work_the_handoff_names" time="0.055" />
+    <testcase classname="tests.test_flow_session" name="test_stop_names_it_from_the_folder_when_the_handoff_has_no_usable_title" time="0.049" />
+    <testcase classname="tests.test_flow_session" name="test_stop_does_not_carry_the_previous_hop_s_name_on" time="0.125" />
+    <testcase classname="tests.test_flow_session" name="test_stop_without_a_transcript_still_names_it_from_the_handoff" time="0.057" />
+    <testcase classname="tests.test_flow_session" name="test_a_continuation_is_never_lost_to_a_naming_problem" time="0.051" />
+    <testcase classname="tests.test_session_start_hook" name="test_a_healthy_run_still_caches_so_a_stale_bad_badge_can_clear" time="0.024" />
+    <testcase classname="tests.test_session_start_hook" name="test_an_unhealthy_run_caches_and_reports" time="0.013" />
+    <testcase classname="tests.test_session_start_hook" name="test_a_cache_failure_does_not_break_the_report" time="0.009" />
+  </testsuite>
+</testsuites>
