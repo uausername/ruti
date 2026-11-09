@@ -591,27 +591,61 @@ def _check_tls() -> Check:
 
 
 def _check_proxy_bind() -> Check:
+    import socket
+
     from . import proc
 
-    try:
-        result = proc.run(["netstat", "-ano"], timeout=15.0)
-    except (proc.ToolNotFound, proc.ToolTimeout):
-        return Check("proxy-bind", WARN, "could not inspect listening sockets")
+    candidates: dict[str, bool] = {}
+    # This host can transiently omit a live endpoint as well as mislabel its state.
+    # Retry the snapshot once; no bind evidence must still produce a warning.
+    for _attempt in range(2):
+        try:
+            result = proc.run(["netstat", "-ano"], timeout=15.0)
+        except (proc.ToolNotFound, proc.ToolTimeout):
+            return Check("proxy-bind", WARN, "could not inspect listening sockets")
 
-    for line in result.stdout.splitlines():
-        if ":4000" in line and "LISTEN" in line.upper():
-            local = line.split()[1] if len(line.split()) > 1 else ""
-            if local.startswith("0.0.0.0") or local.startswith("[::]"):
-                return Check(
-                    "proxy-bind", BAD,
-                    f"the proxy is listening on {local} -- every interface",
-                    detail=(
-                        "/model/info answers without authentication, so anyone who can "
-                        "route to this machine can read the config and spend your API keys. "
-                        "start-litellm.ps1 passes --host 127.0.0.1; this process predates it"
-                    ),
-                )
-            return Check("proxy-bind", OK, f"listening on {local}")
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) < 4 or parts[0].upper() not in ("TCP", "TCP6"):
+                continue
+            local = parts[1]
+            if not local.endswith(":4000"):
+                continue
+            is_listener = parts[3].upper() in ("LISTEN", "LISTENING")
+            # On this Windows host a live listener can be labelled CLOSED/FIN_WAIT_1.
+            # No peer is only a candidate: a bound or closed socket may have none too.
+            if is_listener or parts[2] in ("0.0.0.0:0", "[::]:0", "*:*"):
+                candidates[local] = candidates.get(local, False) or is_listener
+        if candidates:
+            break
+
+    listeners = []
+    for local, is_listener in candidates.items():
+        if not is_listener:
+            host = local.rsplit(":", 1)[0].strip("[]")
+            host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
+            try:
+                # Connect only; no HTTP/model request and no proxy restart.
+                with socket.create_connection((host, 4000), timeout=0.5):
+                    pass
+            except OSError:
+                continue
+        listeners.append(local)
+
+    # A loopback entry must not hide a second listener on every interface.
+    for local in listeners:
+        if local in ("0.0.0.0:4000", "[::]:4000"):
+            return Check(
+                "proxy-bind", BAD,
+                f"the proxy is listening on {local} -- every interface",
+                detail=(
+                    "/model/info answers without authentication, so anyone who can "
+                    "route to this machine can read the config and spend your API keys. "
+                    "start-litellm.ps1 passes --host 127.0.0.1; this process predates it"
+                ),
+            )
+    if listeners:
+        return Check("proxy-bind", OK, f"listening on {listeners[0]}")
     return Check("proxy-bind", WARN, "nothing is listening on :4000")
 
 
