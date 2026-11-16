@@ -20,10 +20,12 @@ def iso(ts: float) -> str:
 
 
 class Fake:
-    def __init__(self, state="idle", last=NOW - 600, pane=True, after_paste="working", new_ok=True):
+    def __init__(self, state="idle", last=NOW - 600, pane=True, after_paste="working", new_ok=True,
+                 new_state="working", screen="", close_needs_now=False):
         self.rows = [{"id": "old", "agent": "Claude Code", "state": state, "folder": FOLDER,
                       "lastActive": iso(last)}] if state else []
         self.pane, self.after_paste, self.new_ok = pane, after_paste, new_ok
+        self.new_state, self.screen, self.close_needs_now = new_state, screen, close_needs_now
         self.calls: list[list[str]] = []
 
     def __call__(self, argv):
@@ -39,14 +41,18 @@ class Fake:
         if argv[:2] == ["tmux", "load-buffer"]:
             self.pasted = open(argv[-1], encoding="utf-8").read()
             return ""
+        if argv[:2] == ["tmux", "capture-pane"]:
+            return self.screen
         if argv[:1] == ["tmux"]:
             return ""
         if argv[:2] == ["harness", "new"]:
             if not self.new_ok:
                 return json.dumps({"ok": False})
-            self.rows.append({"id": "new", "agent": "Claude Code", "state": "working", "folder": FOLDER})
+            self.rows.append({"id": "new", "agent": "Claude Code", "state": self.new_state, "folder": FOLDER})
             return json.dumps({"ok": True, "agent": {"id": "new"}})
         if argv[:2] == ["harness", "close"]:
+            if self.close_needs_now and "--now" not in argv:
+                return "1 background command running; --now closes anyway"
             self.rows = [r for r in self.rows if r["id"] != argv[2]]
             return ""
         raise AssertionError(argv)
@@ -161,6 +167,28 @@ def test_long_idle_master_gets_a_fresh_session_and_old_is_closed(tmp_path):
     assert FOLDER in new and "--model" in new and "opus" in new
     assert "MASTER_RESUME.md" in new[new.index("--task") + 1]
     assert ["harness", "close", "old"] in fake.calls
+
+
+def test_new_master_stuck_on_trust_screen_fails_once_and_keeps_old(tmp_path):
+    fake = Fake(last=NOW - 4 * 86400, new_state="unknown",
+                screen="Quick safety check: Is this a project you created or one you trust?\n"
+                       " ❯ No, exit\n   Yes, I trust this folder\n")
+    w = make(tmp_path, fake)
+    arm(w)
+    row = w.tick()
+    assert row["event"] == "failed" and "trust" in row["reason"] and row["old_kept"] == "old"
+    assert not any(c[:2] == ["harness", "close"] for c in fake.calls)
+    assert w.load()["status"] == "failed"  # no retry: it would start a second session
+    assert (tmp_path / "needs_admin.jsonl").exists()
+
+
+def test_old_master_with_background_loop_is_closed_with_now(tmp_path):
+    fake = Fake(last=NOW - 4 * 86400, close_needs_now=True)
+    w = make(tmp_path, fake)
+    arm(w)
+    row = w.tick()
+    assert row["closed"] == "old"
+    assert ["harness", "close", "old", "--now"] in fake.calls
 
 
 def test_dead_master_gets_a_fresh_session(tmp_path):

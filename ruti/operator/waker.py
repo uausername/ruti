@@ -11,8 +11,11 @@ then ends its turn. The `ruti operator wake` service checks that request every m
   turn ``working`` within a minute;
 * otherwise (pane gone, or a long pause where resuming would re-read the whole context
   uncached) -> a *new* master is started in the same folder with
-  ``harness new claude`` and told to read the checkpoint; once it is listed, the old
-  idle master is closed (its conversation is kept).
+  ``harness new claude`` and told to read the checkpoint; once it is *working*, the old
+  idle master is closed (its conversation is kept; ``--now`` if a stray background loop
+  would otherwise wake it later). A new master that never starts working -- e.g. stuck
+  on Claude's "trust this folder" screen -- fails the request at once (a retry would
+  start a second session) and the old master is left as it was.
 
 Every step is a JSON line in ``$STATE_ROOT/operator/waker.jsonl``. After
 ``max_attempts`` failures the request turns ``failed`` and goes to ``needs_admin.jsonl``.
@@ -38,6 +41,8 @@ Runner = Callable[[list[str]], str]
 QUOTA_LIMITS = {"five_hour": 95, "seven_day": 97}
 STALE_LIMITS = {"five_hour": 80, "seven_day": 90}
 FRESH_S = 1800
+# Claude Code's first-run screen in a folder it has not been told to trust.
+TRUST_MARK = "trust this folder"
 
 
 def _run(argv: list[str]) -> str:
@@ -275,9 +280,40 @@ class Waker:
         self.sleep(10)
         if not self.find(self.harnesses() or [], new_id):
             return self._fail(req, "new master is not listed by `harness ps`", new_id=new_id)
-        if old and old.get("state") != "working":
-            self.run(["harness", "close", old["id"]])
-        return self._close(req, "done", how="new session", new_id=new_id, closed=(old or {}).get("id"))
+        if not self._became_working(new_id, None):
+            # A session exists now: retrying would start a second one. Hand it to a person.
+            screen = self._screens(req["folder"])
+            why = ("Claude asks whether to trust the folder; answer it in the pane"
+                   if TRUST_MARK in screen else "new master did not start working")
+            req["status"] = "failed"
+            req["new_id"] = new_id
+            self.save(req)
+            return self.log("failed", reason=why, new_id=new_id, old_kept=(old or {}).get("id"))
+        closed = self._close_old(old) if old and old.get("state") != "working" else None
+        return self._close(req, "done", how="new session", new_id=new_id, closed=closed)
+
+    def _screens(self, folder: str) -> str:
+        out = self.run(["tmux", "list-panes", "-a", "-F",
+                        "#{pane_id}|#{pane_current_command}|#{pane_current_path}"])
+        panes = [p for p, _cmd, path in (r.split("|", 2) for r in out.splitlines() if r.count("|") >= 2)
+                 if path.rstrip("/") == folder.rstrip("/")]
+        return "\n".join(self.run(["tmux", "capture-pane", "-p", "-t", p]) for p in panes)
+
+    def _close_old(self, old: dict) -> str | None:
+        """Close the replaced master; its stray background loop must not wake it later.
+
+        `harness close` refuses while the old session still runs a background command
+        (e.g. a budget-wait loop); left alone, that loop finishes and wakes a second
+        master that re-reads its whole context. Since the new master already works,
+        the old one is closed with --now. Returns the closed id, or None (needs_admin).
+        """
+        for argv in (["harness", "close", old["id"]], ["harness", "close", old["id"], "--now"]):
+            self.run(argv)
+            if not self.find(self.harnesses() or [], old["id"]):
+                return old["id"]
+        self.log("needs_admin", reason="old master could not be closed; two masters may run",
+                 harness_id=old["id"])
+        return None
 
     def _close(self, req: dict, status: str, **fields) -> dict:
         req.update(status=status, handled_at=self.now(), **{k: v for k, v in fields.items() if k != "how"})
