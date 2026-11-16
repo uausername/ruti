@@ -87,6 +87,33 @@ def test_spent_quota_postpones_to_reset(tmp_path):
     assert fake.calls == []
 
 
+def test_stale_reading_uses_stricter_limits(tmp_path):
+    q = {"captured_at_epoch": NOW - 5 * 86400,
+         "five_hour": {"used_percentage": 85, "resets_at": NOW + 600}}
+    fake = Fake()
+    w = make(tmp_path, fake, quota=q)
+    arm(w)
+    assert w.tick()["event"] == "postponed"
+    assert fake.calls == []
+
+
+def test_fresh_reading_below_limit_does_not_block(tmp_path):
+    q = {"captured_at_epoch": NOW - 60, "five_hour": {"used_percentage": 85, "resets_at": NOW + 600}}
+    w = make(tmp_path, Fake(), quota=q)
+    arm(w)
+    assert w.tick()["event"] == "done"
+
+
+def test_freshest_source_wins(tmp_path):
+    old, new = tmp_path / "wsl.json", tmp_path / "win.json"
+    old.write_text(json.dumps({"captured_at_epoch": NOW - 86400 * 5,
+                               "five_hour": {"used_percentage": 61}}), encoding="utf-8")
+    new.write_text(json.dumps({"captured_at_epoch": NOW - 60,
+                               "five_hour": {"used_percentage": 81}}), encoding="utf-8")
+    q = waker.load_quota([old, tmp_path / "missing.json", new])
+    assert q["five_hour"]["used_percentage"] == 81 and q["_source"] == str(new)
+
+
 def test_quota_that_already_reset_does_not_block(tmp_path):
     fake = Fake()
     w = make(tmp_path, fake, quota={"five_hour": {"used_percentage": 100, "resets_at": NOW - 10}})

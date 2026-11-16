@@ -36,6 +36,8 @@ from .. import config
 Runner = Callable[[list[str]], str]
 
 QUOTA_LIMITS = {"five_hour": 95, "seven_day": 97}
+STALE_LIMITS = {"five_hour": 80, "seven_day": 90}
+FRESH_S = 1800
 
 
 def _run(argv: list[str]) -> str:
@@ -66,9 +68,20 @@ def parse_after(value: str, now: float, quota: dict | None = None) -> float:
 
 
 def quota_block(quota: dict, now: float) -> float | None:
-    """The latest reset among windows at/over their limit that have not reset yet."""
+    """The latest reset among windows at/over their limit that have not reset yet.
+
+    A reading older than ``FRESH_S`` may have grown since -- other Claude sessions
+    (Windows, other projects) spend the same subscription -- so the stricter
+    ``STALE_LIMITS`` apply to it.
+    """
+    captured = quota.get("captured_at_epoch")
+    try:
+        stale = captured is None or now - float(captured) > FRESH_S
+    except (TypeError, ValueError):
+        stale = True
+    limits = STALE_LIMITS if stale else QUOTA_LIMITS
     blocked = []
-    for key, limit in QUOTA_LIMITS.items():
+    for key, limit in limits.items():
         w = quota.get(key) or {}
         used, reset = w.get("used_percentage"), w.get("resets_at")
         try:
@@ -80,11 +93,32 @@ def quota_block(quota: dict, now: float) -> float | None:
     return max(blocked) if blocked else None
 
 
-def load_quota() -> dict:
-    try:
-        return json.loads((config.STATE_ROOT / "quota.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+def quota_sources() -> list[Path]:
+    """This ruti's quota.json, plus the Windows one when running in WSL.
+
+    The status line writes quota.json only where a Claude session runs, and the
+    Windows sessions spend the same subscription as the WSL master.
+    """
+    paths = [config.STATE_ROOT / "quota.json"]
+    extra = os.environ.get("RUTI_QUOTA_SOURCES")
+    if extra:
+        paths += [Path(p) for p in extra.split(os.pathsep) if p]
+    else:
+        paths += sorted(Path("/mnt/c/Users").glob("*/AppData/Local/ruti/quota.json"))
+    return paths
+
+
+def load_quota(paths: list[Path] | None = None) -> dict:
+    """The freshest quota reading among the sources (by ``captured_at_epoch``)."""
+    best: dict = {}
+    for path in paths if paths is not None else quota_sources():
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if float(data.get("captured_at_epoch") or 0) > float(best.get("captured_at_epoch") or 0):
+            best = {**data, "_source": str(path)}
+    return best
 
 
 @dataclass
@@ -189,11 +223,14 @@ class Waker:
         now = self.now()
         if now < float(req.get("after", 0)):
             return None
-        reset = quota_block(self.quota(), now)
+        quota = self.quota()
+        reset = quota_block(quota, now)
         if reset:
             req["after"] = reset + 120
             self.save(req)
-            return self.log("postponed", until=req["after"], reason="Claude quota still spent")
+            age = now - float(quota.get("captured_at_epoch") or 0)
+            return self.log("postponed", until=req["after"], reason="Claude quota still spent",
+                            reading_age_s=int(age), source=quota.get("_source"))
         rows = self.harnesses()
         if rows is None:
             return self.log("error", error="`harness ps` failed")

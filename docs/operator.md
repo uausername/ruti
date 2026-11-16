@@ -62,7 +62,11 @@ ruti operator resume-at --cancel
 week ≥ 97%), or now. The request is `$STATE_ROOT/operator/resume.json`. The waker
 checks it every minute and, once due:
 
-* postpones it to the reset while `quota.json` still shows a spent window;
+* postpones it to the reset while the Claude quota still shows a spent window. It reads
+  the freshest of WSL's and Windows' `quota.json` (`/mnt/c/Users/*/AppData/Local/ruti/`,
+  or `RUTI_QUOTA_SOURCES`): the status line writes only where a Claude session runs, and
+  all sessions spend one subscription. A reading older than 30 minutes uses stricter
+  limits (5h ≥ 80%, week ≥ 90%) because it may have grown since;
 * does nothing if the master harness is already working;
 * if the master is idle for less than 50 minutes (prompt cache still warm) and has one
   tmux pane, pastes a fixed "pause is over, continue from <checkpoint>" message and
