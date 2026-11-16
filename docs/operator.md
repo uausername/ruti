@@ -46,6 +46,42 @@ Codex 0.166 cuts a long command as `[… N lines] ^a view all`; the approver ope
 pager and reads it from the top one line at a time until it shows 100%, and refuses
 if any step moves the view by more than one line.
 
+## Trusted guard — `ruti operator guard`
+
+```bash
+ruti operator guard sync            # codex_guard.py + protect_rules.py from haccp@main
+ruti operator guard install-hook    # one PreToolUse entry in ~/.codex/hooks.json
+ruti operator guard status          # intact? current with main? wired in? (exit 1 if not)
+```
+
+The guard files are copied from `git show <commit>:scripts/agent-pilot/...` — the
+committed LF bytes — into `~/.local/share/ruti/codex-guard/` (outside every worktree,
+read-only) with a manifest of their sha256. A small `shim.py` finds the checkout from
+the hook payload's `cwd`, and for checkouts under the repository runs the trusted copy
+against it; anything else (another repository) is left alone, and any failure denies.
+
+The hook goes first in `PreToolUse`: ruti's own Codex installer keeps foreign groups
+first and appends its handlers, so the index Codex keys its trust by stays put. A person
+trusts it **once** in Codex `/hooks`; worktrees no longer need `.codex/hooks.json` or
+their own trust. After `main` changes the guard, `guard status` reports `current: false`
+and `prepare` refuses until `guard sync` (the hook definition, and so its trust, does
+not change). The approver never answers Codex's "Hooks need review" screen; it queues
+it in `needs_admin.jsonl`.
+
+## Worker worktrees — `ruti operator prepare`
+
+```bash
+ruti operator prepare codex-pee --model gpt-6.1-sol --effort high [--branch feat/x] [--base main]
+```
+
+Creates `.ruti/harness-local-<newest>/worktrees/codex-pee` with Windows git and
+`core.autocrlf=false` (LF as committed, as CI sees it), rewrites `.git` to a relative
+`gitdir` (Windows git and WSL git both read it — `gitdir: C:/…` made every git command
+Codex ran in WSL fail), writes `.codex/config.toml` with the profile (excluded from
+`git status`), checks `git status` is clean, and writes
+`codex-runs/pee/PREPARED.json`. Refuses while the Claude quota is spent (same reading as
+the waker) or the trusted guard is not `ok`.
+
 ## Master waker — `ruti operator wake`
 
 Before the master ends a turn for a pause (quota, «Пауза», waiting on Codex), it writes
