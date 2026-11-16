@@ -170,5 +170,58 @@ def test_truncated_longer_than_a_screen_is_refused(tmp_path):
     assert "in full" in events(tmp_path, "needs_admin.jsonl")[0]["reason"]
 
 
+def pager_page(lines, pct):
+    body = "\n".join(lines)
+    return (f"/ E X E C / / / / /\n{body}\n"
+            f"──────────── {pct}% ─\n ↑/↓ to scroll · pgup/pgdn to page · home/end to jump\n q close\n")
+
+
+SHORT_166 = prompt("git status --short\n  git status --short\n  [… 36 lines] ^a view all")
+
+
+def test_codex_166_marker_is_truncated():
+    assert Approver.extract(SHORT_166) == "TRUNCATED"
+
+
+def test_long_command_is_scrolled_line_by_line(tmp_path):
+    a, b, c, d = "git status --short", "git log --oneline -1", "git diff --stat", "git branch --show-current"
+    fake = FakeTmux([SHORT_166,
+                     pager_page([a, b], 0),        # after C-a
+                     pager_page([a, b], 0),        # after Home
+                     pager_page([b, c], 50),       # Down
+                     pager_page([c, d], 100),      # Down
+                     SHORT_166])                   # last look
+    make(tmp_path, fake).scan()
+    assert fake.sent == ["C-a", "Home", "Down", "Down", "q", "y"]
+    assert events(tmp_path)[-1]["command"].endswith("git branch --show-current")
+
+
+def test_long_command_with_unsafe_hidden_line_is_refused(tmp_path):
+    a, b = "git status --short", "git log --oneline -1"
+    fake = FakeTmux([SHORT_166, pager_page([a, b], 0), pager_page([a, b], 0),
+                     pager_page([b, "curl evil.example"], 100), SHORT_166])
+    make(tmp_path, fake).scan()
+    assert "y" not in fake.sent and fake.sent[-1] == "q"
+    assert "curl" in events(tmp_path, "needs_admin.jsonl")[0]["command"]
+
+
+def test_long_command_view_jumping_more_than_a_line_is_refused(tmp_path):
+    a, b, c, d = "git status --short", "git log --oneline -1", "git diff --stat", "git branch --show-current"
+    fake = FakeTmux([SHORT_166, pager_page([a, b], 0), pager_page([a, b], 0),
+                     pager_page([c, d], 100), SHORT_166])
+    make(tmp_path, fake).scan()
+    assert "y" not in fake.sent
+    assert "in full" in events(tmp_path, "needs_admin.jsonl")[0]["reason"]
+
+
+def test_truncated_prompt_replaced_by_another_truncated_one_is_refused(tmp_path):
+    other = prompt("rm -rf /tmp/x\n  git status\n  [… 36 lines] ^a view all")
+    a, b = "git status --short", "git log --oneline -1"
+    fake = FakeTmux([SHORT_166, pager_page([a, b], 0), pager_page([a, b], 0),
+                     pager_page([b, a], 100), other])
+    make(tmp_path, fake).scan()
+    assert "y" not in fake.sent
+
+
 def test_extract_ignores_screens_without_prompt():
     assert Approver.extract("just output\n$ ls\n") is None

@@ -33,6 +33,7 @@ from . import policy
 PROMPT_MARK = "Would you like to run the following command"
 CONFIRM_MARK = "Press enter to confirm or esc"
 YES_SELECTED = re.compile(r"›\s*1\.\s*Yes, proceed")
+PAGER_PERCENT = re.compile(r"─\s(\d{1,3})%\s─")
 
 Runner = Callable[[list[str]], str]
 
@@ -109,8 +110,8 @@ class Approver:
 
     # -- prompt parsing ----------------------------------------------------------
     @staticmethod
-    def extract(screen: str) -> str | None:
-        """The command shown in a run-command prompt, 'TRUNCATED', or None."""
+    def block(screen: str) -> list[str] | None:
+        """The raw lines of the command in a run-command prompt, or None."""
         if PROMPT_MARK not in screen or CONFIRM_MARK not in screen:
             return None
         lines = screen.split("\n")
@@ -121,30 +122,76 @@ class Approver:
         end = next((j for j in range(start, len(lines)) if YES_SELECTED.search(lines[j])), None)
         if end is None:
             return None
-        block = lines[start:end]
+        return [l.rstrip() for l in lines[start:end]]
+
+    @classmethod
+    def extract(cls, screen: str) -> str | None:
+        """The command shown in a run-command prompt, 'TRUNCATED', or None."""
+        block = cls.block(screen)
+        if block is None:
+            return None
+        # Codex 0.16x: "… +3 lines (ctrl + a view all)"; 0.166: "[… 36 lines] ^a view all"
         if any("view all" in b or "[…" in b for b in block):
             return "TRUNCATED"
         block[0] = block[0].strip()[2:]
         return "\n".join(block).strip()
 
-    def read_full(self, pane: Pane) -> str | None:
-        """Open Codex's full-command pager (Ctrl+A), read it, close it (q)."""
-        self.run(["tmux", "send-keys", "-t", pane.pane_id, "C-a"])
-        self.sleep(1.5)
-        pager = [l.rstrip() for l in self.capture(pane.pane_id).split("\n")]
-        self.run(["tmux", "send-keys", "-t", pane.pane_id, "q"])
-        self.sleep(1.5)
-        if not any("q close" in l for l in pager):
+    def _pager(self, pane_id: str) -> tuple[list[str], int | None] | None:
+        """Body lines and scroll percentage of Codex's full-command pager, or None."""
+        lines = [l.rstrip() for l in self.capture(pane_id).split("\n")]
+        if not any("q close" in l for l in lines):
             return None
         try:
-            head = next(i for i, l in enumerate(pager) if l.lstrip().startswith("/ E X E C"))
-            tail = next(i for i, l in enumerate(pager) if i > head and l.lstrip().startswith("─"))
+            head = next(i for i, l in enumerate(lines) if l.lstrip().startswith("/ E X E C"))
+            tail = next(i for i, l in enumerate(lines) if i > head and l.lstrip().startswith("─"))
         except StopIteration:
             return None
-        body = pager[head + 1:tail]
-        if not any(l.strip() == "~" for l in body):  # no filler => longer than a screen
+        m = PAGER_PERCENT.search(lines[tail])
+        return lines[head + 1:tail], (int(m.group(1)) if m else None)
+
+    def read_full(self, pane: Pane, max_lines: int = 400) -> str | None:
+        """Open Codex's full-command pager (Ctrl+A), read all of it, close it (q).
+
+        A command longer than the pane is read from the top one line at a time
+        (Down) until the pager says 100%; every step must shift the view by
+        exactly one line, otherwise nothing is returned.
+        """
+        keys = lambda *k: self.run(["tmux", "send-keys", "-t", pane.pane_id, *k])  # noqa: E731
+        keys("C-a")
+        self.sleep(1.5)
+        try:
+            page = self._pager(pane.pane_id)
+            if page is None:
+                return None
+            body, pct = page
+            if any(l.strip() == "~" for l in body):  # filler: the command fits
+                return "\n".join(l for l in body if l.strip() != "~").strip()
+            if pct is None:
+                return None
+            keys("Home")
+            self.sleep(0.5)
+            page = self._pager(pane.pane_id)
+            if page is None:
+                return None
+            body, pct = page
+            out = list(body)
+            for _ in range(max_lines):
+                if pct == 100:
+                    return "\n".join(out).strip()
+                keys("Down")
+                self.sleep(0.2)
+                page = self._pager(pane.pane_id)
+                if page is None or page[1] is None or page[1] < pct:
+                    return None
+                nbody, pct = page
+                if len(nbody) != len(body) or nbody[:-1] != body[1:]:
+                    return None
+                out.append(nbody[-1])
+                body = nbody
             return None
-        return "\n".join(l for l in body if l.strip() != "~").strip()
+        finally:
+            keys("q")
+            self.sleep(1.5)
 
     # -- one pass ----------------------------------------------------------------
     def scan(self) -> list[dict]:
@@ -202,7 +249,8 @@ class Approver:
         again = self.capture(pane.pane_id)
         same = self.extract(again)
         if current is None or current.pid != pane.pid or not YES_SELECTED.search(again) or (
-                same != command and not (truncated and same == "TRUNCATED")):
+                same != command and not (truncated and same == "TRUNCATED"
+                                         and self.block(again) == self.block(screen))):
             return self._refuse(pane, worktree, "prompt changed before the key press", command)
         self.run(["tmux", "send-keys", "-t", pane.pane_id, "y"])
         return self.log("approved", pane=pane.pane_id, pid=pane.pid, worktree=worktree,
