@@ -253,7 +253,12 @@ class Waker:
         return self._fresh(req, old)
 
     def _fresh(self, req: dict, old: dict | None) -> dict:
-        argv = ["harness", "new", "claude", req["folder"], "--json",
+        if not Path(req["folder"]).is_dir():
+            req["status"] = "failed"
+            self.save(req)
+            return self.log("failed", reason="master folder no longer exists; prepare a new worktree "
+                            "and re-arm resume-at with --folder", folder=req["folder"])
+        argv =["harness", "new", "claude", req["folder"], "--json",
                 "--name", f"master (resumed {time.strftime('%m-%d %H:%M')})",
                 "--mode", req.get("permission_mode", "auto"),
                 "--task", self.message(req, fresh=True)]

@@ -732,6 +732,43 @@ def operator_guard_status(repo: str | None, ref: str | None) -> None:
     raise SystemExit(0 if s.get("ok") else 1)
 
 
+@operator_commands.command("gc")
+@click.option("--repo", default=None, help="Default: /mnt/c/mycode/haccp in WSL, C:/mycode/haccp on Windows.")
+@click.option("--keep", multiple=True, default=("haccp-master",), show_default=True,
+              help="Substring of worktree paths never to remove (repeatable).")
+@click.option("--apply", "do_apply", is_flag=True, help="Remove the removable ones (default: list only).")
+@click.option("--json", "as_json", is_flag=True)
+def operator_gc(repo: str | None, keep: tuple[str, ...], do_apply: bool, as_json: bool) -> None:
+    """List (or --apply: remove) finished agent worktrees under .ruti/."""
+    import os
+
+    from .operator import gc
+
+    repo = repo or ("C:/mycode/haccp" if os.name == "nt" else "/mnt/c/mycode/haccp")
+    live = gc.live_folders()
+    if live is None:
+        raise click.ClickException("cannot read `harness ps`; refusing to judge which worktrees are live")
+    entries = gc.plan(repo, live=live, keep=list(keep))
+    rows = [{"path": e.path, "branch": e.branch, "removable": e.removable, "safe": e.safe,
+             "keep": e.keep, "size_mb": e.size_mb} for e in entries]
+    result = {"removable": sum(r["removable"] for r in rows),
+              "kept": sum(not r["removable"] for r in rows),
+              "size_mb": round(sum(r["size_mb"] or 0 for r in rows if r["removable"]), 1),
+              "worktrees": rows}
+    if do_apply:
+        result["applied"] = gc.apply(repo, entries)
+    if as_json:
+        ui.emit_json(result)
+        return
+    for r in rows:
+        mark = "REMOVE" if r["removable"] else "keep  "
+        why = r["safe"] if r["removable"] else "; ".join(r["keep"])
+        size = f"{r['size_mb']:>8.1f} MB" if r["size_mb"] is not None else " " * 11
+        ui.say(f"{mark} {size}  {r['path'].rsplit('/', 1)[-1]:<45} {why}")
+    ui.say(f"\n{result['removable']} removable ({result['size_mb']} MB), {result['kept']} kept"
+           + ("" if do_apply else " -- dry run; --apply to remove"))
+
+
 @operator_commands.command("quota")
 @click.option("--max-parallel", type=int, default=4, show_default=True)
 def operator_quota(max_parallel: int) -> None:

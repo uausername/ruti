@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 
 import pytest
@@ -52,6 +53,24 @@ class Fake:
 
     def names(self):
         return [" ".join(c[:2]) for c in self.calls]
+
+
+@pytest.fixture(autouse=True)
+def folder_exists(monkeypatch):
+    monkeypatch.setattr(waker.Path, "is_dir",
+                        lambda self: True if str(self).endswith("haccp-master-x") else os.path.isdir(self))
+
+
+def test_missing_master_folder_fails_without_starting(tmp_path, monkeypatch):
+    monkeypatch.setattr(waker.Path, "is_dir",
+                        lambda self: False if str(self).endswith("haccp-master-x") else os.path.isdir(self))
+    fake = Fake(state=None)
+    w = make(tmp_path, fake)
+    arm(w)
+    row = w.tick()
+    assert row["event"] == "failed" and "no longer exists" in row["reason"]
+    assert not any(c[:2] == ["harness", "new"] for c in fake.calls)
+    assert (tmp_path / "needs_admin.jsonl").exists()
 
 
 def make(tmp_path, fake, quota=None, now=NOW):
