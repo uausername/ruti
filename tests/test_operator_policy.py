@@ -53,6 +53,11 @@ ALLOWED = [
     ("codex-pee", "psql -X -v ON_ERROR_STOP=1 -d postgres -c 'CREATE DATABASE codex_pee_fix_01a1c9bb'"),
     ("codex-pee", PATH + "deno test --allow-read --no-check supabase/functions/export-csv/"),
     ("codex-pee", PATH + "deno check supabase/functions/export-csv/index.ts supabase/functions/_shared/partner_export.ts"),
+    # live drill 2026-11-16: a multi-line block of git reads was refused
+    ("codex-drill", "git --no-optional-locks rev-parse HEAD\n  git --no-optional-locks status --short\n"
+     "  git --no-optional-locks log --oneline -1\n  git --no-optional-locks branch --show-current\n"
+     "  git --no-optional-locks rev-parse --show-toplevel\n  git --no-optional-locks log --oneline -3\n"
+     "  git --no-optional-locks status --short --branch"),
     ("codex-dco", "docker ps --filter name=haccp-pgtest"),
     ("codex-dco", "psql -X -d codex_dco -At -c \"select count(*) from public.task_events\""),
 ]
@@ -114,6 +119,9 @@ DENIED = [
     # git that writes
     ("codex-dco", "git commit -am x", "allowlist"),
     ("codex-dco", "git stash", "allowlist"),
+    ("codex-dco", "git log --output=/tmp/x", "allowlist"),
+    ("codex-dco", "git branch -D main", "allowlist"),
+    ("codex-dco", "git rev-parse --git-path hooks", "allowlist"),
 ]
 
 

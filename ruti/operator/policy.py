@@ -116,7 +116,7 @@ def _blocks(worktree: str, layout: Layout) -> list[str]:
         deno + r"denocheck(?:--cached-only)?(?:supabase/functions/[\w/.*-]+\.ts)+" + redirect,
         deno + r"denotest(?:--allow-(?:read|env)(?:=[\w,/.-]+)?|--cached-only|--no-check)*(?:supabase/functions/[\w/.*-]+(?:\.ts|/))*" + redirect,
         r"cat" + own_tmp,
-        r"git(?:--no-optional-locks)?(?:rev-parse(?:--short)?HEAD|status(?:--short|--branch|--porcelain)*|diff(?:--stat|--name-only|--check)*|log-\d+(?:--oneline)?)",
+        r"git(?:--no-optional-locks)?(?:rev-parse(?:(?:--short)?HEAD|--show-toplevel|--abbrev-refHEAD)|branch--show-current|status(?:--short|--branch|--porcelain)*|diff(?:--stat|--name-only|--check)*|log(?:--oneline|-n?\d+|--stat|--decorate)*)",
         r"dockerps(?:-a)?(?:--filtername=haccp-pgtest)?(?:--format'[{}.\w ]+')?",
         r"dropdb--if-exists" + db,
         r"createdb" + db,
