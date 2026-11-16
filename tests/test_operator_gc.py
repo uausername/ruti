@@ -88,6 +88,33 @@ def test_live_session_and_keep_stay(repo):
     assert not es["codex-live"].removable and not es["haccp-master-1"].removable
 
 
+def test_path_spellings():
+    assert gc.to_windows("/mnt/c/mycode/haccp") == "C:/mycode/haccp"
+    assert gc.to_wsl("C:/mycode/haccp/.ruti/x") == "/mnt/c/mycode/haccp/.ruti/x"
+    assert gc.to_wsl("/tmp/x") == "/tmp/x" and gc.to_windows("/tmp/x") == "/tmp/x"
+
+
+def test_windows_git_from_wsl_converts_paths_and_never_prunes():
+    calls = []
+
+    def run(argv):
+        calls.append(argv)
+        out = ""
+        if "list" in argv:
+            out = ("worktree C:/mycode/haccp\nHEAD a\n\n"
+                   "worktree C:/mycode/haccp/.ruti/h/worktrees/codex-x\nHEAD b\n")
+        return subprocess.CompletedProcess(argv, 0, out, "")
+
+    g = gc.Git(run, "git.exe", windows=True)
+    es = gc.worktrees("/mnt/c/mycode/haccp", g)
+    assert es[1].path == "/mnt/c/mycode/haccp/.ruti/h/worktrees/codex-x"
+    e = gc.Entry(path=es[1].path, safe="in origin/main")
+    gc.apply("/mnt/c/mycode/haccp", [e], git=g)
+    assert calls[-1] == ["git.exe", "-C", "C:/mycode/haccp", "worktree", "remove",
+                         "C:/mycode/haccp/.ruti/h/worktrees/codex-x"]
+    assert not any("prune" in c for c in calls)
+
+
 def test_apply_removes_only_removable(repo):
     add(repo, "codex-done", "--detach")
     p = add(repo, "codex-dirty", "--detach")

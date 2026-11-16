@@ -10,13 +10,20 @@ A worktree is removable only when *all* hold:
   some remote branch.
 
 Everything else is listed with the reason it stays. ``--apply`` removes the listed ones
-with ``git worktree remove`` (without ``--force``: git itself refuses a dirty tree), then
-``git worktree prune``. Branches are not deleted.
+with ``git worktree remove`` (without ``--force``: git itself refuses a dirty tree).
+Branches are not deleted.
+
+Under WSL every git call goes through Windows ``git.exe``. The worktrees were made by
+Windows git, so their admin ``gitdir`` files hold ``C:/...`` paths; WSL git cannot see
+those, lists every such worktree as *prunable*, and a ``git worktree prune`` run from WSL
+would wipe the metadata of all of them. For the same reason ``gc`` never runs
+``worktree prune`` at all: ``worktree remove`` cleans up after itself.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +34,43 @@ Runner = Callable[[list[str]], subprocess.CompletedProcess]
 
 def _run(argv: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+
+
+def to_windows(p: str) -> str:
+    s = str(p).replace("\\", "/")
+    if s.startswith("/mnt/") and len(s) > 6 and s[6:7] in ("/", ""):
+        return s[5].upper() + ":" + (s[6:] or "/")
+    return s
+
+
+def to_wsl(p: str) -> str:
+    s = str(p).replace("\\", "/")
+    if len(s) >= 2 and s[1] == ":" and s[0].isalpha():
+        return "/mnt/" + s[0].lower() + s[2:]
+    return s
+
+
+class Git:
+    """``git -C <path> ...`` with the right binary and path spelling for this side."""
+
+    def __init__(self, run: Runner = _run, exe: str = "git", windows: bool = False):
+        self.run, self.exe, self.windows = run, exe, windows
+
+    @classmethod
+    def auto(cls, repo: str, run: Runner = _run) -> "Git":
+        if os.name != "nt" and str(repo).startswith("/mnt/"):
+            from .prepare import windows_git
+
+            exe = windows_git()
+            if exe:
+                return cls(run, exe, windows=True)
+        return cls(run)
+
+    def __call__(self, path: str, *args: str) -> subprocess.CompletedProcess:
+        return self.run([self.exe, "-C", to_windows(path) if self.windows else path, *args])
+
+    def local(self, path: str) -> str:
+        return to_wsl(path) if self.windows else path
 
 
 @dataclass
@@ -43,12 +87,12 @@ class Entry:
         return not self.keep and self.safe is not None
 
 
-def worktrees(repo: str, run: Runner = _run) -> list[Entry]:
-    out = run(["git", "-C", repo, "worktree", "list", "--porcelain"]).stdout
+def worktrees(repo: str, git: Git) -> list[Entry]:
+    out = git(repo, "worktree", "list", "--porcelain").stdout
     items, cur = [], None
     for line in out.splitlines():
         if line.startswith("worktree "):
-            cur = Entry(path=line[9:])
+            cur = Entry(path=git.local(line[9:]))
             items.append(cur)
         elif cur and line.startswith("HEAD "):
             cur.head = line[5:]
@@ -80,9 +124,9 @@ def live_folders(run: Runner = _run) -> set[str] | None:
     return {r["folder"] for r in rows if r.get("folder") and r.get("state") not in ("closed", "stopped")}
 
 
-def _prs(repo: str, run: Runner) -> dict[str, dict]:
+def _prs(repo: str, git: Git) -> dict[str, dict]:
     """headRefOid -> PR (merged/closed), from gh; {} when gh is unavailable."""
-    done = run(["gh", "pr", "list", "--repo", _slug(repo, run), "--state", "all", "--limit", "1000",
+    done = git.run(["gh", "pr", "list", "--repo", _slug(repo, git), "--state", "all", "--limit", "1000",
                 "--json", "number,state,headRefOid,headRefName"])
     try:
         rows = json.loads(done.stdout or "[]")
@@ -91,8 +135,8 @@ def _prs(repo: str, run: Runner) -> dict[str, dict]:
     return {r["headRefOid"]: r for r in rows if r.get("state") in ("MERGED", "CLOSED")}
 
 
-def _slug(repo: str, run: Runner) -> str:
-    url = run(["git", "-C", repo, "remote", "get-url", "origin"]).stdout.strip()
+def _slug(repo: str, git: Git) -> str:
+    url = git(repo, "remote", "get-url", "origin").stdout.strip()
     tail = url.split("github.com", 1)[-1].lstrip(":/")
     return tail.removesuffix(".git")
 
@@ -112,13 +156,15 @@ def _size_mb(path: str) -> float | None:
 
 
 def plan(repo: str, *, live: set[str] | None = None, keep: list[str] | None = None,
-         run: Runner = _run, prs: dict | None = None, sizes: bool = True) -> list[Entry]:
-    run(["git", "-C", repo, "fetch", "--quiet", "--prune", "origin"])
-    entries = worktrees(repo, run)
+         run: Runner = _run, prs: dict | None = None, sizes: bool = True,
+         git: Git | None = None) -> list[Entry]:
+    git = git or Git.auto(repo, run)
+    git(repo, "fetch", "--quiet", "--prune", "origin")
+    entries = worktrees(repo, git)
     root = _norm(repo)
     live = {_norm(p) for p in (live or set())}
     keep = [_norm(k) for k in (keep or [])]
-    prs = _prs(repo, run) if prs is None else prs
+    prs = _prs(repo, git) if prs is None else prs
     out = []
     for e in entries:
         p = _norm(e.path)
@@ -131,22 +177,22 @@ def plan(repo: str, *, live: set[str] | None = None, keep: list[str] | None = No
         if any(k and k in p for k in keep):
             e.keep.append("--keep")
         if not Path(e.path).exists():
-            e.keep.append("missing on disk (git worktree prune handles it)")
+            e.keep.append("missing on disk (left for a person to look at)")
             out.append(e)
             continue
-        status = run(["git", "-C", e.path, "status", "--porcelain"])
+        status = git(e.path, "status", "--porcelain")
         if status.returncode:
             e.keep.append("git status failed: " + status.stderr.strip()[:120])
         elif status.stdout.strip():
             n = len(status.stdout.strip().splitlines())
             e.keep.append(f"{n} uncommitted/untracked path(s)")
-        if run(["git", "-C", repo, "merge-base", "--is-ancestor", e.head, "origin/main"]).returncode == 0:
+        if git(repo, "merge-base", "--is-ancestor", e.head, "origin/main").returncode == 0:
             e.safe = "in origin/main"
         elif e.head in prs:
             pr = prs[e.head]
             e.safe = f"head of PR #{pr['number']} ({pr['state'].lower()})"
         else:
-            remote = run(["git", "-C", repo, "branch", "-r", "--contains", e.head]).stdout.split()
+            remote = git(repo, "branch", "-r", "--contains", e.head).stdout.split()
             if remote:
                 e.safe = "on " + remote[0]
             else:
@@ -157,13 +203,13 @@ def plan(repo: str, *, live: set[str] | None = None, keep: list[str] | None = No
     return out
 
 
-def apply(repo: str, entries: list[Entry], run: Runner = _run) -> list[dict]:
+def apply(repo: str, entries: list[Entry], run: Runner = _run, git: Git | None = None) -> list[dict]:
+    git = git or Git.auto(repo, run)
     results = []
     for e in entries:
         if not e.removable:
             continue
-        done = run(["git", "-C", repo, "worktree", "remove", e.path])
+        done = git(repo, "worktree", "remove", to_windows(e.path) if git.windows else e.path)
         results.append({"path": e.path, "removed": done.returncode == 0,
                         "error": done.stderr.strip()[:200] if done.returncode else None})
-    run(["git", "-C", repo, "worktree", "prune"])
-    return results
+    return results  # no `worktree prune`: from WSL it would drop every Windows-made worktree

@@ -136,3 +136,15 @@ Replaces `.ruti/admin-20261109/autoapprove.py` in the HACCP checkout (stopped
 2026-11-15): that script had no PID/ownership check, allowed `deno test --allow-all`,
 `psql -f /tmp/*.sql` and free-form SELECTs on the shared `postgres` database, ran under
 bare `nohup`, and kept no machine-readable log.
+
+## Worktree cleanup (`ruti operator gc`)
+
+`ruti operator gc [--keep haccp-master] [--apply] [--json]` lists linked worktrees under
+`.ruti/` and why each stays; `--apply` removes only clean ones, not used by a live
+Harness session, whose HEAD is in `origin/main`, is the head of a merged/closed PR, or is
+on a remote branch. `git worktree remove` without `--force`; branches are kept.
+
+Under WSL it drives Windows `git.exe`. Worktrees made by Windows git keep `C:/...` paths
+in `.git/worktrees/*/gitdir`; WSL git cannot see them and lists **every** such worktree
+as `prunable`, so `git worktree prune` from WSL wipes all their metadata. Never run
+`git worktree prune` from WSL in this repo; `gc` never runs it at all.
