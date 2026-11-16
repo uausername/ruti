@@ -659,6 +659,44 @@ def worktree_apply(run_id: str, directory: str, as_json: bool) -> None:
         ui.say("patch applied; source index unchanged" if applied else "patch is empty; nothing to apply")
 
 
+@main.group("operator")
+def operator_commands() -> None:
+    """Deterministic operator services for the Harness -> master -> Codex chain."""
+
+
+@operator_commands.command("check")
+@click.option("--worktree", required=True, help="Codex worker worktree name, e.g. codex-dco.")
+@click.argument("command")
+@click.option("--json", "as_json", is_flag=True)
+def operator_check(worktree: str, command: str, as_json: bool) -> None:
+    """Would the approver answer this command with "yes, once"? Exit 1 if not."""
+    from .operator import policy
+
+    d = policy.decide(command, worktree)
+    if as_json:
+        ui.emit_json({"allowed": d.allowed, "reason": d.reason})
+    else:
+        ui.say(("ALLOW  " if d.allowed else "REFUSE ") + d.reason)
+    raise SystemExit(0 if d.allowed else 1)
+
+
+@operator_commands.command("approve")
+@click.option("--once", is_flag=True, help="One pass over the tmux panes, then exit.")
+@click.option("--interval", type=float, default=5.0, show_default=True)
+@click.option("--no-require-master", is_flag=True,
+              help="Approve even when no master Claude harness is alive (not recommended).")
+def operator_approve(once: bool, interval: float, no_require_master: bool) -> None:
+    """Answer safe Codex run-command prompts in tmux (WSL), logging every decision."""
+    from .operator.approver import Approver
+
+    approver = Approver(require_master=not no_require_master)
+    if once:
+        for row in approver.scan():
+            ui.emit_json(row)
+        return
+    approver.loop(interval)
+
+
 def _session_or_die() -> str:
     session_id = sessions.current_session_id()
     if not session_id:
