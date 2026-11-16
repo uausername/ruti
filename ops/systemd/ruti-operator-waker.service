@@ -1,0 +1,17 @@
+# WSL user unit for the master waker (docs/operator.md).
+# Install: cp to ~/.config/systemd/user/, `systemctl --user daemon-reload`,
+# `systemctl --user enable --now ruti-operator-waker`; needs `loginctl enable-linger`.
+[Unit]
+Description=Ruti operator: resume the master Claude when its resume-at request is due
+After=default.target
+
+[Service]
+Type=simple
+Environment=PATH=/home/dima/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/dima/.local/bin/ruti operator wake --interval 60
+Restart=always
+RestartSec=30
+UMask=0077
+
+[Install]
+WantedBy=default.target

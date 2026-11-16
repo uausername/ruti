@@ -697,6 +697,70 @@ def operator_approve(once: bool, interval: float, no_require_master: bool) -> No
     approver.loop(interval)
 
 
+@operator_commands.command("resume-at")
+@click.option("--after", default="quota", show_default=True,
+              help="When to resume: +90m, +2h, an ISO time (UTC if no zone), an epoch, "
+                   "or `quota` (the reset of a spent Claude window, else now).")
+@click.option("--checkpoint", type=click.Path(), help="The checkpoint file the next master reads.")
+@click.option("--reason", default="pause", show_default=True)
+@click.option("--manual", is_flag=True, help="Do not wake automatically; a person resumes.")
+@click.option("--cancel", is_flag=True, help="Drop the pending request.")
+@click.option("--harness-id", help="The master harness (default: this one, from `harness ps`).")
+@click.option("--folder", help="The master's folder (default: the current directory).")
+@click.option("--model", default="opus", show_default=True, help="Model for a fresh master.")
+def operator_resume_at(after: str, checkpoint: str | None, reason: str, manual: bool, cancel: bool,
+                       harness_id: str | None, folder: str | None, model: str) -> None:
+    """Master: record when and from which checkpoint to resume, before ending the turn."""
+    import os
+    import time as _time
+
+    from .operator import waker
+
+    w = waker.Waker()
+    if cancel:
+        req = w.load() or {}
+        if req.get("status") == "pending":
+            req["status"] = "cancelled"
+            w.save(req)
+        w.log("cancelled")
+        ui.emit_json({"status": "cancelled"})
+        return
+    folder = (folder or os.getcwd()).rstrip("/")
+    if not harness_id:
+        rows = w.harnesses() or []
+        mine = [r for r in rows if r.get("self")] or [
+            r for r in rows if "claude" in str(r.get("agent", "")).lower()
+            and str(r.get("folder", "")).rstrip("/") == folder]
+        if len(mine) != 1:
+            raise click.ClickException("cannot tell which harness is the master; pass --harness-id")
+        harness_id, folder = mine[0]["id"], str(mine[0]["folder"]).rstrip("/")
+    if not manual and not checkpoint:
+        raise click.UsageError("--checkpoint is required unless --manual")
+    now = _time.time()
+    when = waker.parse_after(after, now, waker.load_quota())
+    req = waker.request(harness_id=harness_id, folder=folder,
+                        checkpoint=os.path.abspath(checkpoint) if checkpoint else "",
+                        after=when, reason=reason, mode="manual" if manual else "auto",
+                        model=model, now=now)
+    w.save(req)
+    w.log("requested", **{k: req[k] for k in ("harness_id", "after", "mode", "reason", "checkpoint")})
+    ui.emit_json({**req, "after_iso": _time.strftime("%Y-%m-%dT%H:%M:%S%z", _time.localtime(when))})
+
+
+@operator_commands.command("wake")
+@click.option("--once", is_flag=True, help="One check, then exit.")
+@click.option("--interval", type=float, default=60.0, show_default=True)
+def operator_wake(once: bool, interval: float) -> None:
+    """Resume the master when its `resume-at` request is due (WSL service)."""
+    from .operator.waker import Waker
+
+    w = Waker()
+    if once:
+        ui.emit_json(w.tick() or {"event": "nothing due", "request": w.load()})
+        return
+    w.loop(interval)
+
+
 def _session_or_die() -> str:
     session_id = sessions.current_session_id()
     if not session_id:
