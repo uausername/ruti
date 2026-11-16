@@ -732,6 +732,17 @@ def operator_guard_status(repo: str | None, ref: str | None) -> None:
     raise SystemExit(0 if s.get("ok") else 1)
 
 
+@operator_commands.command("quota")
+@click.option("--max-parallel", type=int, default=4, show_default=True)
+def operator_quota(max_parallel: int) -> None:
+    """Claude and Codex quota, and whether one more Codex worker may start (exit 1 if not)."""
+    from .operator import quota
+
+    g = quota.gate(live_codex=quota.live_codex_count(), max_parallel=max_parallel)
+    ui.emit_json(g)
+    raise SystemExit(0 if g["ok"] else 1)
+
+
 @operator_commands.command("prepare")
 @click.argument("name")
 @click.option("--repo", default="/mnt/c/mycode/haccp", show_default=True)
@@ -741,16 +752,18 @@ def operator_guard_status(repo: str | None, ref: str | None) -> None:
 @click.option("--model", default=None)
 @click.option("--effort", default=None)
 @click.option("--ignore-quota", is_flag=True)
+@click.option("--max-parallel", type=int, default=4, show_default=True)
 @click.option("--allow-no-guard", is_flag=True, help="Prepare even if the trusted guard is not ready.")
 def operator_prepare(name: str, repo: str, harness_dir: str | None, base: str, branch: str | None,
-                     model: str | None, effort: str | None, ignore_quota: bool, allow_no_guard: bool) -> None:
+                     model: str | None, effort: str | None, ignore_quota: bool, max_parallel: int,
+                     allow_no_guard: bool) -> None:
     """Create a Codex worker worktree ready to run: LF, relative gitdir, profile, receipt."""
     from .operator.prepare import PrepareError, prepare
 
     try:
         ui.emit_json(prepare(name, repo=repo, harness_dir=harness_dir, base=base, branch=branch,
                              model=model, effort=effort, ignore_quota=ignore_quota,
-                             allow_no_guard=allow_no_guard))
+                             max_parallel=max_parallel, allow_no_guard=allow_no_guard))
     except PrepareError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -758,7 +771,8 @@ def operator_prepare(name: str, repo: str, harness_dir: str | None, base: str, b
 @operator_commands.command("resume-at")
 @click.option("--after", default="quota", show_default=True,
               help="When to resume: +90m, +2h, an ISO time (UTC if no zone), an epoch, "
-                   "or `quota` (the reset of a spent Claude window, else now).")
+                   "`quota` (the reset of a spent Claude window, else now), or `codex` "
+                   "(the reset of the Codex window that blocks new workers, else now).")
 @click.option("--checkpoint", type=click.Path(), help="The checkpoint file the next master reads.")
 @click.option("--reason", default="pause", show_default=True)
 @click.option("--manual", is_flag=True, help="Do not wake automatically; a person resumes.")
@@ -795,7 +809,12 @@ def operator_resume_at(after: str, checkpoint: str | None, reason: str, manual: 
     if not manual and not checkpoint:
         raise click.UsageError("--checkpoint is required unless --manual")
     now = _time.time()
-    when = waker.parse_after(after, now, waker.load_quota())
+    if after == "codex":  # wait for the Codex window that blocks new workers
+        from .operator import quota as quota_mod
+
+        when = quota_mod.block(quota_mod.codex_reading(now=now), quota_mod.CODEX_LIMITS, now) or now
+    else:
+        when = waker.parse_after(after, now, waker.load_quota())
     req = waker.request(harness_id=harness_id, folder=folder,
                         checkpoint=os.path.abspath(checkpoint) if checkpoint else "",
                         after=when, reason=reason, mode="manual" if manual else "auto",

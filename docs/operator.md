@@ -68,6 +68,20 @@ and `prepare` refuses until `guard sync` (the hook definition, and so its trust,
 not change). The approver never answers Codex's "Hooks need review" screen; it queues
 it in `needs_admin.jsonl`.
 
+## Quota — `ruti operator quota`
+
+One answer for "may one more Codex worker start?" (exit 1 if not), with the readings:
+
+* Claude — the freshest `quota.json` (WSL or Windows), the waker's limits;
+* Codex — the freshest `rate_limits` record among recent rollouts of any Codex session
+  (`~/.codex/sessions` in WSL and Windows; all models share one limit): no new worker at
+  5h ≥ 70% or week ≥ 85%;
+* at most `--max-parallel` (default 4) Codex harnesses alive.
+
+`prepare` runs this gate. When it blocks on Codex, the master records
+`ruti operator resume-at --after codex --checkpoint …` and the waker brings it back at
+the reset.
+
 ## Worker worktrees — `ruti operator prepare`
 
 ```bash

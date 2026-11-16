@@ -32,10 +32,13 @@ def repo(tmp_path):
     return r
 
 
+OK_QUOTA = {"ok": True, "reasons": [], "summary": {"claude": {}, "codex": {}}}
+
+
 def run(repo, name="codex-abc", **kw):
-    kw.setdefault("quota", lambda: {})
+    kw.setdefault("quota_gate", lambda: OK_QUOTA)
     kw.setdefault("guard_status", lambda: OK_GUARD)
-    return prep.prepare(name, repo=str(repo), git_exe=None, now=lambda: NOW, **kw)
+    return prep.prepare(name, repo=str(repo), git_exe=None, **kw)
 
 
 def test_prepares_clean_worktree_with_relative_gitdir_profile_and_receipt(repo):
@@ -78,11 +81,11 @@ def test_existing_worktree_is_refused(repo):
 
 
 def test_spent_quota_refuses_unless_overridden(repo):
-    q = {"captured_at_epoch": NOW - 60, "five_hour": {"used_percentage": 96, "resets_at": NOW + 600}}
-    with pytest.raises(PrepareError, match="quota"):
-        run(repo, quota=lambda: q)
+    q = {"ok": False, "reasons": ["Codex quota at its limit"], "summary": {}}
+    with pytest.raises(PrepareError, match="Codex quota"):
+        run(repo, quota_gate=lambda: q)
     assert not (repo / ".ruti/harness-local-20261109/worktrees/codex-abc").exists()
-    run(repo, quota=lambda: q, ignore_quota=True)
+    run(repo, quota_gate=lambda: q, ignore_quota=True)
 
 
 def test_guard_not_ready_refuses_unless_overridden(repo):

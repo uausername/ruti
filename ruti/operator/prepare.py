@@ -2,7 +2,8 @@
 
 `ruti operator prepare codex-<short> --model ... --effort ...`:
 
-1. refuses while the Claude quota is spent (the same reading and limits as the waker) and
+1. refuses when `ruti operator quota` says no new worker may start (Claude spent, Codex
+   at 70%/85%, or ``max_parallel`` Codex harnesses already running) and
    while the trusted guard copy is missing, tampered, stale against the base, or not
    wired into ``~/.codex/hooks.json`` (``ruti operator guard status``);
 2. creates the worktree with Windows git when it is reachable (the HACCP checkout lives on
@@ -28,7 +29,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import guard as guard_mod
-from . import waker
+from . import quota as quota_mod
 
 Runner = Callable[[list[str]], str]
 NAME = re.compile(r"codex-[a-z0-9][a-z0-9-]{0,30}")
@@ -63,8 +64,9 @@ def windows_git() -> str | None:
 def prepare(name: str, *, repo: str = "/mnt/c/mycode/haccp", harness_dir: str | None = None,
             base: str = "main", branch: str | None = None, model: str | None = None,
             effort: str | None = None, ignore_quota: bool = False, allow_no_guard: bool = False,
-            run: Runner = _run, quota: Callable[[], dict] = waker.load_quota,
-            guard_status: Callable[[], dict] | None = None, now: Callable[[], float] = time.time,
+            run: Runner = _run, quota_gate: Callable[[], dict] | None = None,
+            max_parallel: int = quota_mod.MAX_PARALLEL,
+            guard_status: Callable[[], dict] | None = None,
             git_exe: str | None = "auto", to_windows: Callable[[str], str] | None = None) -> dict:
     if not NAME.fullmatch(name):
         raise PrepareError(f"worktree name must look like codex-<short>, got {name!r}")
@@ -74,12 +76,10 @@ def prepare(name: str, *, repo: str = "/mnt/c/mycode/haccp", harness_dir: str | 
     if wt.exists():
         raise PrepareError(f"{wt} already exists")
 
-    reading = quota()
-    reset = waker.quota_block(reading, now())
-    if reset and not ignore_quota:
-        raise PrepareError("Claude quota is spent until "
-                           + time.strftime("%Y-%m-%d %H:%M %z", time.localtime(reset))
-                           + f" (reading from {reading.get('_source', '?')}); start no new worker")
+    q = (quota_gate or (lambda: quota_mod.gate(live_codex=quota_mod.live_codex_count(),
+                                               max_parallel=max_parallel)))()
+    if not q["ok"] and not ignore_quota:
+        raise PrepareError("start no new worker: " + "; ".join(q["reasons"]))
 
     g = (guard_status or (lambda: guard_mod.status(repo, base)))()
     if not g.get("ok") and not allow_no_guard:
@@ -129,7 +129,7 @@ def prepare(name: str, *, repo: str = "/mnt/c/mycode/haccp", harness_dir: str | 
     receipt = {"worktree": str(wt), "name": name, "base": base, "branch": branch, "head": head,
                "gitdir": dotgit.read_text(encoding="utf-8").strip(), "profile": profile,
                "guard": {k: g.get(k) for k in ("commit", "ref", "ok", "dir")},
-               "quota": {k: reading.get(k) for k in ("five_hour", "seven_day", "captured_at", "_source")},
+               "quota": q["summary"],
                "prepared_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     runs = hdir / "codex-runs" / name[len("codex-"):]
     runs.mkdir(parents=True, exist_ok=True)
