@@ -34,6 +34,7 @@ PROMPT_MARK = "Would you like to run the following command"
 CONFIRM_MARK = "Press enter to confirm or esc"
 YES_SELECTED = re.compile(r"›\s*1\.\s*Yes, proceed")
 PAGER_PERCENT = re.compile(r"─\s(\d{1,3})%\s─")
+HOOKS_MARK = "Hooks need review"
 
 Runner = Callable[[list[str]], str]
 
@@ -206,6 +207,11 @@ class Approver:
             if not worktree:
                 continue
             screen = self.capture(pane.pane_id)
+            if HOOKS_MARK in screen:
+                # never answered here: trusting hooks is a person's decision (Codex /hooks)
+                results.append(self._refuse(pane, worktree, "Codex asks to review hooks "
+                                            "(new or changed definitions); a person trusts them in /hooks"))
+                continue
             if self.extract(screen) is not None:
                 candidates.append((pane, worktree, screen))
         if not candidates:

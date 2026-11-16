@@ -223,5 +223,17 @@ def test_truncated_prompt_replaced_by_another_truncated_one_is_refused(tmp_path)
     assert "y" not in fake.sent
 
 
+def test_hooks_review_screen_is_reported_never_answered(tmp_path):
+    screen = ("  Hooks need review\n  2 hooks are new or changed.\n\n"
+              "› 1. Review hooks\n  2. Trust all and continue\n  3. Continue without trusting\n")
+    fake = FakeTmux(screen)
+    a = make(tmp_path, fake)
+    a.scan()
+    a.scan()
+    assert fake.sent == []
+    queue = events(tmp_path, "needs_admin.jsonl")
+    assert len(queue) == 1 and "/hooks" in queue[0]["reason"]
+
+
 def test_extract_ignores_screens_without_prompt():
     assert Approver.extract("just output\n$ ls\n") is None

@@ -697,6 +697,64 @@ def operator_approve(once: bool, interval: float, no_require_master: bool) -> No
     approver.loop(interval)
 
 
+@operator_commands.group("guard")
+def operator_guard() -> None:
+    """The trusted copy of the HACCP Codex edit guard (one hook for every worktree)."""
+
+
+@operator_guard.command("sync")
+@click.option("--repo", default="/mnt/c/mycode/haccp", show_default=True)
+@click.option("--ref", default="main", show_default=True)
+def operator_guard_sync(repo: str, ref: str) -> None:
+    """Copy codex_guard.py + protect_rules.py from REPO@REF (committed bytes) into the trusted folder."""
+    from .operator import guard
+
+    ui.emit_json(guard.sync(repo, ref))
+
+
+@operator_guard.command("install-hook")
+def operator_guard_install_hook() -> None:
+    """Add the shim as PreToolUse group 0 in ~/.codex/hooks.json (trust it once in Codex /hooks)."""
+    from .operator import guard
+
+    ui.emit_json(guard.install_hook())
+
+
+@operator_guard.command("status")
+@click.option("--repo", default=None)
+@click.option("--ref", default=None)
+def operator_guard_status(repo: str | None, ref: str | None) -> None:
+    """Intact, current with the ref, and wired into Codex? Exit 1 if not."""
+    from .operator import guard
+
+    s = guard.status(repo, ref)
+    ui.emit_json(s)
+    raise SystemExit(0 if s.get("ok") else 1)
+
+
+@operator_commands.command("prepare")
+@click.argument("name")
+@click.option("--repo", default="/mnt/c/mycode/haccp", show_default=True)
+@click.option("--harness-dir", default=None, help="Default: the newest .ruti/harness-local-*.")
+@click.option("--base", default="main", show_default=True)
+@click.option("--branch", default=None, help="Create this branch instead of a detached HEAD.")
+@click.option("--model", default=None)
+@click.option("--effort", default=None)
+@click.option("--ignore-quota", is_flag=True)
+@click.option("--allow-no-guard", is_flag=True, help="Prepare even if the trusted guard is not ready.")
+def operator_prepare(name: str, repo: str, harness_dir: str | None, base: str, branch: str | None,
+                     model: str | None, effort: str | None, ignore_quota: bool, allow_no_guard: bool) -> None:
+    """Create a Codex worker worktree ready to run: LF, relative gitdir, profile, receipt."""
+    from .operator.prepare import PrepareError, prepare
+
+    try:
+        ui.emit_json(prepare(name, repo=repo, harness_dir=harness_dir, base=base, branch=branch,
+                             model=model, effort=effort, ignore_quota=ignore_quota,
+                             allow_no_guard=allow_no_guard))
+    except PrepareError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
 @operator_commands.command("resume-at")
 @click.option("--after", default="quota", show_default=True,
               help="When to resume: +90m, +2h, an ISO time (UTC if no zone), an epoch, "
