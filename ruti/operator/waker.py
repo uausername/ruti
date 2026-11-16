@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Callable
 
 from .. import config
+from . import trust as trust_mod
 
 Runner = Callable[[list[str]], str]
 
@@ -136,6 +137,8 @@ class Waker:
     fresh_after_s: float = 3000.0      # Claude Code's prompt cache lives an hour
     max_attempts: int = 3
     confirm_s: float = 60.0
+    # Pre-accept Claude's folder-trust screen; None = ~/.claude.json (WSL and Windows).
+    trust: Callable[[list[str]], object] | None = None
 
     # -- files ------------------------------------------------------------------
     def _dir(self) -> Path:
@@ -263,7 +266,13 @@ class Waker:
             self.save(req)
             return self.log("failed", reason="master folder no longer exists; prepare a new worktree "
                             "and re-arm resume-at with --folder", folder=req["folder"])
-        argv =["harness", "new", "claude", req["folder"], "--json",
+        try:
+            added = (self.trust or trust_mod.trust_everywhere)([req["folder"]])
+            if added:
+                self.log("trusted", folder=req["folder"], configs=list(added))
+        except Exception as exc:  # noqa: BLE001 -- the trust screen check below still catches it
+            self.log("error", error=f"pre-trusting the folder failed: {exc!r}")
+        argv = ["harness", "new", "claude", req["folder"], "--json",
                 "--name", f"master (resumed {time.strftime('%m-%d %H:%M')})",
                 "--mode", req.get("permission_mode", "auto"),
                 "--task", self.message(req, fresh=True)]
@@ -334,6 +343,12 @@ class Waker:
     def loop(self, interval: float = 60.0) -> None:
         self.log("started", pid_self=str(os.getpid()))
         while True:
+            try:
+                added = trust_mod.sweep()  # new agent worktrees never stop on the trust screen
+                if added:
+                    self.log("trusted", configs={k: len(v) for k, v in added.items()})
+            except Exception as exc:  # noqa: BLE001
+                self.log("error", error=f"trust sweep failed: {exc!r}")
             try:
                 self.tick()
             except Exception as exc:  # noqa: BLE001 -- the service must keep running

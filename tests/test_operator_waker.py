@@ -27,6 +27,7 @@ class Fake:
         self.pane, self.after_paste, self.new_ok = pane, after_paste, new_ok
         self.new_state, self.screen, self.close_needs_now = new_state, screen, close_needs_now
         self.calls: list[list[str]] = []
+        self.trusted: list[str] = []
 
     def __call__(self, argv):
         self.calls.append(argv)
@@ -81,7 +82,8 @@ def test_missing_master_folder_fails_without_starting(tmp_path, monkeypatch):
 
 def make(tmp_path, fake, quota=None, now=NOW):
     return Waker(run=fake, sleep=lambda s: None, now=lambda: now,
-                 quota=lambda: quota or {}, root=tmp_path)
+                 quota=lambda: quota or {}, root=tmp_path,
+                 trust=getattr(fake, "trusted", []).extend)
 
 
 def arm(w, after=NOW - 1, mode="auto"):
@@ -167,6 +169,7 @@ def test_long_idle_master_gets_a_fresh_session_and_old_is_closed(tmp_path):
     assert FOLDER in new and "--model" in new and "opus" in new
     assert "MASTER_RESUME.md" in new[new.index("--task") + 1]
     assert ["harness", "close", "old"] in fake.calls
+    assert fake.trusted == [FOLDER]  # trusted before `harness new`
 
 
 def test_new_master_stuck_on_trust_screen_fails_once_and_keeps_old(tmp_path):
@@ -266,7 +269,8 @@ def test_cli_resume_at_and_cancel(tmp_path, monkeypatch):
     from ruti.cli import main
 
     fake = Fake()
-    monkeypatch.setattr(waker, "Waker", lambda: Waker(run=fake, sleep=lambda s: None, root=tmp_path))
+    monkeypatch.setattr(waker, "Waker", lambda: Waker(run=fake, sleep=lambda s: None, root=tmp_path,
+                                                      trust=fake.trusted.extend))
     monkeypatch.setattr(waker, "load_quota", lambda: {})
     r = CliRunner().invoke(main, ["operator", "resume-at", "--after", "+1h", "--checkpoint", "cp.md",
                                   "--folder", FOLDER, "--reason", "test"])

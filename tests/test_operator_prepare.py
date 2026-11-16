@@ -38,7 +38,11 @@ OK_QUOTA = {"ok": True, "reasons": [], "summary": {"claude": {}, "codex": {}}}
 def run(repo, name="codex-abc", **kw):
     kw.setdefault("quota_gate", lambda: OK_QUOTA)
     kw.setdefault("guard_status", lambda: OK_GUARD)
+    kw.setdefault("trust", lambda folders: TRUSTED.extend(folders) or True)
     return prep.prepare(name, repo=str(repo), git_exe=None, **kw)
+
+
+TRUSTED: list[str] = []
 
 
 def test_prepares_clean_worktree_with_relative_gitdir_profile_and_receipt(repo):
@@ -52,6 +56,7 @@ def test_prepares_clean_worktree_with_relative_gitdir_profile_and_receipt(repo):
     receipt = json.loads((repo / ".ruti/harness-local-20261109/codex-runs/abc/PREPARED.json").read_text())
     assert receipt["head"] == git("rev-parse", "main", cwd=repo).strip()
     assert receipt["guard"]["commit"] == "abc" and receipt["profile"]["model"] == "gpt-6.1-sol"
+    assert r["claude_trusted"] is True and TRUSTED[-1] == str(wt)
     assert (wt / "a.txt").read_bytes() == b"one\ntwo\n"
 
 

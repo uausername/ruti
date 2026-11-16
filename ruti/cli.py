@@ -769,6 +769,21 @@ def operator_gc(repo: str | None, keep: tuple[str, ...], do_apply: bool, as_json
            + ("" if do_apply else " -- dry run; --apply to remove"))
 
 
+@operator_commands.command("trust")
+@click.argument("folders", nargs=-1)
+def operator_trust(folders: tuple[str, ...]) -> None:
+    """Pre-accept Claude's folder-trust screen: FOLDERS, or every repo/worktree/harness folder."""
+    import os
+
+    from .operator import trust
+
+    if folders:
+        added = trust.trust_everywhere([os.path.abspath(f) for f in folders])
+    else:
+        added = trust.sweep()
+    ui.emit_json({"added": added, "count": sum(len(v) for v in added.values())})
+
+
 @operator_commands.command("quota")
 @click.option("--max-parallel", type=int, default=4, show_default=True)
 def operator_quota(max_parallel: int) -> None:

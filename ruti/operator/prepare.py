@@ -30,6 +30,7 @@ from typing import Callable
 
 from . import guard as guard_mod
 from . import quota as quota_mod
+from . import trust as trust_mod
 
 Runner = Callable[[list[str]], str]
 NAME = re.compile(r"codex-[a-z0-9][a-z0-9-]{0,30}")
@@ -67,7 +68,8 @@ def prepare(name: str, *, repo: str = "/mnt/c/mycode/haccp", harness_dir: str | 
             run: Runner = _run, quota_gate: Callable[[], dict] | None = None,
             max_parallel: int = quota_mod.MAX_PARALLEL,
             guard_status: Callable[[], dict] | None = None,
-            git_exe: str | None = "auto", to_windows: Callable[[str], str] | None = None) -> dict:
+            git_exe: str | None = "auto", to_windows: Callable[[str], str] | None = None,
+            trust: Callable[[list[str]], object] | None = None) -> dict:
     if not NAME.fullmatch(name):
         raise PrepareError(f"worktree name must look like codex-<short>, got {name!r}")
     root = Path(repo)
@@ -135,4 +137,9 @@ def prepare(name: str, *, repo: str = "/mnt/c/mycode/haccp", harness_dir: str | 
     runs.mkdir(parents=True, exist_ok=True)
     (runs / "PREPARED.json").write_text(json.dumps(receipt, indent=1, ensure_ascii=False), encoding="utf-8")
     receipt["receipt"] = str(runs / "PREPARED.json")
+    # A Claude session started here (reviewer, master) must not stop on the trust screen.
+    try:
+        receipt["claude_trusted"] = bool((trust or trust_mod.trust_everywhere)([str(wt)]))
+    except Exception as exc:  # noqa: BLE001 -- trust is a convenience, not a gate
+        receipt["claude_trusted"] = f"error: {exc!r}"
     return receipt

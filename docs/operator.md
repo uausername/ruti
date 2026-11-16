@@ -148,3 +148,15 @@ Under WSL it drives Windows `git.exe`. Worktrees made by Windows git keep `C:/..
 in `.git/worktrees/*/gitdir`; WSL git cannot see them and lists **every** such worktree
 as `prunable`, so `git worktree prune` from WSL wipes all their metadata. Never run
 `git worktree prune` from WSL in this repo; `gc` never runs it at all.
+
+## Folder trust (`ruti operator trust`)
+
+The person trusts every folder on this machine (2026-11-16). Claude Code otherwise stops
+a new session on "Is this a project you created or one you trust?" -- and looks for trust
+only up to the folder's git root, so a trusted repo does not cover its worktrees.
+`ruti operator trust [FOLDER...]` marks folders trusted in `~/.claude.json` (and, under
+WSL, in the Windows `~/.claude.json` with `C:/` keys); with no folders it sweeps every
+repository under `/mnt/c/mycode`, its `.ruti/*/worktrees/*` and `~/harnesses/*`. The
+waker sweeps every minute and trusts the master folder right before `harness new`;
+`prepare` trusts the worktree it creates. Codex keeps its own trust in
+`~/.codex/config.toml` and is not touched here.
