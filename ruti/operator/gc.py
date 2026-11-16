@@ -126,11 +126,11 @@ def live_folders(run: Runner = _run) -> set[str] | None:
 
 def _prs(repo: str, git: Git) -> dict[str, dict]:
     """headRefOid -> PR (merged/closed), from gh; {} when gh is unavailable."""
-    done = git.run(["gh", "pr", "list", "--repo", _slug(repo, git), "--state", "all", "--limit", "1000",
-                "--json", "number,state,headRefOid,headRefName"])
     try:
+        done = git.run(["gh", "pr", "list", "--repo", _slug(repo, git), "--state", "all", "--limit", "1000",
+                        "--json", "number,state,headRefOid,headRefName"])
         rows = json.loads(done.stdout or "[]")
-    except ValueError:
+    except (ValueError, OSError, subprocess.SubprocessError):
         return {}
     return {r["headRefOid"]: r for r in rows if r.get("state") in ("MERGED", "CLOSED")}
 

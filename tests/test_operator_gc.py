@@ -115,6 +115,15 @@ def test_windows_git_from_wsl_converts_paths_and_never_prunes():
     assert not any("prune" in c for c in calls)
 
 
+def test_missing_gh_means_no_pr_evidence():
+    def run(argv):
+        if argv[0] == "gh":
+            raise FileNotFoundError("gh")
+        return subprocess.CompletedProcess(argv, 0, "git@github.com:o/r.git\n", "")
+
+    assert gc._prs("/r", gc.Git(run)) == {}
+
+
 def test_apply_removes_only_removable(repo):
     add(repo, "codex-done", "--detach")
     p = add(repo, "codex-dirty", "--detach")
