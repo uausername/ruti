@@ -344,6 +344,14 @@ class Waker:
         self.log("started", pid_self=str(os.getpid()))
         last_sweep, refused = 0.0, None
         while True:
+            try:  # side-agent cards shown in panes nobody reads (the master's)
+                from .admin import collect_ysk
+
+                cards = collect_ysk(self._dir() / "ysk.jsonl")
+                if cards:
+                    self.log("ysk", count=len(cards))
+            except Exception as exc:  # noqa: BLE001
+                self.log("error", error=f"ysk collect failed: {exc!r}")
             if self.now() - last_sweep >= 300:  # git per worktree: every 5 minutes is plenty
                 last_sweep = self.now()
                 try:

@@ -831,7 +831,8 @@ def operator_prepare(name: str, repo: str, harness_dir: str | None, base: str, b
 @click.option("--cancel", is_flag=True, help="Drop the pending request.")
 @click.option("--harness-id", help="The master harness (default: this one, from `harness ps`).")
 @click.option("--folder", help="The master's folder (default: the current directory).")
-@click.option("--model", default="opus", show_default=True, help="Model for a fresh master.")
+@click.option("--model", default="sonnet", show_default=True,
+              help="Model for a fresh master (sonnet since 2026-11-17: the Claude week is the scarce budget).")
 def operator_resume_at(after: str, checkpoint: str | None, reason: str, manual: bool, cancel: bool,
                        harness_id: str | None, folder: str | None, model: str) -> None:
     """Master: record when and from which checkpoint to resume, before ending the turn."""
@@ -888,6 +889,38 @@ def operator_wake(once: bool, interval: float) -> None:
         ui.emit_json(w.tick() or {"event": "nothing due", "request": w.load()})
         return
     w.loop(interval)
+
+
+@operator_commands.command("tell-master")
+@click.argument("text")
+@click.option("--folder", help="The master's folder (default: the live haccp-master-* Claude harness).")
+@click.option("--when-idle", is_flag=True, help="Wait until the master is idle (needed for /model, /effort).")
+@click.option("--wait", "wait_s", type=float, default=1800.0, show_default=True)
+def operator_tell_master(text: str, folder: str | None, when_idle: bool, wait_s: float) -> None:
+    """Administrator: paste a message (or a slash command) into the master's Claude pane."""
+    from .operator import admin
+
+    try:
+        ui.emit_json(admin.tell_master(text, folder=folder, when_idle=when_idle, wait_s=wait_s))
+    except admin.TellError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@operator_commands.command("ysk")
+@click.option("--all", "show_all", is_flag=True, help="Every collected card, not only unread ones.")
+@click.option("--mark-read", is_flag=True, help="Mark everything shown as read.")
+def operator_ysk(show_all: bool, mark_read: bool) -> None:
+    """Administrator: "You should know" cards from WSL sessions (the master's pane nobody reads)."""
+    from .operator import admin
+    from .operator.waker import Waker
+
+    d = Waker()._dir()
+    feed, mark = d / "ysk.jsonl", d / "ysk.read"
+    admin.collect_ysk(feed)
+    rows = admin.unread_ysk(feed, mark if not show_all else d / "ysk.none")
+    if mark_read:
+        admin.mark_read(feed, mark)
+    ui.emit_json({"cards": rows, "count": len(rows)})
 
 
 def _session_or_die() -> str:
