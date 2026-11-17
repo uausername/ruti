@@ -150,3 +150,44 @@ def test_cli_check_exit_codes():
     bad = CliRunner().invoke(main, ["operator", "check", "--worktree", "codex-dco", "git push"])
     assert ok.exit_code == 0 and "ALLOW" in ok.output
     assert bad.exit_code == 1 and "REFUSE" in bad.output
+
+
+# -- commands that went to needs_admin on 2026-11-16 ----------------------------------
+_WT = "/mnt/c/mycode/haccp/.ruti/harness-local-20261109/worktrees"
+_RUNS = "/mnt/c/mycode/haccp/.ruti/harness-local-20261109/codex-runs"
+_FL = "/home/dima/actions-runner/_work/_tool/flutter/stable-3.41.9-x64/flutter/bin/flutter"
+
+
+@pytest.mark.parametrize("wt,cmd", [
+    ("codex-wm5", "PGHOST=127.0.0.1 PGPORT=55432 PGUSER=postgres PGPASSWORD=postgres\n  PGDATABASE=postgres "
+                  "psql -X -w -v ON_ERROR_STOP=1 -c 'SELECT\n  current_database(), version();'"),
+    ("codex-cpc2", "PGHOST=127.0.0.1 PGPORT=55432 PGUSER=postgres PGPASSWORD=postgres psql -w\n  -d postgres "
+                   "-Atc 'SELECT version();'"),
+    ("codex-wm5", f"cp\n  {_WT}/codex-wm5/.agent-\n  pilot/wm5-RESULT.md\n  {_RUNS}/wm5/RESULT.md"),
+    ("codex-cpc2", f"cp --no-clobber -- /tmp/cpc2-review-3e515b37/REVIEW.md\n  /tmp/cpc2-review-3e515b37/probe_1.sql"
+                   f"\n  {_RUNS}/cpc2/"),
+    ("codex-rp4", f"python3 scripts/agent-pilot/run_checks.py --root\n  {_WT}/codex-rp4\n  --expected-head 2919b7e "
+                  f"--role reviewer --run-id rp4 --flutter-bin\n  {_FL}\n  analyze"),
+    ("codex-rp4", f"python3 scripts/agent-pilot/run_checks.py --root {_WT}/codex-rp4 test test/widget/foo_test.dart"),
+])
+def test_seen_2026_11_16_now_allowed(wt, cmd):
+    d = decide(cmd, wt)
+    assert d.allowed, d.reason
+
+
+@pytest.mark.parametrize("wt,cmd", [
+    # exec stage runs whatever follows, also when the pane wraps the word
+    ("codex-rp4", f"python3 scripts/agent-pilot/run_checks.py --root {_WT}/codex-rp4 --role reviewer exec rm test"),
+    ("codex-rp4", f"python3 scripts/agent-pilot/run_checks.py --root {_WT}/codex-rp4 --run-id rp4 ex\nec rm test"),
+    # another worker's root
+    ("codex-rp4", f"python3 scripts/agent-pilot/run_checks.py --root {_WT}/codex-wm5 analyze"),
+    # copying another worker's files, or into another run dir, or outside codex-runs
+    ("codex-wm5", f"cp {_WT}/codex-cpc2/.agent-pilot/x.md {_RUNS}/wm5/x.md"),
+    ("codex-wm5", f"cp /tmp/wm5-x/RESULT.md {_RUNS}/cpc2/"),
+    ("codex-wm5", f"cp /tmp/wm5-x/RESULT.md {_WT}/codex-wm5/.claude/settings.json"),
+    ("codex-wm5", "cp /tmp/wm5-x/RESULT.md /home/dima/.bashrc"),
+    # free SQL on the shared database
+    ("codex-wm5", "PGDATABASE=postgres psql -w -c 'SELECT * FROM pg_authid;'"),
+])
+def test_seen_2026_11_16_neighbours_stay_refused(wt, cmd):
+    assert not decide(cmd, wt).allowed

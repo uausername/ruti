@@ -269,7 +269,7 @@ class Waker:
         try:
             added = (self.trust or trust_mod.trust_everywhere)([req["folder"]])
             if added:
-                self.log("trusted", folder=req["folder"], configs=list(added))
+                self.log("trusted", folder=req["folder"], changes=added)
         except Exception as exc:  # noqa: BLE001 -- the trust screen check below still catches it
             self.log("error", error=f"pre-trusting the folder failed: {exc!r}")
         argv = ["harness", "new", "claude", req["folder"], "--json",
@@ -342,13 +342,22 @@ class Waker:
 
     def loop(self, interval: float = 60.0) -> None:
         self.log("started", pid_self=str(os.getpid()))
+        last_sweep, refused = 0.0, None
         while True:
-            try:
-                added = trust_mod.sweep()  # new agent worktrees never stop on the trust screen
-                if added:
-                    self.log("trusted", configs={k: len(v) for k, v in added.items()})
-            except Exception as exc:  # noqa: BLE001
-                self.log("error", error=f"trust sweep failed: {exc!r}")
+            if self.now() - last_sweep >= 300:  # git per worktree: every 5 minutes is plenty
+                last_sweep = self.now()
+                try:
+                    changed = trust_mod.sweep()  # agent worktrees never stop on the trust screen
+                    now_refused = sorted(changed.pop("refused", []))
+                    if changed:
+                        self.log("trusted", changes=changed)
+                    if now_refused != refused:
+                        refused = now_refused
+                        if now_refused:
+                            self.log("needs_admin", reason="agent worktree settings differ from main; "
+                                     "Claude will ask for trust there", folders=now_refused)
+                except Exception as exc:  # noqa: BLE001
+                    self.log("error", error=f"trust sweep failed: {exc!r}")
             try:
                 self.tick()
             except Exception as exc:  # noqa: BLE001 -- the service must keep running

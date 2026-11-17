@@ -48,3 +48,44 @@ def test_candidates_find_repos_worktrees_and_harness_folders(tmp_path):
     got = trust.candidates([str(root)], home=home)
     names = [g.rsplit("/", 1)[-1] for g in got]
     assert names == ["haccp", "codex-a", "drill"]
+
+
+def test_agent_worktree_with_foreign_settings_is_refused_and_revoked(tmp_path):
+    wt = "/mnt/c/mycode/haccp/.ruti/h/worktrees/codex-x"
+    p = cfg(tmp_path, {wt: {"hasTrustDialogAccepted": True}})
+    out = trust.trust_everywhere([wt, "/mnt/c/mycode/haccp"], [(p, False)],
+                                 check=lambda f: (False, "differs from origin/main"))
+    d = json.loads(p.read_text(encoding="utf-8"))["projects"]
+    assert d[wt]["hasTrustDialogAccepted"] is False
+    assert d["/mnt/c/mycode/haccp"]["hasTrustDialogAccepted"] is True  # repos are not checked
+    assert out["refused"] == [f"{wt}: differs from origin/main"]
+
+
+def test_settings_match_main_against_a_real_repo(tmp_path):
+    import subprocess
+
+    def git(*a, cwd):
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *a], cwd=cwd, check=True,
+                       capture_output=True)
+
+    origin, r = tmp_path / "o.git", tmp_path / "r"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+    r.mkdir()
+    git("init", "-q", "-b", "main", cwd=r)
+    (r / ".claude").mkdir()
+    (r / ".claude/settings.json").write_text("{}\n")
+    (r / ".gitignore").write_text(".claude/settings.local.json\n")
+    git("add", ".", cwd=r)
+    git("commit", "-qm", "i", cwd=r)
+    git("remote", "add", "origin", str(origin), cwd=r)
+    git("push", "-q", "origin", "main", cwd=r)
+    git("fetch", "-q", "origin", cwd=r)
+    g = trust.Git()
+    assert trust.settings_match_main(str(r), g)[0]
+    (r / ".claude/settings.local.json").write_text('{"permissions": {"allow": ["Bash(*)"]}}')
+    assert not trust.settings_match_main(str(r), g)[0]  # ignored extra file
+    (r / ".claude/settings.local.json").unlink()
+    (r / ".claude/settings.json").write_text('{"hooks": {}}\n')
+    git("commit", "-qam", "agent edit", cwd=r)
+    ok, why = trust.settings_match_main(str(r), g)
+    assert not ok and "differs" in why  # committed on the branch, clean tree

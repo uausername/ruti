@@ -90,7 +90,9 @@ def _blocks(worktree: str, layout: Layout) -> list[str]:
     deno = r"(?:" + tools + r"/deno/[\d.]+/x64/)?"
     pg_env = r"PG(?:HOST=(?:localhost|127\.0\.0\.1)|PORT=55432|USER=postgres|PASSWORD=postgres|DATABASE=" + db + r")"
     sql_file = r"supabase/(?:tests|migrations)/[\w/.-]+\.sql|supabase/seed\.sql"
-    psql = r"psql(?:-X)?(?:-vON_ERROR_STOP=1)?(?:-X)?"
+    psql = r"psql(?:-X|-w|-q|-vON_ERROR_STOP=1)*"
+    own_wt = layout.worktrees_re + re.escape(worktree)
+    flutter_bin = tools + r"/flutter/stable-[\d.]+-x64/flutter/bin/"
 
     prelude = [
         r"source" + re.escape(layout.env_sh),
@@ -131,6 +133,17 @@ def _blocks(worktree: str, layout: Layout) -> list[str]:
         r"(?:" + pg_env + r")*PGDATABASE=" + db + r"(?:" + pg_env + r")*" + psql
         + r"(?:-Ppager=off)?(?:(?:-At|-A|-t)?-c|-Atc|-tAc)" + _select,
         r"cp(?:-R)?/tmp/codex-" + s + r"-[\w.-]+(?:/[\w.-]+)*/?\.?" + layout.runs_re + s + r"/(?:[\w.-]+)?",
+        # hand results over: own /tmp files or files of the own worktree -> own codex-runs dir
+        r"cp(?:-R|-r|-p|-n|--no-clobber|--)*(?:" + own_tmp + r"|" + own_wt + r"(?:/[\w.-]+)+)+"
+        + layout.runs_re + s + r"/(?:[\w.-]+)?",
+        # server version on the shared local server (fixed SQL, no data)
+        r"(?:" + pg_env + r"|PGDATABASE=postgres)*" + psql + r"(?:-dpostgres)?(?:-X|-w|-q|-vON_ERROR_STOP=1)*"
+        + r"-(?:Atc|tAc|At-c|c)['\"]SELECT(?:current_database\(\),)?version\(\);?['\"]",
+        # the project's own check runner, rooted in the own worktree; never its `exec` stage
+        r"python3?scripts/agent-pilot/run_checks\.py(?:--root" + own_wt + r"/?|--expected-head[0-9a-f]{7,40}"
+        r"|--role[a-z]+|--run-id[\w-]+|--log-dir" + own_tmp + r"|--flutter-bin" + flutter_bin + r"flutter"
+        r"|--dart-bin" + flutter_bin + r"dart)*(?:taskgraph|codegen|format|analyze|unittest|test"
+        r"(?:test/[\w/]+_test\.dart)?)" + redirect,
     ]
     return prelude + finals
 
@@ -154,6 +167,9 @@ def decide(command: str, worktree: str, layout: Layout | None = None) -> Decisio
         if token in command:
             return Decision(False, why)
     stripped = _normalise(strip(command))
+    if "run_checks" in stripped and "exec" in stripped.lower():
+        # its `exec` stage runs whatever follows; the pane may wrap the word, so look stripped
+        return Decision(False, "run_checks exec stage")
     if _SQL_FORBIDDEN.search(_sql_parts(stripped)):
         return Decision(False, "forbidden SQL in a SELECT")
     pattern = r"(?:(?:" + "|".join(_blocks(worktree, layout)) + r");?)+"
@@ -181,5 +197,5 @@ def _sql_parts(stripped: str) -> str:
 _FIXED_SQL = (
     r"(?:CREATEDATABASE|DROPDATABASEIFEXISTS)codex_[a-z0-9_]+;?",
     r"SELECT(?:version\(\);SELECT)?datnameFROMpg_databaseWHEREdatname(?:=|LIKE)'codex_[a-z0-9_%]+'(?:ORDERBY(?:datname|1))?;?",
-    r"SELECTversion\(\);?",
+    r"SELECT(?:current_database\(\),)?version\(\);?",
 )

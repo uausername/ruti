@@ -157,6 +157,13 @@ only up to the folder's git root, so a trusted repo does not cover its worktrees
 `ruti operator trust [FOLDER...]` marks folders trusted in `~/.claude.json` (and, under
 WSL, in the Windows `~/.claude.json` with `C:/` keys); with no folders it sweeps every
 repository under `/mnt/c/mycode`, its `.ruti/*/worktrees/*` and `~/harnesses/*`. The
-waker sweeps every minute and trusts the master folder right before `harness new`;
+waker sweeps every 5 minutes and trusts the master folder right before `harness new`;
 `prepare` trusts the worktree it creates. Codex keeps its own trust in
 `~/.codex/config.toml` and is not touched here.
+
+Trust makes Claude apply the folder's `.claude/` (hooks, pre-approved tools) and
+`.mcp.json` without asking, and in agent worktrees agents write those files. So an agent
+worktree (`.ruti/*/worktrees/*`) is trusted only while `.claude/` and `.mcp.json` equal
+`origin/main` -- no edits, no untracked or ignored extras such as `settings.local.json`.
+A worktree that drifts is untrusted again (Claude asks there) and the waker writes it to
+`needs_admin`. Repositories themselves and `~/harnesses/*` are not checked.

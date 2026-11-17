@@ -12,6 +12,13 @@ the repositories under the roots, their ``.ruti/*/worktrees/*`` and ``~/harnesse
 
 Under WSL the Windows configs (``/mnt/c/Users/*/.claude.json``, keys spelled ``C:/...``)
 are updated too, for sessions started from Windows in the same folders.
+
+Trust makes Claude apply the folder's own ``.claude/`` settings (hooks, pre-approved
+tools) and ``.mcp.json`` without asking. In an agent worktree (``.ruti/*/worktrees/*``)
+agents write those files, so such a folder is trusted only while ``.claude/`` and
+``.mcp.json`` are exactly ``origin/main``'s -- no changes, no untracked or ignored extras
+such as ``settings.local.json``. One that drifts loses its trust: Claude then asks again,
+and the waker reports it in ``needs_admin``.
 """
 
 from __future__ import annotations
@@ -21,9 +28,49 @@ import os
 import tempfile
 from pathlib import Path
 
-from .gc import to_windows
+import re
+from typing import Callable
+
+from .gc import Git, to_windows
 
 DEFAULT_ROOTS = ("/mnt/c/mycode",)
+CONFIG_PATHS = (".claude", ".mcp.json")
+MAIN = "origin/main"
+_AGENT_WT = re.compile(r"/\.ruti/[^/]+/worktrees/[^/]+$")
+
+
+def is_agent_worktree(folder: str) -> bool:
+    return bool(_AGENT_WT.search(str(folder).replace("\\", "/").rstrip("/")))
+
+
+def settings_match_main(folder: str, git: Git | None = None) -> tuple[bool, str]:
+    """Whether the folder's Claude settings are byte-for-byte origin/main's."""
+    git = git or Git.auto(folder)
+    st = git(folder, "status", "--porcelain", "--ignored", "--", *CONFIG_PATHS)
+    if st.returncode:
+        return False, "git status failed: " + (st.stderr or "").strip()[:120]
+    if st.stdout.strip():
+        return False, "changed/untracked: " + " ".join(l[3:] for l in st.stdout.splitlines())[:200]
+    d = git(folder, "diff", "--quiet", MAIN, "--", *CONFIG_PATHS)
+    if d.returncode == 1:
+        return False, f"differs from {MAIN}"
+    if d.returncode:
+        return False, "git diff failed: " + (d.stderr or "").strip()[:120]
+    return True, "same as " + MAIN
+
+
+def vet(folders: list[str], check: Callable[[str], tuple[bool, str]] = settings_match_main
+        ) -> tuple[list[str], dict[str, str]]:
+    """(folders to trust, {folder: why not}) -- only agent worktrees are checked."""
+    ok, bad = [], {}
+    for f in folders:
+        if is_agent_worktree(f):
+            good, why = check(f)
+            if not good:
+                bad[f] = why
+                continue
+        ok.append(f)
+    return ok, bad
 # Claude Code's own defaults for a project entry.
 ENTRY = {"allowedTools": [], "mcpContextUris": [], "mcpServers": {}, "enabledMcpjsonServers": [],
          "disabledMcpjsonServers": [], "hasTrustDialogAccepted": True,
@@ -58,14 +105,21 @@ def _key(folder: str, windows: bool) -> str:
     return to_windows(s) if windows else s
 
 
-def trust(folders: list[str], config: Path, windows: bool = False) -> list[str]:
-    """Mark folders trusted in one config; returns the keys that were added. Atomic write."""
+def trust(folders: list[str], config: Path, windows: bool = False,
+          revoke: list[str] | tuple[str, ...] = ()) -> list[str]:
+    """Mark folders trusted (and `revoke` ones untrusted) in one config; returns the keys
+    that changed, revoked ones prefixed with "-". Atomic write."""
     try:
         data = json.loads(config.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return []
     projects = data.setdefault("projects", {})
     added = []
+    for folder in revoke:
+        key = _key(folder, windows)
+        if (projects.get(key) or {}).get("hasTrustDialogAccepted") is True:
+            projects[key]["hasTrustDialogAccepted"] = False
+            added.append("-" + key)
     for folder in folders:
         key = _key(folder, windows)
         if windows and not (len(key) > 1 and key[1] == ":"):
@@ -94,18 +148,24 @@ def trust(folders: list[str], config: Path, windows: bool = False) -> list[str]:
     return added
 
 
-def trust_everywhere(folders: list[str], cfgs: list[tuple[Path, bool]] | None = None) -> dict[str, list[str]]:
-    out = {}
+def trust_everywhere(folders: list[str], cfgs: list[tuple[Path, bool]] | None = None,
+                     check: Callable[[str], tuple[bool, str]] = settings_match_main) -> dict[str, list[str]]:
+    """Trust the folders that pass `vet` and revoke the agent worktrees that do not.
+    Refused folders are reported under the key "refused" as "<folder>: <why>"."""
+    ok, bad = vet(folders, check)
+    out: dict[str, list[str]] = {}
     for config, windows in (cfgs if cfgs is not None else configs()):
         try:
-            added = trust(folders, config, windows)
+            changed = trust(ok, config, windows, revoke=list(bad))
         except (OSError, ValueError) as exc:
             out[str(config)] = [f"error: {exc}"]
             continue
-        if added:
-            out[str(config)] = added
+        if changed:
+            out[str(config)] = changed
+    if bad:
+        out["refused"] = [f"{f}: {why}" for f, why in bad.items()]
     return out
 
 
-def sweep(roots=DEFAULT_ROOTS, cfgs=None) -> dict[str, list[str]]:
-    return trust_everywhere(candidates(roots), cfgs)
+def sweep(roots=DEFAULT_ROOTS, cfgs=None, check=settings_match_main) -> dict[str, list[str]]:
+    return trust_everywhere(candidates(roots), cfgs, check)
