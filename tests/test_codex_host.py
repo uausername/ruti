@@ -33,6 +33,27 @@ def test_claude_session_remains_compatible(monkeypatch):
     assert sessions.current_session_id() == "original"
 
 
+def test_codex_thread_automatically_selects_host_and_enables_session(monkeypatch):
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-one")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "unrelated-claude")
+    sessions.set_disabled("codex:thread-one", True)
+    sessions.set_disabled("unrelated-claude", True)
+    assert sessions.current_host() == "codex"
+    assert sessions.current_session_id() == "codex:thread-one"
+    result = CliRunner().invoke(cli.main, ["on"])
+    assert result.exit_code == 0, result.output
+    assert not sessions.is_disabled("codex:thread-one")
+    assert sessions.is_disabled("unrelated-claude")
+
+
+def test_explicit_claude_host_overrides_inherited_codex_thread(monkeypatch):
+    monkeypatch.setenv("RUTI_HOST", "claude")
+    monkeypatch.setenv("CODEX_THREAD_ID", "outer-codex")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "inner-claude")
+    assert sessions.current_host() == "claude"
+    assert sessions.current_session_id() == "inner-claude"
+
+
 def test_codex_install_preserves_user_guidance_and_is_idempotent(tmp_path, monkeypatch):
     target = tmp_path / "AGENTS.md"
     target.write_text("User rules\n", encoding="utf-8")

@@ -1,0 +1,429 @@
+diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
+index 6687d05..9f77d0b 100644
+--- a/codex-rs/tui/src/app/event_dispatch.rs
++++ b/codex-rs/tui/src/app/event_dispatch.rs
+@@ -3399,6 +3399,12 @@ impl App {
+                     tui.frame_requester().schedule_frame();
+                 }
+             }
++            AppEvent::RutiStatusUpdated { session_id, text } => {
++                if self.chat_widget.set_ruti_status(&session_id, text) {
++                    self.refresh_status_line();
++                    tui.frame_requester().schedule_frame();
++                }
++            }
+             AppEvent::StatusLineSetupCancelled => {
+                 self.chat_widget.cancel_status_line_setup();
+                 self.chat_widget.refresh_config_panel(/*notice*/ None);
+diff --git a/codex-rs/tui/src/app_event.rs b/codex-rs/tui/src/app_event.rs
+index e2b86c9..9fad504 100644
+--- a/codex-rs/tui/src/app_event.rs
++++ b/codex-rs/tui/src/app_event.rs
+@@ -1633,6 +1633,10 @@ pub(crate) enum AppEvent {
+         request_id: u64,
+         result: Result<crate::workspace_messages::WorkspaceHeadlineFetchResult, String>,
+     },
++    RutiStatusUpdated {
++        session_id: String,
++        text: String,
++    },
+     /// Apply a user-confirmed status-line item ordering/selection.
+     StatusLineSetup {
+         items: Vec<StatusLineItem>,
+diff --git a/codex-rs/tui/src/bottom_pane/status_line_setup.rs b/codex-rs/tui/src/bottom_pane/status_line_setup.rs
+index 9567424..0599868 100644
+--- a/codex-rs/tui/src/bottom_pane/status_line_setup.rs
++++ b/codex-rs/tui/src/bottom_pane/status_line_setup.rs
+@@ -54,6 +54,8 @@ const STATUS_LINE_USE_THEME_COLORS_ITEM_ID: &str = "status-line-use-theme-colors
+ #[derive(EnumIter, EnumString, Display, Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+ #[strum(serialize_all = "kebab_case")]
+ pub(crate) enum StatusLineItem {
++    /// Ruti local routing and delegation state.
++    Ruti,
+     /// The current model name.
+     #[strum(to_string = "model", serialize = "model-name")]
+     ModelName,
+@@ -164,6 +166,7 @@ impl StatusLineItem {
+     /// User-visible description shown in the popup.
+     pub(crate) fn description(self) -> &'static str {
+         match self {
++            StatusLineItem::Ruti => "Ruti proxy, local models, GPU and active delegates",
+             StatusLineItem::ModelName => "Current model name",
+             StatusLineItem::ModelWithReasoning => "Current model name with reasoning level",
+             StatusLineItem::Reasoning => "Current reasoning level",
+@@ -224,6 +227,7 @@ impl StatusLineItem {
+ 
+     pub(crate) fn preview_item(self) -> StatusSurfacePreviewItem {
+         match self {
++            StatusLineItem::Ruti => StatusSurfacePreviewItem::Ruti,
+             StatusLineItem::ModelName => StatusSurfacePreviewItem::Model,
+             StatusLineItem::ModelWithReasoning => StatusSurfacePreviewItem::ModelWithReasoning,
+             StatusLineItem::Reasoning => StatusSurfacePreviewItem::Reasoning,
+diff --git a/codex-rs/tui/src/bottom_pane/status_line_style.rs b/codex-rs/tui/src/bottom_pane/status_line_style.rs
+index 6ef9003..af3120b 100644
+--- a/codex-rs/tui/src/bottom_pane/status_line_style.rs
++++ b/codex-rs/tui/src/bottom_pane/status_line_style.rs
+@@ -43,7 +43,7 @@ impl StatusLineAccent {
+             StatusLineItem::GitBranch
+             | StatusLineItem::PullRequestNumber
+             | StatusLineItem::BranchChanges => Self::Branch,
+-            StatusLineItem::Status => Self::State,
++            StatusLineItem::Status | StatusLineItem::Ruti => Self::State,
+             StatusLineItem::ContextRemaining
+             | StatusLineItem::ContextUsed
+             | StatusLineItem::ContextWindowSize
+diff --git a/codex-rs/tui/src/bottom_pane/status_surface_preview.rs b/codex-rs/tui/src/bottom_pane/status_surface_preview.rs
+index 7389236..a1a34a8 100644
+--- a/codex-rs/tui/src/bottom_pane/status_surface_preview.rs
++++ b/codex-rs/tui/src/bottom_pane/status_surface_preview.rs
+@@ -8,6 +8,7 @@ use super::status_line_setup::StatusLineItem;
+ 
+ #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+ pub(crate) enum StatusSurfacePreviewItem {
++    Ruti,
+     AppName,
+     ProjectName,
+     ProjectRoot,
+@@ -46,6 +47,7 @@ pub(crate) enum StatusSurfacePreviewItem {
+ impl StatusSurfacePreviewItem {
+     fn placeholder(self) -> &'static str {
+         match self {
++            StatusSurfacePreviewItem::Ruti => "Ruti on proxy up local none GPU 5.2G",
+             StatusSurfacePreviewItem::AppName => "codex",
+             StatusSurfacePreviewItem::ProjectName => "my-project",
+             StatusSurfacePreviewItem::ProjectRoot => "my-project",
+@@ -84,6 +86,7 @@ impl StatusSurfacePreviewItem {
+ 
+     pub(crate) fn iter() -> impl Iterator<Item = Self> {
+         [
++            Self::Ruti,
+             Self::AppName,
+             Self::ProjectName,
+             Self::ProjectRoot,
+diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
+index 4b9d285..6b699b2 100644
+--- a/codex-rs/tui/src/chatwidget.rs
++++ b/codex-rs/tui/src/chatwidget.rs
+@@ -761,6 +761,7 @@ pub(crate) struct ChatWidget {
+     pub(crate) terminal_title_next_refresh: Option<Instant>,
+     // Cached project-root display name keyed by cwd for status/title rendering.
+     status_line_project_root_name_cache: Option<CachedProjectRootName>,
++    ruti_status: crate::ruti_status::RutiStatus,
+     // Cached git branch name for the status line (None if unknown).
+     status_line_branch: Option<String>,
+     // CWD used to resolve the cached branch; change resets branch state.
+@@ -1204,6 +1205,7 @@ impl ChatWidget {
+             self.refresh_terminal_title();
+         }
+         self.refresh_status_line_if_workspace_headline_due();
++        self.refresh_ruti_status_line_if_due();
+         self.refresh_thread_usage_if_settlement_due();
+         self.refresh_terminal_program_status();
+     }
+diff --git a/codex-rs/tui/src/chatwidget/constructor.rs b/codex-rs/tui/src/chatwidget/constructor.rs
+index 8d4bbbd..db11b66 100644
+--- a/codex-rs/tui/src/chatwidget/constructor.rs
++++ b/codex-rs/tui/src/chatwidget/constructor.rs
+@@ -275,6 +275,7 @@ impl ChatWidget {
+             terminal_title_animation_origin: Instant::now(),
+             terminal_title_next_refresh: None,
+             status_line_project_root_name_cache: None,
++            ruti_status: crate::ruti_status::RutiStatus::default(),
+             status_line_branch: None,
+             status_line_branch_cwd: None,
+             status_line_branch_pending: false,
+diff --git a/codex-rs/tui/src/chatwidget/status_surfaces.rs b/codex-rs/tui/src/chatwidget/status_surfaces.rs
+index d7340e5..6ccdd15 100644
+--- a/codex-rs/tui/src/chatwidget/status_surfaces.rs
++++ b/codex-rs/tui/src/chatwidget/status_surfaces.rs
+@@ -160,6 +160,17 @@ impl ChatWidget {
+     }
+ 
+     fn sync_status_surface_shared_state(&mut self, selections: &StatusSurfaceSelections) {
++        if selections.status_line_items.contains(&StatusLineItem::Ruti) {
++            self.frame_requester
++                .schedule_frame_in(crate::ruti_status::REFRESH_INTERVAL);
++            if let Some(thread_id) = self.thread_id {
++                self.ruti_status.request(
++                    thread_id.to_string(),
++                    self.status_line_cwd().to_path_buf(),
++                    self.app_event_tx.clone(),
++                );
++            }
++        }
+         if !selections.uses_git_branch() {
+             self.status_line_branch = None;
+             self.status_line_branch_pending = false;
+@@ -720,6 +731,31 @@ impl ChatWidget {
+         true
+     }
+ 
++    pub(super) fn refresh_ruti_status_line_if_due(&mut self) {
++        if !self
++            .status_line_items_with_invalids()
++            .0
++            .contains(&StatusLineItem::Ruti)
++        {
++            return;
++        }
++        self.frame_requester
++            .schedule_frame_in(crate::ruti_status::REFRESH_INTERVAL);
++        if self
++            .thread_id
++            .is_some_and(|id| self.ruti_status.due(&id.to_string()))
++        {
++            self.refresh_status_line();
++        }
++    }
++
++    pub(crate) fn set_ruti_status(&mut self, session_id: &str, text: String) -> bool {
++        if self.thread_id.map(|id| id.to_string()).as_deref() != Some(session_id) {
++            return false;
++        }
++        self.ruti_status.set_result(session_id, text)
++    }
++
+     /// Resolves a display string for one configured status-line item.
+     ///
+     /// Returning `None` means "omit this item for now", not "configuration error". Callers rely on
+@@ -727,6 +763,10 @@ impl ChatWidget {
+     /// git metadata.
+     pub(super) fn status_line_value_for_item(&mut self, item: StatusLineItem) -> Option<String> {
+         match item {
++            StatusLineItem::Ruti => Some(
++                self.ruti_status
++                    .value(self.thread_id.map(|id| id.to_string())),
++            ),
+             StatusLineItem::ModelName => Some(self.model_display_name().to_string()),
+             StatusLineItem::ModelWithReasoning => Some(self.model_with_reasoning_display_name()),
+             StatusLineItem::Reasoning => Some(self.reasoning_display_name()),
+@@ -864,6 +904,7 @@ impl ChatWidget {
+         item: StatusSurfacePreviewItem,
+     ) -> Option<String> {
+         let status_line_item = match item {
++            StatusSurfacePreviewItem::Ruti => StatusLineItem::Ruti,
+             StatusSurfacePreviewItem::AppName => return Some("codex".to_string()),
+             StatusSurfacePreviewItem::ProjectName => return self.terminal_title_project_name(),
+             StatusSurfacePreviewItem::ProjectRoot => StatusLineItem::ProjectRoot,
+diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
+index 147ff23..0c5ba7e 100644
+--- a/codex-rs/tui/src/lib.rs
++++ b/codex-rs/tui/src/lib.rs
+@@ -202,6 +202,7 @@ mod render;
+ mod resize_reflow_cap;
+ mod resume_permissions;
+ mod resume_picker;
++mod ruti_status;
+ mod screen_reader;
+ mod service_tier_resolution;
+ mod session_archive_commands;
+diff --git a/codex-rs/tui/src/ruti_status.rs b/codex-rs/tui/src/ruti_status.rs
+new file mode 100644
+index 0000000..cc4e1fa
+--- /dev/null
++++ b/codex-rs/tui/src/ruti_status.rs
+@@ -0,0 +1,204 @@
++//! Optional Ruti footer item. Only an explicitly supplied absolute Python path
++//! can enable polling; project configuration cannot supply a shell command.
++
++use std::io::Read;
++use std::path::Path;
++use std::path::PathBuf;
++use std::process::Stdio;
++use std::time::Duration;
++use std::time::Instant;
++
++use tokio::io::AsyncReadExt;
++use tokio::process::Command;
++
++use crate::app_event::AppEvent;
++use crate::app_event_sender::AppEventSender;
++
++pub(crate) const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
++const COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
++const MAX_OUTPUT_BYTES: u64 = 4096;
++
++#[derive(Default)]
++pub(crate) struct RutiStatus {
++    session: Option<String>,
++    text: Option<String>,
++    pending: bool,
++    last_requested: Option<Instant>,
++}
++
++impl RutiStatus {
++    pub(crate) fn due(&self, session: &str) -> bool {
++        self.session.as_deref() != Some(session)
++            || (!self.pending
++                && self
++                    .last_requested
++                    .is_none_or(|last| last.elapsed() >= REFRESH_INTERVAL))
++    }
++
++    pub(crate) fn value(&self, session: Option<String>) -> String {
++        if self.session == session {
++            self.text
++                .clone()
++                .unwrap_or_else(|| "Ruti loading".to_string())
++        } else {
++            "Ruti ready".to_string()
++        }
++    }
++
++    pub(crate) fn request(&mut self, session: String, cwd: PathBuf, tx: AppEventSender) {
++        if !self.due(&session) {
++            return;
++        }
++        if self.session.as_deref() != Some(&session) {
++            self.text = None;
++            self.pending = false;
++        }
++        self.session = Some(session.clone());
++        self.last_requested = Some(Instant::now());
++        let Some(python) = python_path() else {
++            self.text = Some("Ruti setup needed".to_string());
++            return;
++        };
++        if !python.is_absolute() || !python.is_file() {
++            self.text = Some("Ruti invalid Python path".to_string());
++            return;
++        }
++        self.pending = true;
++        tokio::spawn(async move {
++            let text = match tokio::time::timeout(COMMAND_TIMEOUT, invoke(&python, &session, &cwd))
++                .await
++            {
++                Ok(Ok(text)) => text,
++                Ok(Err(_)) => "Ruti unavailable".to_string(),
++                Err(_) => "Ruti timeout".to_string(),
++            };
++            tx.send(AppEvent::RutiStatusUpdated {
++                session_id: session,
++                text,
++            });
++        });
++    }
++
++    pub(crate) fn set_result(&mut self, session: &str, text: String) -> bool {
++        if self.session.as_deref() != Some(session) {
++            return false;
++        }
++        self.pending = false;
++        self.text = Some(sanitize(&text));
++        true
++    }
++}
++
++fn python_path() -> Option<PathBuf> {
++    if let Some(path) = std::env::var_os("RUTI_STATUSLINE_PYTHON") {
++        return Some(PathBuf::from(path));
++    }
++    let root = std::env::var_os("RUTI_HOME")
++        .map(PathBuf::from)
++        .or_else(|| {
++            std::env::var_os("LOCALAPPDATA").map(|base| PathBuf::from(base).join("ruti"))
++        })?;
++    let file = std::fs::File::open(root.join("codex-cli").join("python.path")).ok()?;
++    let mut bytes = Vec::new();
++    file.take(4097).read_to_end(&mut bytes).ok()?;
++    if bytes.len() > 4096 {
++        return None;
++    }
++    String::from_utf8(bytes)
++        .ok()
++        .map(|value| PathBuf::from(value.trim()))
++}
++
++async fn invoke(python: &Path, session: &str, _cwd: &Path) -> std::io::Result<String> {
++    let mut command = Command::new(python);
++    command
++        .args([
++            "-I",
++            "-X",
++            "utf8",
++            "-m",
++            "ruti.footer",
++            "--session-id",
++            session,
++        ])
++        .env("RUTI_HOST", "codex")
++        .env("RUTI_SESSION_ID", session)
++        .current_dir(
++            python
++                .parent()
++                .ok_or_else(|| std::io::Error::other("invalid Python path"))?,
++        )
++        .stdin(Stdio::null())
++        .stdout(Stdio::piped())
++        .stderr(Stdio::null())
++        .kill_on_drop(true);
++    #[cfg(windows)]
++    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
++    let mut child = command.spawn()?;
++    let stdout = child
++        .stdout
++        .take()
++        .ok_or_else(|| std::io::Error::other("no stdout"))?;
++    let mut bytes = Vec::new();
++    stdout
++        .take(MAX_OUTPUT_BYTES + 1)
++        .read_to_end(&mut bytes)
++        .await?;
++    if bytes.len() as u64 > MAX_OUTPUT_BYTES {
++        return Err(std::io::Error::other("footer output exceeds limit"));
++    }
++    if !child.wait().await?.success() {
++        return Err(std::io::Error::other("footer command failed"));
++    }
++    let text = sanitize(&String::from_utf8_lossy(&bytes));
++    if text.is_empty() {
++        return Err(std::io::Error::other("empty footer"));
++    }
++    Ok(text)
++}
++
++fn sanitize(text: &str) -> String {
++    text.chars()
++        .filter(|ch| !ch.is_control())
++        .take(160)
++        .collect::<String>()
++        .trim()
++        .to_string()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn bounds_untrusted_output_and_removes_controls() {
++        assert_eq!(sanitize("Ruti\n on\r\t\u{1b}"), "Ruti on");
++        assert_eq!(sanitize(&"я".repeat(200)).chars().count(), 160);
++    }
++
++    #[test]
++    fn result_for_previous_thread_cannot_replace_current_thread() {
++        let mut state = RutiStatus {
++            session: Some("current".to_string()),
++            pending: true,
++            ..Default::default()
++        };
++        assert!(!state.set_result("old", "wrong".to_string()));
++        assert!(state.pending);
++        assert!(state.set_result("current", "Ruti on".to_string()));
++        assert!(!state.pending);
++        assert_eq!(state.value(Some("current".to_string())), "Ruti on");
++        assert_eq!(state.value(Some("other".to_string())), "Ruti ready");
++    }
++
++    #[test]
++    fn pending_and_recent_requests_are_not_repeated() {
++        let state = RutiStatus {
++            session: Some("current".to_string()),
++            last_requested: Some(Instant::now()),
++            ..Default::default()
++        };
++        assert!(!state.due("current"));
++        assert!(state.due("next"));
++    }
++}

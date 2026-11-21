@@ -1,0 +1,18 @@
+# WSL user unit for the Codex auto-approver (docs/operator.md).
+# Install: cp to ~/.config/systemd/user/, `systemctl --user daemon-reload`,
+# `systemctl --user enable --now ruti-operator-approver`, and `loginctl enable-linger`
+# so it survives the last terminal closing.
+[Unit]
+Description=Ruti operator: approve safe Codex run-command prompts (allowlist)
+After=default.target
+
+[Service]
+Type=simple
+Environment=PATH=/home/dima/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/dima/.local/bin/ruti operator approve --interval 5
+Restart=always
+RestartSec=10
+UMask=0077
+
+[Install]
+WantedBy=default.target

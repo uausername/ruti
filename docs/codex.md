@@ -17,11 +17,89 @@ ruti verdict ok --run RUN_ID
 ruti report --host codex --json
 ```
 
-`CODEX_THREAD_ID` is used when available and `RUTI_SESSION_ID` is absent. Codex
-session IDs are namespaced. Claude quota is never used as Codex subscription usage.
+Inside Codex tool shells, `CODEX_THREAD_ID` automatically selects the Codex host
+and identifies the conversation, so `ruti on` and `ruti off` need no extra setup.
+Explicit `RUTI_HOST` takes precedence; `RUTI_SESSION_ID` overrides the thread ID.
+Use the explicit variables above for standalone shells outside the agent.
+Codex session IDs are namespaced. Claude quota is never used as Codex subscription usage.
 Codex history defaults to Codex only; `report --host all` includes all managers.
 Verdicts determine accepted work; process success alone is weaker evidence.
 The report counts lines in changed files, not a measured token or subscription saving.
+
+## Ruti inside the Codex CLI status line
+
+The optional custom Codex CLI build adds a `ruti` item to the existing `/statusline`
+picker. It displays the current session's Ruti on/off and coding/free modes, proxy
+health, loaded local models, free GPU memory and active delegates. Codex continues
+to display its own context and usage-limit items alongside it.
+
+The patch targets public tag `rust-v0.164.0`, commit
+`6aaac694803004a63c6f393d153c96d22521a6b9`. Source and compiler output stay under the
+ignored `build/codex-ruti` directory. The reviewed patch is in
+`codex/patches/statusline-ruti-0.164.0.patch`. Build prerequisites are Rust 1.99.1
+and Visual Studio Build Tools with the MSVC x64 compiler and Windows SDK.
+
+```powershell
+python scripts/build_codex_statusline.py
+# Inspect this plan first; add --apply to install it.
+python -m ruti.codex_footer_install `
+  --binary build/codex-ruti/source/codex-rs/target/dev-small/codex.exe `
+  --manifest build/codex-ruti/artifact.json `
+  --stock (Get-Command codex -CommandType Application).Source
+```
+
+Installation verifies the executable's hash, installs it alongside a `codex-stock`
+fallback and prepends its directory to the Windows user PATH. The previous PATH
+is saved in `installation.json`; Codex config receives a backup before adding
+`ruti` to the current footer selection. PowerShell execution policy stays in effect.
+Open a fresh terminal to load the updated PATH, then resume
+your chat. The running stock executable cannot load the new renderer in place.
+An existing PowerShell or terminal host can retain its old PATH even after
+restarting Codex. If it prints `Ignored invalid status line item: "ruti"`, exit
+that CLI and explicitly launch the installed custom executable from PowerShell:
+
+```powershell
+& "$env:LOCALAPPDATA\ruti\codex-cli\0.164.0-ruti\codex.exe" resume THREAD_ID
+```
+
+From this checkout, the launcher also selects that exact installed executable:
+
+```powershell
+.\scripts\start_codex_ruti.ps1
+# Arguments are forwarded, for example:
+.\scripts\start_codex_ruti.ps1 resume THREAD_ID
+```
+
+For subsequent launches in that shell, refresh its PATH from the saved Windows
+environment, then check the selected executable:
+
+```powershell
+$env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
+(Get-Command codex -CommandType Application | Select-Object -First 1).Source
+```
+
+Use `/statusline` to reorder the Ruti item with your other fields. This is a custom
+TUI build; future Codex releases require reviewing and rebuilding the patch.
+
+The renderer polls local Ruti state every five seconds and reads its local facts
+cache without running service probes or GPU subprocesses. Missing facts show
+`unknown`; facts older than 30 seconds show `stale`. Its CLI entry point requests
+an independent background refresh when the cache is older than 20 seconds. The
+worker probes only loopback proxy liveliness, LM Studio and local `nvidia-smi`;
+it never calls a model or reads subscription credentials. An OS advisory guard
+and an expiring token lease prevent duplicate workers and recover after crashes.
+An observed empty model list shows `local:none`; a failed model probe shows
+`local:unknown`. The renderer itself only reads cached data. Enabled Claude-hook modes are marked
+with `*`, meaning their automatic behavior is unsupported on Codex; see
+[implementation notes](openharness-pilot/CODEX_STATUSLINE_NOTES.md).
+It makes no model requests. It runs the installed Python interpreter from
+an absolute path stored in Ruti's user state, with a four-second timeout, bounded
+stdout and control-character filtering. Python runs in isolated mode from its own
+installation directory, so a project's `ruti` package cannot replace the installed
+renderer. Results are associated with the displayed
+Codex thread; a late response from another thread is ignored. Project config
+cannot supply an arbitrary status command. If polling fails, the footer reports
+`Ruti unavailable` or `Ruti timeout` rather than retaining a healthy badge.
 
 ## Isolated implementation
 

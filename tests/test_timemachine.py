@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 import tempfile
 
@@ -624,8 +625,9 @@ def test_a_bash_redirect_into_a_nested_checkout_gets_its_letters(repo, tmp_path)
     letters.write_text(letters.read_text(encoding="utf-8").replace(
         '    paths: ["src/reducer.py"]\n', '    paths: ["src/reducer.py"]\n    tools: [Write, Edit, Bash]\n'),
         encoding="utf-8")
+    target = shlex.quote((repo.root / "src/reducer.py").as_posix())
     bash = {"session_id": "nb", "hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": str(tmp_path),
-            "tool_input": {"command": f"cat > {repo.root / 'src/reducer.py'} <<'EOF'\nx\nEOF"}}
+            "tool_input": {"command": f"cat > {target} <<'EOF'\nx\nEOF"}}
     assert "parity" in wait_gate.handle(bash)["hookSpecificOutput"]["additionalContext"]
 
 
