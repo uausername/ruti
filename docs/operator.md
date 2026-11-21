@@ -146,8 +146,12 @@ on a remote branch. `git worktree remove` without `--force`; branches are kept.
 
 Under WSL it drives Windows `git.exe`. Worktrees made by Windows git keep `C:/...` paths
 in `.git/worktrees/*/gitdir`; WSL git cannot see them and lists **every** such worktree
-as `prunable`, so `git worktree prune` from WSL wipes all their metadata. Never run
-`git worktree prune` from WSL in this repo; `gc` never runs it at all.
+as `prunable`, so `git worktree prune` from WSL wipes all their metadata. The mirror case
+happened on 2026-11-17: `pr692`, made by WSL git (`gitdir: /mnt/c/...`), was dropped by a
+`git worktree prune` on Windows. Never run `git worktree prune` in this repo from either
+side; make worktrees only with `ruti operator prepare` (relative `gitdir`, both gits read
+it). `gc` never prunes, and lists folders git no longer knows as `orphan` (never removed
+automatically).
 
 ## Folder trust (`ruti operator trust`)
 
@@ -163,7 +167,10 @@ waker sweeps every 5 minutes and trusts the master folder right before `harness 
 
 Trust makes Claude apply the folder's `.claude/` (hooks, pre-approved tools) and
 `.mcp.json` without asking, and in agent worktrees agents write those files. So an agent
-worktree (`.ruti/*/worktrees/*`) is trusted only while `.claude/` and `.mcp.json` equal
-`origin/main` -- no edits, no untracked or ignored extras such as `settings.local.json`.
-A worktree that drifts is untrusted again (Claude asks there) and the waker writes it to
-`needs_admin`. Repositories themselves and `~/harnesses/*` are not checked.
+worktree (`.ruti/*/worktrees/*`) is trusted only while its branch has not touched
+`.claude/` or `.mcp.json`: they equal the files where the branch left `origin/main`
+(`git merge-base`), with no uncommitted edits and no untracked or ignored extras such as
+`settings.local.json`. (Comparing with `origin/main` itself flagged every branch that was
+just older than main.) A worktree whose branch changed them is untrusted again (Claude
+asks there) and the waker writes it to `needs_admin`. Repositories themselves and
+`~/harnesses/*` are not checked.

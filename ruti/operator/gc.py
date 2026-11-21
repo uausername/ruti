@@ -200,6 +200,23 @@ def plan(repo: str, *, live: set[str] | None = None, keep: list[str] | None = No
         if sizes and e.removable:
             e.size_mb = _size_mb(e.path)
         out.append(e)
+    out += orphans(repo, {_norm(e.path) for e in entries})
+    return out
+
+
+def orphans(repo: str, registered: set[str]) -> list[Entry]:
+    """Folders under .ruti/*/worktrees/ that git no longer knows as worktrees.
+
+    A worktree made by WSL git records ``/mnt/c/...`` paths, which Windows git cannot see:
+    a ``git worktree prune`` run on Windows drops it (and vice versa). The files stay, git
+    no longer works there. Never removed automatically -- compare with the branch first.
+    """
+    out = []
+    for p in sorted(Path(repo).glob(".ruti/*/worktrees/*")):
+        if p.is_dir() and _norm(str(p)) not in registered:
+            out.append(Entry(path=str(p).replace("\\", "/"), keep=[
+                "orphan: not a registered git worktree (its .git/worktrees entry was pruned); "
+                "compare it with its branch before deleting"]))
     return out
 
 

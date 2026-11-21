@@ -15,10 +15,12 @@ are updated too, for sessions started from Windows in the same folders.
 
 Trust makes Claude apply the folder's own ``.claude/`` settings (hooks, pre-approved
 tools) and ``.mcp.json`` without asking. In an agent worktree (``.ruti/*/worktrees/*``)
-agents write those files, so such a folder is trusted only while ``.claude/`` and
-``.mcp.json`` are exactly ``origin/main``'s -- no changes, no untracked or ignored extras
-such as ``settings.local.json``. One that drifts loses its trust: Claude then asks again,
-and the waker reports it in ``needs_admin``.
+agents write those files, so such a folder is trusted only while its branch has not
+touched ``.claude/`` or ``.mcp.json``: the files equal those at the point where the branch
+left ``origin/main`` (``git merge-base``), with no uncommitted edits and no untracked or
+ignored extras such as ``settings.local.json``. Comparing with ``origin/main`` itself
+flagged every branch that was merely older than main. One whose branch did change them
+loses its trust: Claude then asks again, and the waker reports it in ``needs_admin``.
 """
 
 from __future__ import annotations
@@ -44,19 +46,23 @@ def is_agent_worktree(folder: str) -> bool:
 
 
 def settings_match_main(folder: str, git: Git | None = None) -> tuple[bool, str]:
-    """Whether the folder's Claude settings are byte-for-byte origin/main's."""
+    """Whether the folder's Claude settings are main's, untouched by its branch."""
     git = git or Git.auto(folder)
     st = git(folder, "status", "--porcelain", "--ignored", "--", *CONFIG_PATHS)
     if st.returncode:
         return False, "git status failed: " + (st.stderr or "").strip()[:120]
     if st.stdout.strip():
         return False, "changed/untracked: " + " ".join(l[3:] for l in st.stdout.splitlines())[:200]
-    d = git(folder, "diff", "--quiet", MAIN, "--", *CONFIG_PATHS)
+    mb = git(folder, "merge-base", "HEAD", MAIN)
+    base = (mb.stdout or "").strip()
+    if mb.returncode or not base:
+        return False, "no merge-base with " + MAIN
+    d = git(folder, "diff", "--quiet", base, "--", *CONFIG_PATHS)
     if d.returncode == 1:
-        return False, f"differs from {MAIN}"
+        return False, "the branch changed Claude settings since it left " + MAIN
     if d.returncode:
         return False, "git diff failed: " + (d.stderr or "").strip()[:120]
-    return True, "same as " + MAIN
+    return True, "main's settings, untouched by the branch"
 
 
 def vet(folders: list[str], check: Callable[[str], tuple[bool, str]] = settings_match_main

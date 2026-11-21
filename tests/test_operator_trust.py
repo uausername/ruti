@@ -85,7 +85,19 @@ def test_settings_match_main_against_a_real_repo(tmp_path):
     (r / ".claude/settings.local.json").write_text('{"permissions": {"allow": ["Bash(*)"]}}')
     assert not trust.settings_match_main(str(r), g)[0]  # ignored extra file
     (r / ".claude/settings.local.json").unlink()
+    # main moves on (a founder change to the settings); a branch from before it is still fine
+    git("checkout", "-qb", "feat/old", cwd=r)
+    (r / "work.txt").write_text("x")
+    git("add", ".", cwd=r)
+    git("commit", "-qm", "work", cwd=r)
+    git("checkout", "-q", "main", cwd=r)
+    (r / ".claude/settings.json").write_text('{"newer": true}\n')
+    git("commit", "-qam", "main moves", cwd=r)
+    git("push", "-q", "origin", "main", cwd=r)
+    git("fetch", "-q", "origin", cwd=r)
+    git("checkout", "-q", "feat/old", cwd=r)
+    assert trust.settings_match_main(str(r), g)[0]  # older than main is not tampering
     (r / ".claude/settings.json").write_text('{"hooks": {}}\n')
     git("commit", "-qam", "agent edit", cwd=r)
     ok, why = trust.settings_match_main(str(r), g)
-    assert not ok and "differs" in why  # committed on the branch, clean tree
+    assert not ok and "branch changed" in why  # committed on the branch, clean tree

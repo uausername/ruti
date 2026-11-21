@@ -124,6 +124,15 @@ def test_missing_gh_means_no_pr_evidence():
     assert gc._prs("/r", gc.Git(run)) == {}
 
 
+def test_pruned_worktree_folder_is_listed_as_orphan_and_kept(repo):
+    orphan = repo / ".ruti/h/worktrees/pr692"
+    orphan.mkdir(parents=True)
+    (orphan / ".git").write_text("gitdir: /mnt/c/x/.git/worktrees/pr692\n")
+    e = entries(repo)["pr692"]
+    assert not e.removable and "orphan" in e.keep[0]
+    assert gc.apply(str(repo), [e]) == [] and orphan.exists()
+
+
 def test_apply_removes_only_removable(repo):
     add(repo, "codex-done", "--detach")
     p = add(repo, "codex-dirty", "--detach")
