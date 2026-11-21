@@ -737,8 +737,10 @@ def operator_guard_status(repo: str | None, ref: str | None) -> None:
 @click.option("--keep", multiple=True, default=("haccp-master",), show_default=True,
               help="Substring of worktree paths never to remove (repeatable).")
 @click.option("--apply", "do_apply", is_flag=True, help="Remove the removable ones (default: list only).")
+@click.option("--sizes", is_flag=True,
+              help="Also sum each removable worktree's size (slow from WSL: minutes for 20+ worktrees).")
 @click.option("--json", "as_json", is_flag=True)
-def operator_gc(repo: str | None, keep: tuple[str, ...], do_apply: bool, as_json: bool) -> None:
+def operator_gc(repo: str | None, keep: tuple[str, ...], do_apply: bool, sizes: bool, as_json: bool) -> None:
     """List (or --apply: remove) finished agent worktrees under .ruti/."""
     import os
 
@@ -748,7 +750,7 @@ def operator_gc(repo: str | None, keep: tuple[str, ...], do_apply: bool, as_json
     live = gc.live_folders()
     if live is None:
         raise click.ClickException("cannot read `harness ps`; refusing to judge which worktrees are live")
-    entries = gc.plan(repo, live=live, keep=list(keep))
+    entries = gc.plan(repo, live=live, keep=list(keep), sizes=sizes)
     rows = [{"path": e.path, "branch": e.branch, "removable": e.removable, "safe": e.safe,
              "keep": e.keep, "size_mb": e.size_mb} for e in entries]
     result = {"removable": sum(r["removable"] for r in rows),
@@ -765,7 +767,8 @@ def operator_gc(repo: str | None, keep: tuple[str, ...], do_apply: bool, as_json
         why = r["safe"] if r["removable"] else "; ".join(r["keep"])
         size = f"{r['size_mb']:>8.1f} MB" if r["size_mb"] is not None else " " * 11
         ui.say(f"{mark} {size}  {r['path'].rsplit('/', 1)[-1]:<45} {why}")
-    ui.say(f"\n{result['removable']} removable ({result['size_mb']} MB), {result['kept']} kept"
+    size = f" ({result['size_mb']} MB)" if sizes else ""
+    ui.say(f"\n{result['removable']} removable{size}, {result['kept']} kept"
            + ("" if do_apply else " -- dry run; --apply to remove"))
 
 
