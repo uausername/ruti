@@ -144,6 +144,8 @@ def _blocks(worktree: str, layout: Layout) -> list[str]:
         r"|--role[a-z]+|--run-id[\w-]+|--log-dir" + own_tmp + r"|--flutter-bin" + flutter_bin + r"flutter"
         r"|--dart-bin" + flutter_bin + r"dart)*(?:taskgraph|codegen|format|analyze|unittest|test"
         r"(?:test/[\w/]+_test\.dart)?)" + redirect,
+        # switching Ruti delegation off for the own session (Administrator's request, 17.11)
+        r"rutioff",
     ]
     return prelude + finals
 
@@ -166,6 +168,9 @@ def decide(command: str, worktree: str, layout: Layout | None = None) -> Decisio
     for token, why in _RAW_FORBIDDEN:
         if token in command:
             return Decision(False, why)
+    gh = gh_api_read(command)
+    if gh is not None:
+        return gh
     stripped = _normalise(strip(command))
     if "run_checks" in stripped and "exec" in stripped.lower():
         # its `exec` stage runs whatever follows; the pane may wrap the word, so look stripped
@@ -176,6 +181,102 @@ def decide(command: str, worktree: str, layout: Layout | None = None) -> Decisio
     if re.fullmatch(pattern, stripped):
         return Decision(True, "every part matches the allowlist")
     return Decision(False, "not on the allowlist")
+
+
+# --- `gh api` reads of PR discussion ------------------------------------------------
+# Codex reviewers read PR comments with ever-changing flags (Administrator, 23.11), so
+# this one family is judged word by word (shlex), not as stripped text: any order of the
+# flags below, nothing else. Only GET, only this repository, only comments and reviews.
+GH_REPOS = ("uausername/haccp", "{owner}/{repo}")
+_GH_PATH = re.compile(
+    r"/?repos/(?P<repo>[\w.{}-]+/[\w.{}-]+)/(?:pulls/\d+/(?:comments|reviews(?:/\d+/comments)?)"
+    r"|pulls/comments/\d+|issues/\d+/comments|issues/comments/\d+)"
+    r"(?:\?(?:(?:per_page|page)=\d+)(?:&(?:per_page|page)=\d+)*)?"
+)
+_GH_HEADER = re.compile(r"(?i)(?:accept:\s*application/(?:vnd\.github[\w.+-]*|json)|x-github-api-version:\s*\d{4}-\d{2}-\d{2})")
+_GH_FIELD = re.compile(r"(?:per_page|page)=\d+")
+_SHELL_OPS = set(";&|<>()\n")
+
+
+def gh_api_read(command: str) -> Decision | None:
+    """Decision for a `gh api` command, or None when the command is not one.
+
+    Allowed: `gh api <path>` with `--paginate`, `--slurp`, `-i/--include`, `--silent`,
+    `--jq/-q <filter>`, `--cache <dur>`, `-X/--method GET`, `-H/--header` (Accept or API
+    version only) and `-f/-F/--field/--raw-field` with per_page/page only -- and then
+    only with an explicit GET, because `gh api` turns a request with fields into a POST.
+    """
+    import shlex
+
+    text = command.strip()
+    if not re.match(r"gh\s+api(?:\s|$)", text):
+        return None
+    lexer = shlex.shlex(text, posix=True, punctuation_chars=";&|<>()")
+    lexer.whitespace_split = True
+    try:
+        words = list(lexer)
+    except ValueError:
+        return Decision(False, "gh api: unbalanced quotes")
+    if any(w and set(w) <= _SHELL_OPS for w in words):
+        return Decision(False, "gh api: shell operator (chain, pipe or redirect)")
+    words = words[2:]
+    path, method, fields, i = None, None, False, 0
+
+    def value(flag: str) -> str | None:
+        nonlocal i
+        w = words[i]
+        if w.startswith(flag + "=") and flag.startswith("--"):
+            return w[len(flag) + 1:]
+        if w == flag:
+            if i + 1 >= len(words):
+                return None
+            i += 1
+            return words[i]
+        if not flag.startswith("--") and w.startswith(flag) and len(w) > len(flag):
+            return w[len(flag):]  # -XGET, -q.body
+        return None
+
+    while i < len(words):
+        w = words[i]
+        if w in ("--paginate", "--slurp", "-i", "--include", "--silent"):
+            pass
+        elif w.startswith(("--jq", "-q")):
+            if value("--jq" if w.startswith("--jq") else "-q") is None:
+                return Decision(False, f"gh api: bad {w}")
+        elif w.startswith("--cache"):
+            v = value("--cache")
+            if v is None or not re.fullmatch(r"\d+[smh]", v):
+                return Decision(False, "gh api: bad --cache")
+        elif w.startswith(("-X", "--method")):
+            v = value("--method" if w.startswith("--method") else "-X")
+            if v is None or v.upper() != "GET":
+                return Decision(False, f"gh api: method {v!r} is not GET")
+            method = "GET"
+        elif w.startswith(("-H", "--header")):
+            v = value("--header" if w.startswith("--header") else "-H")
+            if v is None or not _GH_HEADER.fullmatch(v.strip()):
+                return Decision(False, f"gh api: header {v!r} not allowed")
+        elif w.startswith(("--raw-field", "--field", "-f", "-F")):
+            flag = next(f for f in ("--raw-field", "--field", "-f", "-F") if w.startswith(f))
+            v = value(flag)
+            if v is None or not _GH_FIELD.fullmatch(v):
+                return Decision(False, f"gh api: field {v!r} is not per_page/page")
+            fields = True
+        elif w.startswith("-"):
+            return Decision(False, f"gh api: flag {w} not allowed")
+        else:
+            if path is not None:
+                return Decision(False, "gh api: more than one endpoint")
+            path = w
+        i += 1
+    if path is None:
+        return Decision(False, "gh api: no endpoint")
+    m = _GH_PATH.fullmatch(path)
+    if not m or m.group("repo") not in GH_REPOS:
+        return Decision(False, f"gh api: endpoint {path!r} is not a PR comment/review read")
+    if fields and method != "GET":
+        return Decision(False, "gh api: fields without an explicit GET make a POST")
+    return Decision(True, "gh api: read of PR comments/reviews")
 
 
 def _sql_parts(stripped: str) -> str:

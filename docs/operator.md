@@ -183,3 +183,14 @@ anyone being told. Every 5 minutes the waker runs `claude auth status` and
 `codex login status`; a check that turns bad shows a Windows notification (WSL interop,
 `powershell.exe` toast) and writes `needs_admin`, repeats every 2 hours while it stays
 bad, and says once more when it recovers. State: `$STATE/operator/health.json`.
+
+## PR comment reads (`gh api`)
+
+Codex reviewers read PR discussion with `gh api` and change the flags every time, so this
+one family is judged word by word (`shlex`) rather than as stripped text
+(`policy.gh_api_read`): `repos/uausername/haccp` (or `{owner}/{repo}`), `pulls/N/comments`,
+`pulls/N/reviews[/ID/comments]`, `issues/N/comments`, with `--paginate`, `--slurp`,
+`--jq/-q`, `--cache`, `-H` (Accept / API version only), `-X/--method GET` and
+`-f/-F per_page|page` -- the fields only with an explicit GET, because `gh api` turns a
+request with fields into a POST. Any other flag, endpoint, method, a second endpoint or a
+shell operator is left for a person. `ruti off` is on the allowlist too.
