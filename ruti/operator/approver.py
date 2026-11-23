@@ -35,6 +35,8 @@ CONFIRM_MARK = "Press enter to confirm or esc"
 YES_SELECTED = re.compile(r"›\s*1\.\s*Yes, proceed")
 PAGER_PERCENT = re.compile(r"─\s(\d{1,3})%\s─")
 HOOKS_MARK = "Hooks need review"
+UPDATE_MARK = "Update available"
+UPDATE_SKIP = "Skip until next version"
 
 Runner = Callable[[list[str]], str]
 
@@ -207,6 +209,13 @@ class Approver:
             if not worktree:
                 continue
             screen = self.capture(pane.pane_id)
+            if UPDATE_MARK in screen and UPDATE_SKIP in screen:
+                # Codex's "Update available" menu blocks the session (seen after a WSL restart,
+                # 2026-11-23). Skipping is the conservative answer: no download, no new
+                # version mid-task. Updating Codex stays a person's decision.
+                self.run(["tmux", "send-keys", "-t", pane.pane_id, "Escape"])
+                results.append(self.log("skipped_update", pane=pane.pane_id, pid=pane.pid, worktree=worktree))
+                continue
             if HOOKS_MARK in screen:
                 # never answered here: trusting hooks is a person's decision (Codex /hooks)
                 results.append(self._refuse(pane, worktree, "Codex asks to review hooks "

@@ -235,5 +235,16 @@ def test_hooks_review_screen_is_reported_never_answered(tmp_path):
     assert len(queue) == 1 and "/hooks" in queue[0]["reason"]
 
 
+def test_codex_update_menu_is_skipped_with_escape(tmp_path):
+    screen = ("  ✨ Update available! 0.166.0 -> 0.171.0\n"
+              "› 1. Update now (runs `sh -c 's=$(curl -fsSL https://chatgpt.com/codex/install.sh)'`)\n"
+              "  2. Skip\n  3. Skip until next version\n  enter continue · esc skip\n")
+    fake = FakeTmux(screen)
+    a = make(tmp_path, fake)
+    a.scan()
+    assert fake.sent == ["Escape"]  # never "1" / Enter: that would run the installer
+    assert events(tmp_path)[-1]["event"] == "skipped_update"
+
+
 def test_extract_ignores_screens_without_prompt():
     assert Approver.extract("just output\n$ ls\n") is None
