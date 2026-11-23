@@ -354,6 +354,12 @@ class Waker:
                 self.log("error", error=f"ysk collect failed: {exc!r}")
             if self.now() - last_sweep >= 300:  # git per worktree: every 5 minutes is plenty
                 last_sweep = self.now()
+                try:  # a logged-out Claude/Codex stops every agent silently: tell the person
+                    from .health import Watch
+
+                    Watch(self._dir() / "health.json", self.log).tick()
+                except Exception as exc:  # noqa: BLE001
+                    self.log("error", error=f"login watch failed: {exc!r}")
                 try:
                     changed = trust_mod.sweep()  # agent worktrees never stop on the trust screen
                     now_refused = sorted(changed.pop("refused", []))

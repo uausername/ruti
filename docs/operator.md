@@ -174,3 +174,12 @@ worktree (`.ruti/*/worktrees/*`) is trusted only while its branch has not touche
 just older than main.) A worktree whose branch changed them is untrusted again (Claude
 asks there) and the waker writes it to `needs_admin`. Repositories themselves and
 `~/harnesses/*` are not checked.
+
+## Login watch
+
+The master, the Administrator and every Claude session in WSL share one Claude login. On
+2026-11-22 it expired and all of them stood on "Not logged in" for two days without
+anyone being told. Every 5 minutes the waker runs `claude auth status` and
+`codex login status`; a check that turns bad shows a Windows notification (WSL interop,
+`powershell.exe` toast) and writes `needs_admin`, repeats every 2 hours while it stays
+bad, and says once more when it recovers. State: `$STATE/operator/health.json`.
