@@ -168,9 +168,9 @@ def decide(command: str, worktree: str, layout: Layout | None = None) -> Decisio
     for token, why in _RAW_FORBIDDEN:
         if token in command:
             return Decision(False, why)
-    gh = gh_api_read(command)
-    if gh is not None:
-        return gh
+    for special in (gh_api_read(command), docker_sandbox(command, worktree), tmp_script(command)):
+        if special is not None:
+            return special
     stripped = _normalise(strip(command))
     if "run_checks" in stripped and "exec" in stripped.lower():
         # its `exec` stage runs whatever follows; the pane may wrap the word, so look stripped
@@ -277,6 +277,112 @@ def gh_api_read(command: str) -> Decision | None:
     if fields and method != "GET":
         return Decision(False, "gh api: fields without an explicit GET make a POST")
     return Decision(True, "gh api: read of PR comments/reviews")
+
+
+def _words(command: str) -> list[str] | Decision:
+    import shlex
+
+    lexer = shlex.shlex(command.strip(), posix=True, punctuation_chars=";&|<>()")
+    lexer.whitespace_split = True
+    try:
+        words = list(lexer)
+    except ValueError:
+        return Decision(False, "unbalanced quotes")
+    if any(w and set(w) <= _SHELL_OPS for w in words):
+        return Decision(False, "shell operator (chain, pipe or redirect)")
+    return words
+
+
+# --- disposable containers (Administrator, 24.11) ------------------------------------
+# A container with no network, no privileges and at most a read-only view of the
+# worker's own /tmp folder cannot reach the host, other workers or the internet.
+_DOCKER_IMAGES = re.compile(r"postgres:\d+(?:\.\d+)?(?:-alpine)?|denoland/deno:[\w.-]+")
+
+
+def _own_prefix(worktree: str) -> str:
+    return re.sub(r"\d+$", "", worktree.removeprefix("codex-"))
+
+
+def docker_sandbox(command: str, worktree: str) -> Decision | None:
+    """Decision for `docker run|rm|exec` of the worker's own throwaway container, or None."""
+    text = command.strip()
+    m = re.match(r"docker\s+(run|rm|exec)\s", text)
+    if not m:
+        return None
+    words = _words(text)
+    if isinstance(words, Decision):
+        return Decision(False, "docker: " + words.reason)
+    prefix = _own_prefix(worktree)
+    own_name = re.compile(r"(?:codex-)?" + re.escape(prefix) + r"\d*[-_][\w.-]+")
+    own_tmp = re.compile(r"/tmp/(?:codex-)?" + re.escape(prefix) + r"\d*[\w.-]*(?:/[\w.-]+)*/?")
+    sub, args = m.group(1), words[2:]
+    if sub == "rm":
+        names = [a for a in args if a not in ("-f", "--force", "-v")]
+        if names and all(own_name.fullmatch(n) for n in names):
+            return Decision(True, "docker: remove own container")
+        return Decision(False, "docker rm: not only own containers")
+    if sub == "exec":
+        while args and args[0] in ("-i", "-t", "-it"):
+            args = args[1:]
+        if len(args) >= 2 and own_name.fullmatch(args[0]) and args[1] in ("psql", "pg_isready"):
+            return Decision(True, "docker: psql in own container")
+        return Decision(False, "docker exec: only psql/pg_isready in an own container")
+    # run
+    network = name = image = None
+    i = 0
+    while i < len(args):
+        a = args[i]
+        val = lambda: args[i + 1] if i + 1 < len(args) else ""  # noqa: E731
+        if a in ("--rm", "-d", "--detach", "--read-only"):
+            i += 1
+            continue
+        if a.startswith("--network=") or a == "--network":
+            network = a.split("=", 1)[1] if "=" in a else val()
+            i += 1 if "=" in a else 2
+            continue
+        if a.startswith("--name=") or a == "--name":
+            name = a.split("=", 1)[1] if "=" in a else val()
+            i += 1 if "=" in a else 2
+            continue
+        if a in ("-e", "--env"):
+            if not re.fullmatch(r"(?:POSTGRES_(?:HOST_AUTH_METHOD=trust|DB=\w+|PASSWORD=\w+|USER=\w+)"
+                                r"|DENO_DIR=/tmp/[\w.-]+|PGDATA=/[\w/.-]+)", val()):
+                return Decision(False, f"docker run: env {val()!r} not allowed")
+            i += 2
+            continue
+        if a == "--tmpfs":
+            if not re.fullmatch(r"/[\w/.-]+", val()):
+                return Decision(False, "docker run: bad --tmpfs")
+            i += 2
+            continue
+        if a in ("-v", "--volume"):
+            mm = re.fullmatch(r"([^:]+):(/[\w/.-]+):ro", val())
+            if not mm or not own_tmp.fullmatch(mm.group(1)) or ".." in val():
+                return Decision(False, f"docker run: volume {val()!r} is not an own /tmp folder read-only")
+            i += 2
+            continue
+        if a in ("-w", "--workdir"):
+            i += 2
+            continue
+        if a.startswith("-"):
+            return Decision(False, f"docker run: flag {a} not allowed")
+        image = a
+        break  # the rest is the container's own command: it runs inside the sandbox
+    if network != "none":
+        return Decision(False, "docker run: needs --network none")
+    if name is not None and not own_name.fullmatch(name):
+        return Decision(False, f"docker run: name {name!r} is not the worker's own")
+    if not image or not _DOCKER_IMAGES.fullmatch(image):
+        return Decision(False, f"docker run: image {image!r} not allowed")
+    return Decision(True, "docker: sandboxed own container (no network, own /tmp read-only)")
+
+
+def tmp_script(command: str) -> Decision | None:
+    """Never approved: a script the agent wrote is arbitrary code. Name it for the person."""
+    m = re.match(r"(?:bash|sh|python3?)\s+(/tmp/[\w./-]+)", command.strip())
+    if m:
+        return Decision(False, f"runs a script from /tmp -- read {m.group(1)} before approving")
+    return None
 
 
 def _sql_parts(stripped: str) -> str:

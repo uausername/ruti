@@ -240,3 +240,47 @@ def test_gh_api_comment_reads_allowed(cmd):
 @pytest.mark.parametrize("cmd", GH_NO)
 def test_gh_api_writes_and_others_refused(cmd):
     assert not decide(cmd, "codex-jcr2").allowed
+
+
+# --- disposable containers and /tmp scripts (Administrator, 24.11) -------------------
+DOCKER_OK = [
+    "docker run --detach --name jcr-patch-postgres --network none --env POSTGRES_HOST_AUTH_METHOD=trust "
+    "--env POSTGRES_DB=scratch --volume /tmp/jcr-scratch:/src:ro postgres:16",
+    "docker run --rm -d --network none --name jcr-pg-20261123 -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16",
+    "docker run --rm --network none --read-only --tmpfs /tmp -e DENO_DIR=/tmp/deno -v /tmp/jcr-scope-go4sscvy:/work:ro\n"
+    "  -w /work denoland/deno:alpine-1.45.5 test --allow-read supabase/functions/append-events/index.test.ts",
+    "docker rm -f jcr-pg-20261123",
+    "docker exec -i jcr-pg-20261123 psql -U postgres -c 'select 1'",
+]
+DOCKER_NO = [
+    "docker run --rm -d --name jcr-pg postgres:16",  # network
+    "docker run --rm --network host --name jcr-pg postgres:16",
+    "docker run --rm --network none --privileged --name jcr-pg postgres:16",
+    "docker run --rm --network none -v /:/host postgres:16",
+    "docker run --rm --network none -v /tmp/jcr-x:/src postgres:16",  # not :ro
+    "docker run --rm --network none -v /tmp/other-x:/src:ro postgres:16",
+    "docker run --rm --network none -v /var/run/docker.sock:/s:ro postgres:16",
+    "docker run --rm --network none --name other-pg postgres:16",
+    "docker run --rm --network none --name jcr-pg ubuntu:24.04",
+    "docker run --rm --network none -e LD_PRELOAD=/x postgres:16",
+    "docker run --rm --network none --name jcr-pg postgres:16 > /tmp/x.log",
+    "docker rm -f haccp-pgtest",
+    "docker exec haccp-pgtest psql -c 'drop database x'",
+    "docker exec -i jcr-pg bash -c 'rm -rf /'",
+    "bash /tmp/jcr-validate.sh",
+]
+
+
+@pytest.mark.parametrize("cmd", DOCKER_OK)
+def test_own_sandboxed_containers_allowed(cmd):
+    d = decide(cmd, "codex-jcr")
+    assert d.allowed, d.reason
+
+
+@pytest.mark.parametrize("cmd", DOCKER_NO)
+def test_other_containers_and_scripts_refused(cmd):
+    assert not decide(cmd, "codex-jcr").allowed
+
+
+def test_tmp_script_reason_names_the_file():
+    assert "read /tmp/lop-verify.Jg/validate.sh" in decide("bash /tmp/lop-verify.Jg/validate.sh origin-main", "codex-lop").reason

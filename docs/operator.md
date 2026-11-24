@@ -194,3 +194,12 @@ one family is judged word by word (`shlex`) rather than as stripped text
 `-f/-F per_page|page` -- the fields only with an explicit GET, because `gh api` turns a
 request with fields into a POST. Any other flag, endpoint, method, a second endpoint or a
 shell operator is left for a person. `ruti off` is on the allowlist too.
+
+## Disposable containers and /tmp scripts
+
+`docker run` is approved only as a sandbox: `--network none`, no `--privileged` or other
+unlisted flag, image `postgres:N` or `denoland/deno:*`, the worker's own container name
+(prefix of its worktree name) if one is given, and at most its own `/tmp` folder mounted
+`:ro`. `docker rm` and `docker exec … psql|pg_isready` only on own containers.
+`bash|sh|python /tmp/<script>` is never approved -- a script the agent wrote is arbitrary
+code -- but `needs_admin` names the file to read first.
