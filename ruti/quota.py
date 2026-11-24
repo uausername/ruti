@@ -389,7 +389,11 @@ def _window(raw: Any) -> Window | None:
 def load() -> Quota:
     from . import sessions
     if sessions.current_host() == "codex":
-        return Quota(None, None, 0.0)
+        from . import codex_telemetry
+        data = codex_telemetry.load()
+        return Quota(_window(data.get("five_hour")), _window(data.get("seven_day")),
+                     float(data.get("captured_at_epoch") or 0),
+                     data.get("model") or "", data.get("effort") or "")
     data = read_json(QUOTA_FILE, default=None)
     if not isinstance(data, dict):
         return Quota(None, None, 0.0)

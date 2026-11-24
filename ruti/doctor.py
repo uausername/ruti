@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -312,6 +313,11 @@ def _fix_proxy_restart() -> str:
     """
     from . import proc
 
+    if os.name != "nt":
+        # WSL: the proxy is the systemd user unit, there is no scheduled task (found
+        # 2026-11-24: `provider remove` could not restart it from the Administrator).
+        return _fix_proxy_restart_systemd()
+
     # End the task's own instance first. The listener is a grandchild of it, and
     # killing only that leaves the launcher alive for a moment -- long enough for the
     # scheduler to count the task as running and silently ignore the /Run below.
@@ -365,6 +371,29 @@ def _fix_proxy_restart() -> str:
     started = _fix_proxy_start()
     freed = ", ".join(str(pid) for pid in killed) or "nothing"
     return f"killed {freed}, then {started}"
+
+
+WSL_PROXY_UNIT = "ruti-wsl-proxy.service"
+
+
+def _fix_proxy_restart_systemd(run=subprocess.run) -> str:
+    """Restart the WSL proxy through its systemd user unit and wait for liveliness."""
+    try:
+        state = run(["systemctl", "--user", "is-enabled", WSL_PROXY_UNIT],
+                    capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"systemctl is not usable here ({exc}); restart the proxy by hand") from exc
+    if state.returncode:
+        raise RuntimeError(f"no systemd user unit {WSL_PROXY_UNIT} on this machine; "
+                           "restart the proxy the way it was started")
+    done = run(["systemctl", "--user", "restart", WSL_PROXY_UNIT], capture_output=True, text=True, timeout=60)
+    if done.returncode:
+        raise RuntimeError(f"systemctl restart {WSL_PROXY_UNIT} exited {done.returncode}: "
+                           f"{(done.stderr or '').strip()[:200]}")
+    if _wait_for_liveliness(PROXY_START_SECONDS):
+        return f"restarted {WSL_PROXY_UNIT}"
+    raise RuntimeError(f"{WSL_PROXY_UNIT} restarted but the proxy did not answer in "
+                       f"{PROXY_START_SECONDS:.0f} s -- journalctl --user -u {WSL_PROXY_UNIT}")
 
 
 def _wait_for_port_release(budget_s: float, *, interval_s: float = 0.5) -> list[int]:
@@ -591,27 +620,61 @@ def _check_tls() -> Check:
 
 
 def _check_proxy_bind() -> Check:
+    import socket
+
     from . import proc
 
-    try:
-        result = proc.run(["netstat", "-ano"], timeout=15.0)
-    except (proc.ToolNotFound, proc.ToolTimeout):
-        return Check("proxy-bind", WARN, "could not inspect listening sockets")
+    candidates: dict[str, bool] = {}
+    # This host can transiently omit a live endpoint as well as mislabel its state.
+    # Retry the snapshot once; no bind evidence must still produce a warning.
+    for _attempt in range(2):
+        try:
+            result = proc.run(["netstat", "-ano"], timeout=15.0)
+        except (proc.ToolNotFound, proc.ToolTimeout):
+            return Check("proxy-bind", WARN, "could not inspect listening sockets")
 
-    for line in result.stdout.splitlines():
-        if ":4000" in line and "LISTEN" in line.upper():
-            local = line.split()[1] if len(line.split()) > 1 else ""
-            if local.startswith("0.0.0.0") or local.startswith("[::]"):
-                return Check(
-                    "proxy-bind", BAD,
-                    f"the proxy is listening on {local} -- every interface",
-                    detail=(
-                        "/model/info answers without authentication, so anyone who can "
-                        "route to this machine can read the config and spend your API keys. "
-                        "start-litellm.ps1 passes --host 127.0.0.1; this process predates it"
-                    ),
-                )
-            return Check("proxy-bind", OK, f"listening on {local}")
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) < 4 or parts[0].upper() not in ("TCP", "TCP6"):
+                continue
+            local = parts[1]
+            if not local.endswith(":4000"):
+                continue
+            is_listener = parts[3].upper() in ("LISTEN", "LISTENING")
+            # On this Windows host a live listener can be labelled CLOSED/FIN_WAIT_1.
+            # No peer is only a candidate: a bound or closed socket may have none too.
+            if is_listener or parts[2] in ("0.0.0.0:0", "[::]:0", "*:*"):
+                candidates[local] = candidates.get(local, False) or is_listener
+        if candidates:
+            break
+
+    listeners = []
+    for local, is_listener in candidates.items():
+        if not is_listener:
+            host = local.rsplit(":", 1)[0].strip("[]")
+            host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
+            try:
+                # Connect only; no HTTP/model request and no proxy restart.
+                with socket.create_connection((host, 4000), timeout=0.5):
+                    pass
+            except OSError:
+                continue
+        listeners.append(local)
+
+    # A loopback entry must not hide a second listener on every interface.
+    for local in listeners:
+        if local in ("0.0.0.0:4000", "[::]:4000"):
+            return Check(
+                "proxy-bind", BAD,
+                f"the proxy is listening on {local} -- every interface",
+                detail=(
+                    "/model/info answers without authentication, so anyone who can "
+                    "route to this machine can read the config and spend your API keys. "
+                    "start-litellm.ps1 passes --host 127.0.0.1; this process predates it"
+                ),
+            )
+    if listeners:
+        return Check("proxy-bind", OK, f"listening on {listeners[0]}")
     return Check("proxy-bind", WARN, "nothing is listening on :4000")
 
 

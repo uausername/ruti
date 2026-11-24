@@ -553,11 +553,17 @@ def _report_money(money: dict) -> None:
 @main.command()
 @click.option("--apply", "do_apply", is_flag=True, help="Write the changes, not just show them.")
 @click.option("--host", type=click.Choice(["claude", "codex"]), default="claude")
-def install(do_apply: bool, host: str) -> None:
-    """Install host guidance; Claude also receives status line, hooks and agents."""
+@click.option("--native-hooks", is_flag=True, help="Opt in to Codex native hooks; requires /hooks trust.")
+def install(do_apply: bool, host: str, native_hooks: bool) -> None:
+    """Preview or install host guidance and optional native Codex hooks."""
+    if native_hooks and host != "codex":
+        raise click.UsageError("--native-hooks requires --host codex")
     try:
         changes = install_mod.codex_plan() if host == "codex" else install_mod.plan()
-    except RuntimeError as exc:
+        if native_hooks:
+            from . import codex_install
+            changes += codex_install.plan()
+    except (RuntimeError, ValueError, OSError) as exc:
         raise click.ClickException(str(exc))
 
     if not changes:
@@ -583,6 +589,9 @@ def install(do_apply: bool, host: str) -> None:
         ui.ok(note)
     if host == "codex":
         ui.say("Codex guidance takes effect in the next session.")
+        if native_hooks:
+            ui.say("Open /hooks in Codex and review/trust the exact Ruti definitions. "
+                   "Installation does not grant trust or change approval permissions.")
         return
     ui.say("")
     ui.say("[muted]the status line and hooks take effect in the next Claude Code session; "
@@ -590,6 +599,35 @@ def install(do_apply: bool, host: str) -> None:
 
 
 # ------------------------------------------------------------------------- on / off
+
+
+@main.group("codex")
+def codex_group() -> None:
+    """Inspect native hook receipts without running models or granting trust."""
+
+
+@codex_group.command("status")
+@click.option("--json", "as_json", is_flag=True)
+def codex_status(as_json: bool) -> None:
+    from .hooks.codex import runtime_status
+    data = {"session": sessions.current_session_id(), "runtime": runtime_status(),
+            "trust_verified": False,
+            "note": "Runtime receipt is historical; review current definitions in Codex /hooks."}
+    if as_json:
+        ui.emit_json(data)
+    else:
+        ui.say(str(data))
+
+
+@codex_group.command("pending")
+@click.option("--json", "as_json", is_flag=True)
+def codex_pending(as_json: bool) -> None:
+    from .hooks.codex import pending_handoffs
+    data = {"handoffs": pending_handoffs(), "automatic_spawn": False}
+    if as_json:
+        ui.emit_json(data)
+    else:
+        ui.say(str(data))
 
 
 @main.group("worktree")
@@ -621,18 +659,286 @@ def worktree_apply(run_id: str, directory: str, as_json: bool) -> None:
         ui.say("patch applied; source index unchanged" if applied else "patch is empty; nothing to apply")
 
 
+@main.group("operator")
+def operator_commands() -> None:
+    """Deterministic operator services for the Harness -> master -> Codex chain."""
+
+
+@operator_commands.command("check")
+@click.option("--worktree", required=True, help="Codex worker worktree name, e.g. codex-dco.")
+@click.argument("command")
+@click.option("--json", "as_json", is_flag=True)
+def operator_check(worktree: str, command: str, as_json: bool) -> None:
+    """Would the approver answer this command with "yes, once"? Exit 1 if not."""
+    from .operator import policy
+
+    d = policy.decide(command, worktree)
+    if as_json:
+        ui.emit_json({"allowed": d.allowed, "reason": d.reason})
+    else:
+        ui.say(("ALLOW  " if d.allowed else "REFUSE ") + d.reason)
+    raise SystemExit(0 if d.allowed else 1)
+
+
+@operator_commands.command("approve")
+@click.option("--once", is_flag=True, help="One pass over the tmux panes, then exit.")
+@click.option("--interval", type=float, default=5.0, show_default=True)
+@click.option("--no-require-master", is_flag=True,
+              help="Approve even when no master Claude harness is alive (not recommended).")
+def operator_approve(once: bool, interval: float, no_require_master: bool) -> None:
+    """Answer safe Codex run-command prompts in tmux (WSL), logging every decision."""
+    from .operator.approver import Approver
+
+    approver = Approver(require_master=not no_require_master)
+    if once:
+        for row in approver.scan():
+            ui.emit_json(row)
+        return
+    approver.loop(interval)
+
+
+@operator_commands.group("guard")
+def operator_guard() -> None:
+    """The trusted copy of the HACCP Codex edit guard (one hook for every worktree)."""
+
+
+@operator_guard.command("sync")
+@click.option("--repo", default="/mnt/c/mycode/haccp", show_default=True)
+@click.option("--ref", default="main", show_default=True)
+def operator_guard_sync(repo: str, ref: str) -> None:
+    """Copy codex_guard.py + protect_rules.py from REPO@REF (committed bytes) into the trusted folder."""
+    from .operator import guard
+
+    ui.emit_json(guard.sync(repo, ref))
+
+
+@operator_guard.command("install-hook")
+def operator_guard_install_hook() -> None:
+    """Add the shim as PreToolUse group 0 in ~/.codex/hooks.json (trust it once in Codex /hooks)."""
+    from .operator import guard
+
+    ui.emit_json(guard.install_hook())
+
+
+@operator_guard.command("status")
+@click.option("--repo", default=None)
+@click.option("--ref", default=None)
+def operator_guard_status(repo: str | None, ref: str | None) -> None:
+    """Intact, current with the ref, and wired into Codex? Exit 1 if not."""
+    from .operator import guard
+
+    s = guard.status(repo, ref)
+    ui.emit_json(s)
+    raise SystemExit(0 if s.get("ok") else 1)
+
+
+@operator_commands.command("gc")
+@click.option("--repo", default=None, help="Default: /mnt/c/mycode/haccp in WSL, C:/mycode/haccp on Windows.")
+@click.option("--keep", multiple=True, default=("haccp-master",), show_default=True,
+              help="Substring of worktree paths never to remove (repeatable).")
+@click.option("--apply", "do_apply", is_flag=True, help="Remove the removable ones (default: list only).")
+@click.option("--sizes", is_flag=True,
+              help="Also sum each removable worktree's size (slow from WSL: minutes for 20+ worktrees).")
+@click.option("--json", "as_json", is_flag=True)
+def operator_gc(repo: str | None, keep: tuple[str, ...], do_apply: bool, sizes: bool, as_json: bool) -> None:
+    """List (or --apply: remove) finished agent worktrees under .ruti/."""
+    import os
+
+    from .operator import gc
+
+    repo = repo or ("C:/mycode/haccp" if os.name == "nt" else "/mnt/c/mycode/haccp")
+    live = gc.live_folders()
+    if live is None:
+        raise click.ClickException("cannot read `harness ps`; refusing to judge which worktrees are live")
+    entries = gc.plan(repo, live=live, keep=list(keep), sizes=sizes)
+    rows = [{"path": e.path, "branch": e.branch, "removable": e.removable, "safe": e.safe,
+             "keep": e.keep, "size_mb": e.size_mb} for e in entries]
+    result = {"removable": sum(r["removable"] for r in rows),
+              "kept": sum(not r["removable"] for r in rows),
+              "size_mb": round(sum(r["size_mb"] or 0 for r in rows if r["removable"]), 1),
+              "worktrees": rows}
+    if do_apply:
+        result["applied"] = gc.apply(repo, entries)
+    if as_json:
+        ui.emit_json(result)
+        return
+    for r in rows:
+        mark = "REMOVE" if r["removable"] else "keep  "
+        why = r["safe"] if r["removable"] else "; ".join(r["keep"])
+        size = f"{r['size_mb']:>8.1f} MB" if r["size_mb"] is not None else " " * 11
+        ui.say(f"{mark} {size}  {r['path'].rsplit('/', 1)[-1]:<45} {why}")
+    size = f" ({result['size_mb']} MB)" if sizes else ""
+    ui.say(f"\n{result['removable']} removable{size}, {result['kept']} kept"
+           + ("" if do_apply else " -- dry run; --apply to remove"))
+
+
+@operator_commands.command("trust")
+@click.argument("folders", nargs=-1)
+def operator_trust(folders: tuple[str, ...]) -> None:
+    """Pre-accept Claude's folder-trust screen: FOLDERS, or every repo/worktree/harness folder."""
+    import os
+
+    from .operator import trust
+
+    if folders:
+        added = trust.trust_everywhere([os.path.abspath(f) for f in folders])
+    else:
+        added = trust.sweep()
+    ui.emit_json({"added": added, "count": sum(len(v) for v in added.values())})
+
+
+@operator_commands.command("quota")
+@click.option("--max-parallel", type=int, default=4, show_default=True)
+def operator_quota(max_parallel: int) -> None:
+    """Claude and Codex quota, and whether one more Codex worker may start (exit 1 if not)."""
+    from .operator import quota
+
+    g = quota.gate(live_codex=quota.live_codex_count(), max_parallel=max_parallel)
+    ui.emit_json(g)
+    raise SystemExit(0 if g["ok"] else 1)
+
+
+@operator_commands.command("prepare")
+@click.argument("name")
+@click.option("--repo", default="/mnt/c/mycode/haccp", show_default=True)
+@click.option("--harness-dir", default=None, help="Default: the newest .ruti/harness-local-*.")
+@click.option("--base", default="main", show_default=True)
+@click.option("--branch", default=None, help="Create this branch instead of a detached HEAD.")
+@click.option("--model", default=None)
+@click.option("--effort", default=None)
+@click.option("--ignore-quota", is_flag=True)
+@click.option("--max-parallel", type=int, default=4, show_default=True)
+@click.option("--allow-no-guard", is_flag=True, help="Prepare even if the trusted guard is not ready.")
+def operator_prepare(name: str, repo: str, harness_dir: str | None, base: str, branch: str | None,
+                     model: str | None, effort: str | None, ignore_quota: bool, max_parallel: int,
+                     allow_no_guard: bool) -> None:
+    """Create a Codex worker worktree ready to run: LF, relative gitdir, profile, receipt."""
+    from .operator.prepare import PrepareError, prepare
+
+    try:
+        ui.emit_json(prepare(name, repo=repo, harness_dir=harness_dir, base=base, branch=branch,
+                             model=model, effort=effort, ignore_quota=ignore_quota,
+                             max_parallel=max_parallel, allow_no_guard=allow_no_guard))
+    except PrepareError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@operator_commands.command("resume-at")
+@click.option("--after", default="quota", show_default=True,
+              help="When to resume: +90m, +2h, an ISO time (UTC if no zone), an epoch, "
+                   "`quota` (the reset of a spent Claude window, else now), or `codex` "
+                   "(the reset of the Codex window that blocks new workers, else now).")
+@click.option("--checkpoint", type=click.Path(), help="The checkpoint file the next master reads.")
+@click.option("--reason", default="pause", show_default=True)
+@click.option("--manual", is_flag=True, help="Do not wake automatically; a person resumes.")
+@click.option("--cancel", is_flag=True, help="Drop the pending request.")
+@click.option("--harness-id", help="The master harness (default: this one, from `harness ps`).")
+@click.option("--folder", help="The master's folder (default: the current directory).")
+@click.option("--model", default="sonnet", show_default=True,
+              help="Model for a fresh master (sonnet since 2026-11-17: the Claude week is the scarce budget).")
+def operator_resume_at(after: str, checkpoint: str | None, reason: str, manual: bool, cancel: bool,
+                       harness_id: str | None, folder: str | None, model: str) -> None:
+    """Master: record when and from which checkpoint to resume, before ending the turn."""
+    import os
+    import time as _time
+
+    from .operator import waker
+
+    w = waker.Waker()
+    if cancel:
+        req = w.load() or {}
+        if req.get("status") == "pending":
+            req["status"] = "cancelled"
+            w.save(req)
+        w.log("cancelled")
+        ui.emit_json({"status": "cancelled"})
+        return
+    folder = (folder or os.getcwd()).rstrip("/")
+    if not harness_id:
+        rows = w.harnesses() or []
+        mine = [r for r in rows if r.get("self")] or [
+            r for r in rows if "claude" in str(r.get("agent", "")).lower()
+            and str(r.get("folder", "")).rstrip("/") == folder]
+        if len(mine) != 1:
+            raise click.ClickException("cannot tell which harness is the master; pass --harness-id")
+        harness_id, folder = mine[0]["id"], str(mine[0]["folder"]).rstrip("/")
+    if not manual and not checkpoint:
+        raise click.UsageError("--checkpoint is required unless --manual")
+    now = _time.time()
+    if after == "codex":  # wait for the Codex window that blocks new workers
+        from .operator import quota as quota_mod
+
+        when = quota_mod.block(quota_mod.codex_reading(now=now), quota_mod.CODEX_LIMITS, now) or now
+    else:
+        when = waker.parse_after(after, now, waker.load_quota())
+    req = waker.request(harness_id=harness_id, folder=folder,
+                        checkpoint=os.path.abspath(checkpoint) if checkpoint else "",
+                        after=when, reason=reason, mode="manual" if manual else "auto",
+                        model=model, now=now)
+    w.save(req)
+    w.log("requested", **{k: req[k] for k in ("harness_id", "after", "mode", "reason", "checkpoint")})
+    ui.emit_json({**req, "after_iso": _time.strftime("%Y-%m-%dT%H:%M:%S%z", _time.localtime(when))})
+
+
+@operator_commands.command("wake")
+@click.option("--once", is_flag=True, help="One check, then exit.")
+@click.option("--interval", type=float, default=60.0, show_default=True)
+def operator_wake(once: bool, interval: float) -> None:
+    """Resume the master when its `resume-at` request is due (WSL service)."""
+    from .operator.waker import Waker
+
+    w = Waker()
+    if once:
+        ui.emit_json(w.tick() or {"event": "nothing due", "request": w.load()})
+        return
+    w.loop(interval)
+
+
+@operator_commands.command("tell-master")
+@click.argument("text")
+@click.option("--folder", help="The master's folder (default: the live haccp-master-* Claude harness).")
+@click.option("--when-idle", is_flag=True, help="Wait until the master is idle (needed for /model, /effort).")
+@click.option("--wait", "wait_s", type=float, default=1800.0, show_default=True)
+def operator_tell_master(text: str, folder: str | None, when_idle: bool, wait_s: float) -> None:
+    """Administrator: paste a message (or a slash command) into the master's Claude pane."""
+    from .operator import admin
+
+    try:
+        ui.emit_json(admin.tell_master(text, folder=folder, when_idle=when_idle, wait_s=wait_s))
+    except admin.TellError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@operator_commands.command("ysk")
+@click.option("--all", "show_all", is_flag=True, help="Every collected card, not only unread ones.")
+@click.option("--mark-read", is_flag=True, help="Mark everything shown as read.")
+def operator_ysk(show_all: bool, mark_read: bool) -> None:
+    """Administrator: "You should know" cards from WSL sessions (the master's pane nobody reads)."""
+    from .operator import admin
+    from .operator.waker import Waker
+
+    d = Waker()._dir()
+    feed, mark = d / "ysk.jsonl", d / "ysk.read"
+    admin.collect_ysk(feed)
+    rows = admin.unread_ysk(feed, mark if not show_all else d / "ysk.none")
+    if mark_read:
+        admin.mark_read(feed, mark)
+    ui.emit_json({"cards": rows, "count": len(rows)})
+
+
 def _session_or_die() -> str:
     session_id = sessions.current_session_id()
     if not session_id:
         raise click.ClickException(
-            "no session identity -- set RUTI_SESSION_ID and RUTI_HOST, or run inside Claude Code"
+            "no session identity -- run inside Codex or Claude Code, "
+            "or set RUTI_SESSION_ID and RUTI_HOST"
         )
     return session_id
 
 
 @main.command()
 def off() -> None:
-    """Disable `route`/`delegate` for the current Claude Code session only."""
+    """Disable `route`/`delegate` for the current host session only."""
     session_id = _session_or_die()
     sessions.set_disabled(session_id, True)
     ui.ok(f"ruti disabled for this session ({session_id[:8]}) -- "
@@ -641,7 +947,7 @@ def off() -> None:
 
 @main.command()
 def on() -> None:
-    """Re-enable `route`/`delegate` for the current Claude Code session."""
+    """Re-enable `route`/`delegate` for the current host session."""
     session_id = _session_or_die()
     was_disabled = sessions.is_disabled(session_id)
     sessions.set_disabled(session_id, False)
