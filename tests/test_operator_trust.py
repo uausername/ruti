@@ -61,6 +61,31 @@ def test_agent_worktree_with_foreign_settings_is_refused_and_revoked(tmp_path):
     assert out["refused"] == [f"{wt}: differs from origin/main"]
 
 
+def test_git_failure_neither_trusts_nor_revokes(tmp_path):
+    # 2026-11-23: WSL out of memory, git timed out; revoking left the master on the trust screen
+    wt = "/mnt/c/mycode/haccp/.ruti/h/worktrees/haccp-master-x"
+    new = "/mnt/c/mycode/haccp/.ruti/h/worktrees/codex-new"
+    p = cfg(tmp_path, {wt: {"hasTrustDialogAccepted": True}})
+    out = trust.trust_everywhere([wt, new], [(p, False)], check=lambda f: (None, "git status failed: vsock"))
+    d = json.loads(p.read_text(encoding="utf-8"))["projects"]
+    assert d[wt]["hasTrustDialogAccepted"] is True
+    assert new not in d
+    assert "refused" not in out and len(out["unchecked"]) == 2
+
+
+def test_settings_match_main_git_error_is_unknown():
+    import subprocess as sp
+
+    def broken(path, *args):
+        return sp.CompletedProcess(args, 128, "", "accept4 failed 110")
+
+    def raising(path, *args):
+        raise OSError(12, "Cannot allocate memory")
+
+    assert trust.settings_match_main("/x", broken)[0] is None
+    assert trust.settings_match_main("/x", raising)[0] is None
+
+
 def test_settings_match_main_against_a_real_repo(tmp_path):
     import subprocess
 

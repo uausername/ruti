@@ -139,7 +139,10 @@ def prepare(name: str, *, repo: str = "/mnt/c/mycode/haccp", harness_dir: str | 
     receipt["receipt"] = str(runs / "PREPARED.json")
     # A Claude session started here (reviewer, master) must not stop on the trust screen.
     try:
-        receipt["claude_trusted"] = bool((trust or trust_mod.trust_everywhere)([str(wt)]))
+        result = (trust or trust_mod.trust_everywhere)([str(wt)])
+        if isinstance(result, dict):  # "refused"/"unchecked" report folders that were NOT trusted
+            result = {k: v for k, v in result.items() if k not in ("refused", "unchecked")}
+        receipt["claude_trusted"] = bool(result)
     except Exception as exc:  # noqa: BLE001 -- trust is a convenience, not a gate
         receipt["claude_trusted"] = f"error: {exc!r}"
     return receipt

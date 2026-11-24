@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -312,6 +313,11 @@ def _fix_proxy_restart() -> str:
     """
     from . import proc
 
+    if os.name != "nt":
+        # WSL: the proxy is the systemd user unit, there is no scheduled task (found
+        # 2026-11-24: `provider remove` could not restart it from the Administrator).
+        return _fix_proxy_restart_systemd()
+
     # End the task's own instance first. The listener is a grandchild of it, and
     # killing only that leaves the launcher alive for a moment -- long enough for the
     # scheduler to count the task as running and silently ignore the /Run below.
@@ -365,6 +371,29 @@ def _fix_proxy_restart() -> str:
     started = _fix_proxy_start()
     freed = ", ".join(str(pid) for pid in killed) or "nothing"
     return f"killed {freed}, then {started}"
+
+
+WSL_PROXY_UNIT = "ruti-wsl-proxy.service"
+
+
+def _fix_proxy_restart_systemd(run=subprocess.run) -> str:
+    """Restart the WSL proxy through its systemd user unit and wait for liveliness."""
+    try:
+        state = run(["systemctl", "--user", "is-enabled", WSL_PROXY_UNIT],
+                    capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"systemctl is not usable here ({exc}); restart the proxy by hand") from exc
+    if state.returncode:
+        raise RuntimeError(f"no systemd user unit {WSL_PROXY_UNIT} on this machine; "
+                           "restart the proxy the way it was started")
+    done = run(["systemctl", "--user", "restart", WSL_PROXY_UNIT], capture_output=True, text=True, timeout=60)
+    if done.returncode:
+        raise RuntimeError(f"systemctl restart {WSL_PROXY_UNIT} exited {done.returncode}: "
+                           f"{(done.stderr or '').strip()[:200]}")
+    if _wait_for_liveliness(PROXY_START_SECONDS):
+        return f"restarted {WSL_PROXY_UNIT}"
+    raise RuntimeError(f"{WSL_PROXY_UNIT} restarted but the proxy did not answer in "
+                       f"{PROXY_START_SECONDS:.0f} s -- journalctl --user -u {WSL_PROXY_UNIT}")
 
 
 def _wait_for_port_release(budget_s: float, *, interval_s: float = 0.5) -> list[int]:

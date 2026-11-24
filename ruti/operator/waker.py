@@ -363,6 +363,9 @@ class Waker:
                 try:
                     changed = trust_mod.sweep()  # agent worktrees never stop on the trust screen
                     now_refused = sorted(changed.pop("refused", []))
+                    unchecked = changed.pop("unchecked", [])
+                    if unchecked:  # git did not answer: trust left as it was
+                        self.log("trust_unchecked", folders=unchecked[:5], count=len(unchecked))
                     if changed:
                         self.log("trusted", changes=changed)
                     if now_refused != refused:
@@ -376,7 +379,38 @@ class Waker:
                 self.tick()
             except Exception as exc:  # noqa: BLE001 -- the service must keep running
                 self.log("error", error=repr(exc))
-            self.sleep(interval)
+            self._sleep_watching_ysk(interval)
+
+    def _sleep_watching_ysk(self, interval: float, step: float = 5.0) -> None:
+        """Sleep `interval`, but collect side-agent cards whenever their store changes.
+
+        Since Claude 2.1.330 a card's text stays in the plugin store only while it is on
+        screen; a once-a-minute look missed nearly all of them (one card 21.11-23.11).
+        """
+        from .admin import collect_ysk, ysk_stores
+
+        def stamp():
+            out = []
+            for p in ysk_stores():
+                try:
+                    out.append((str(p), p.stat().st_mtime_ns))
+                except OSError:
+                    pass
+            return out
+
+        last, slept = stamp(), 0.0
+        while slept < interval:
+            self.sleep(min(step, interval - slept))
+            slept += step
+            now = stamp()
+            if now != last:
+                last = now
+                try:
+                    cards = collect_ysk(self._dir() / "ysk.jsonl")
+                    if cards:
+                        self.log("ysk", count=len(cards))
+                except Exception as exc:  # noqa: BLE001
+                    self.log("error", error=f"ysk collect failed: {exc!r}")
 
 
 def request(*, harness_id: str, folder: str, checkpoint: str, after: float, reason: str,

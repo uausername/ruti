@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -45,33 +46,51 @@ def is_agent_worktree(folder: str) -> bool:
     return bool(_AGENT_WT.search(str(folder).replace("\\", "/").rstrip("/")))
 
 
-def settings_match_main(folder: str, git: Git | None = None) -> tuple[bool, str]:
-    """Whether the folder's Claude settings are main's, untouched by its branch."""
+def settings_match_main(folder: str, git: Git | None = None) -> tuple[bool | None, str]:
+    """Whether the folder's Claude settings are main's, untouched by its branch.
+
+    None means git could not answer (on 2026-11-23 WSL ran out of memory and git timed
+    out on its vsock): that says nothing about the settings, so the caller must neither
+    trust nor revoke -- revoking then left the master on the trust screen for an hour.
+    """
     git = git or Git.auto(folder)
-    st = git(folder, "status", "--porcelain", "--ignored", "--", *CONFIG_PATHS)
+    try:
+        st = git(folder, "status", "--porcelain", "--ignored", "--", *CONFIG_PATHS)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"git could not run: {exc!r}"[:160]
     if st.returncode:
-        return False, "git status failed: " + (st.stderr or "").strip()[:120]
+        return None, "git status failed: " + (st.stderr or "").strip()[:120]
     if st.stdout.strip():
         return False, "changed/untracked: " + " ".join(l[3:] for l in st.stdout.splitlines())[:200]
-    mb = git(folder, "merge-base", "HEAD", MAIN)
-    base = (mb.stdout or "").strip()
-    if mb.returncode or not base:
-        return False, "no merge-base with " + MAIN
-    d = git(folder, "diff", "--quiet", base, "--", *CONFIG_PATHS)
+    try:
+        mb = git(folder, "merge-base", "HEAD", MAIN)
+        base = (mb.stdout or "").strip()
+        if mb.returncode == 1 and not base:
+            return False, "no merge-base with " + MAIN  # unrelated history: a real answer
+        if mb.returncode or not base:
+            return None, "git merge-base failed: " + (mb.stderr or "").strip()[:120]
+        d = git(folder, "diff", "--quiet", base, "--", *CONFIG_PATHS)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"git could not run: {exc!r}"[:160]
     if d.returncode == 1:
         return False, "the branch changed Claude settings since it left " + MAIN
     if d.returncode:
-        return False, "git diff failed: " + (d.stderr or "").strip()[:120]
+        return None, "git diff failed: " + (d.stderr or "").strip()[:120]
     return True, "main's settings, untouched by the branch"
 
 
-def vet(folders: list[str], check: Callable[[str], tuple[bool, str]] = settings_match_main
-        ) -> tuple[list[str], dict[str, str]]:
-    """(folders to trust, {folder: why not}) -- only agent worktrees are checked."""
+def vet(folders: list[str], check: Callable[[str], tuple[bool | None, str]] = settings_match_main,
+        unknown: dict[str, str] | None = None) -> tuple[list[str], dict[str, str]]:
+    """(folders to trust, {folder: why not}) -- only agent worktrees are checked.
+    Folders git could not check go to `unknown` (if given) and are left as they are."""
     ok, bad = [], {}
     for f in folders:
         if is_agent_worktree(f):
             good, why = check(f)
+            if good is None:
+                if unknown is not None:
+                    unknown[f] = why
+                continue
             if not good:
                 bad[f] = why
                 continue
@@ -158,8 +177,11 @@ def trust_everywhere(folders: list[str], cfgs: list[tuple[Path, bool]] | None = 
                      check: Callable[[str], tuple[bool, str]] = settings_match_main) -> dict[str, list[str]]:
     """Trust the folders that pass `vet` and revoke the agent worktrees that do not.
     Refused folders are reported under the key "refused" as "<folder>: <why>"."""
-    ok, bad = vet(folders, check)
+    unknown: dict[str, str] = {}
+    ok, bad = vet(folders, check, unknown)
     out: dict[str, list[str]] = {}
+    if unknown:
+        out["unchecked"] = [f"{f}: {why}" for f, why in unknown.items()]
     for config, windows in (cfgs if cfgs is not None else configs()):
         try:
             changed = trust(ok, config, windows, revoke=list(bad))

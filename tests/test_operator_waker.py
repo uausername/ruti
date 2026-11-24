@@ -279,3 +279,32 @@ def test_cli_resume_at_and_cancel(tmp_path, monkeypatch):
     assert req["harness_id"] == "old" and req["status"] == "pending" and req["checkpoint"].endswith("cp.md")
     r = CliRunner().invoke(main, ["operator", "resume-at", "--cancel"])
     assert json.loads((tmp_path / "resume.json").read_text(encoding="utf-8"))["status"] == "cancelled"
+
+
+def test_ysk_store_change_is_collected_between_ticks(tmp_path, monkeypatch):
+    # Claude 2.1.330 keeps a card's text only while it is shown: look every few seconds
+    import json as _json
+    from ruti.operator import admin, waker as waker_mod
+
+    store = tmp_path / "cc-plugin-you-should-know_builtin-1.json"
+    store.write_text(_json.dumps({"sessions": []}))
+    monkeypatch.setattr(admin, "ysk_stores", lambda home=None: [store])
+    collected = []
+    monkeypatch.setattr(admin, "collect_ysk", lambda feed, stores=None: collected.append(feed) or [{}])
+    steps = []
+
+    def fake_sleep(s):
+        steps.append(s)
+        if len(steps) == 2:  # a card appears during the second slice
+            store.write_text(_json.dumps({"sessions": [{"id": "s", "view": {"line": "x", "shownAt": 1}}]}))
+            import os
+            st = store.stat()
+            os.utime(store, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+
+    w = waker_mod.Waker.__new__(waker_mod.Waker)
+    w.sleep = fake_sleep
+    w._dir = lambda: tmp_path
+    w.log = lambda *a, **k: {}
+    w._sleep_watching_ysk(20, step=5)
+    assert steps == [5, 5, 5, 5] and len(collected) == 1
+
